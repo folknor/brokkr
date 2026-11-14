@@ -177,15 +177,10 @@ pub(crate) fn create_dir_all_durable(anchor: &Path, dir: &Path) -> std::io::Resu
 /// sequence are the ones [`replace`] documents - `replace` is built on this -
 /// and so is its atomic tier.
 ///
-/// A staged write of a file a pbfhogg launch can use - a dataset download, a
-/// pbfhogg child's output - is reserved (`crate::reservations`), in one of two
-/// ways. [`Staged::stable_reserved`] holds a write reservation on the temp
-/// file and the target from construction, before any byte is written, until
-/// its commit or drop, so no launch reading or writing either is admitted
-/// meanwhile, and its rename or removal runs as that reservation is released.
-/// [`Staged::stable_keeping_for_child`] holds nothing, because the pbfhogg
-/// launch writing its temp file reserves it; its commit and drop go through
-/// the gate. Every other staged write - brokkr's own state and config files,
+/// A pbfhogg child's output is staged through
+/// [`Staged::stable_keeping_for_child`], which holds no reservation of its
+/// own, because the pbfhogg launch writing its temp file reserves it
+/// (`crate::reservations`); its commit and drop go through the gate. Every other staged write - brokkr's own state and config files,
 /// which no launch reads or writes - is plain, outside the reservation layer,
 /// so a lease store problem never stops brokkr writing its own files.
 pub(crate) struct Staged {
@@ -204,8 +199,6 @@ pub(crate) struct Staged {
 enum Mode {
     /// brokkr's own files: no reservation, no gate.
     Plain,
-    /// A write reservation on the temp file and target, released at the end.
-    Reserved(Option<crate::reservations::Hold>),
     /// The temp file is a reserved launch's output: gated commit and drop.
     ForChild,
 }
@@ -239,23 +232,6 @@ impl Staged {
     /// writing through a stale link into a live one.
     pub(crate) fn stable(path: &Path) -> std::io::Result<Self> {
         let staged = Self::with_suffix(path, "partial", true)?;
-        clear(&staged.tmp)?;
-        Ok(staged)
-    }
-
-    /// As [`stable`](Self::stable), for a file a pbfhogg launch can use (a
-    /// dataset download): reserved for writing from now until commit or drop.
-    pub(crate) fn stable_reserved(path: &Path) -> std::io::Result<Self> {
-        let mut staged = Self::with_suffix(path, "partial", true)?;
-        // Until the reservation is held, another launch may reserve the temp
-        // name, so a failure here must leave it alone.
-        staged.leave_tmp = true;
-        staged.mode = Mode::Reserved(Some(crate::reservations::hold(&[
-            &staged.tmp,
-            &staged.target,
-        ])?));
-        staged.leave_tmp = false;
-        // Under this write's own reservation, so no launch is using it.
         clear(&staged.tmp)?;
         Ok(staged)
     }
@@ -317,15 +293,6 @@ impl Staged {
     /// Where the writer puts the new bytes.
     pub(crate) fn tmp_path(&self) -> &Path {
         &self.tmp
-    }
-
-    /// The next spawn of `program` on this thread writes the temp file (a
-    /// `curl -o`): that child inherits this write's reservation, so it stays
-    /// held while the child lives, even past a brokkr killed under it.
-    pub(crate) fn lend_to_child(&self, program: &str) {
-        if let Mode::Reserved(Some(hold)) = &self.mode {
-            hold.lend_to(Path::new(program));
-        }
     }
 
     /// Make the temp file the target: carry the target's permissions over,
@@ -423,15 +390,11 @@ impl Staged {
             }
             f.sync_all()?;
             drop(f);
-            rename_at(&dir, &tmp_name, &target_name) // gate: under release_then or mutate, or Plain
+            rename_at(&dir, &tmp_name, &target_name) // gate: under mutate, or Plain
         };
         let targets = [self.tmp.as_path(), self.target.as_path()];
-        let published = match &mut self.mode {
+        let published = match &self.mode {
             Mode::Plain => publish(),
-            Mode::Reserved(hold) => match hold.take() {
-                Some(hold) => hold.release_then(&targets, publish),
-                None => crate::reservations::mutate(&targets, &[], publish),
-            },
             Mode::ForChild => crate::reservations::mutate(&targets, &[], publish),
         };
         if foreign.get() {
@@ -457,16 +420,10 @@ impl Drop for Staged {
         if self.committed || self.leave_tmp {
             return;
         }
-        // A reserved one is refused while another launch still reserves the
-        // temp file.
-        let tmp = self.tmp.clone();
-        let remove = move || std::fs::remove_file(&tmp); // gate: under release_then
-        let removed = match &mut self.mode {
+        // A child's is refused while another launch still reserves the temp
+        // file.
+        let removed = match &self.mode {
             Mode::Plain => std::fs::remove_file(&self.tmp), // gate: brokkr's own file
-            Mode::Reserved(hold) => match hold.take() {
-                Some(hold) => hold.release_then(&[self.tmp.as_path()], remove),
-                None => crate::reservations::remove_file(&self.tmp),
-            },
             Mode::ForChild => crate::reservations::remove_file(&self.tmp),
         };
         drop(removed);
@@ -697,17 +654,13 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_reserved_construction_leaves_a_held_temp_alone() {
+    fn a_refused_child_construction_leaves_a_held_temp_alone() {
         let dir = crate::test_scratch::scratch("atomic_write", "refused_hold");
         let pbf = dir.join("dk.osm.pbf");
-        let reserved_tmp = dir.join(".dk.osm.pbf.partial");
         let child_tmp = dir.join(".dk.partial.osm.pbf");
-        std::fs::write(&reserved_tmp, "theirs").unwrap();
         std::fs::write(&child_tmp, "theirs").unwrap();
-        let other = crate::reservations::hold(&[&reserved_tmp, &child_tmp]).unwrap();
-        assert!(Staged::stable_reserved(&pbf).is_err());
+        let other = crate::reservations::hold(&[&child_tmp]).unwrap();
         assert!(Staged::stable_keeping_for_child(&pbf, ".osm.pbf").is_err());
-        assert_eq!(std::fs::read_to_string(&reserved_tmp).unwrap(), "theirs");
         assert_eq!(std::fs::read_to_string(&child_tmp).unwrap(), "theirs");
         drop(other);
     }

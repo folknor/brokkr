@@ -32,9 +32,7 @@
 //! One critical section (`serialize`: a process-wide mutex and an exclusive
 //! flock on the store's serial lock) makes each scan with the admission,
 //! release or gated mutation it decides atomic, within a process and across
-//! brokkr processes, holders of the global lock or not. A staged write is a
-//! reservation too (`Hold`), lent to the child that writes it (`curl`) as a
-//! launch's lease is to its pbfhogg child.
+//! brokkr processes, holders of the global lock or not.
 //!
 //! A script-bench iteration is the one tied shape (`iteration`): an owner
 //! lease brokkr alone holds, naming the run's inputs and the iteration's
@@ -44,8 +42,8 @@
 //! (`reference/bench-resources.md`).
 //!
 //! The layer is scoped to pbfhogg and to script benches: pbfhogg's launches,
-//! the staged writes of files they use (dataset downloads, a child's output),
-//! the removals of pbfhogg scratch, verify output and worktrees, the
+//! the staged writes of a child's output, the removals of pbfhogg scratch,
+//! leftover verify output and worktrees, the
 //! iterations of a script bench of any project, and the recursive removals
 //! of every configured directory such an iteration can sit under (any
 //! project's measured scratch trees, elivagar's scratch, `tilegen_tmp` and
@@ -70,13 +68,14 @@ mod paths;
 mod store;
 
 pub(crate) use guard::{
-    check_unreserved, is_refusal, mutate, remove_dir_all, remove_file, remove_reserved_tree,
-    rename, write,
+    check_unreserved, is_refusal, mutate, remove_dir_all, remove_file, remove_reserved_tree, write,
 };
 pub(crate) use iteration::{Call, Iteration, NameArea, Names, Preview, Spool, open_input};
+#[cfg(test)]
+pub(crate) use launch::hold;
 pub(crate) use launch::{
-    Hold, LaunchSpec, Launched, PRIVATE_DIR_PLACEHOLDER, ReadHold, hold, hold_reads,
-    inherit_in_child, take_armed,
+    LaunchSpec, Launched, PRIVATE_DIR_PLACEHOLDER, ReadHold, hold_reads, inherit_in_child,
+    take_armed,
 };
 pub(crate) use store::Access;
 

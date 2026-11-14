@@ -11,9 +11,6 @@ pub(crate) mod store;
 mod types;
 mod write;
 
-#[cfg(test)]
-pub(crate) use format::fixture_row;
-pub(crate) use format::library as library_rows;
 pub use format::{
     DatasetMatcher, Sides, format_compare_with_limit, format_details, format_single_result,
     format_table,

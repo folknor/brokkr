@@ -2,30 +2,21 @@
 
 use super::validation::{
     validate_env_kv, validate_meta_filter, validate_param_filter, validate_since,
-    validate_snapshot_key_arg, validate_test_name,
+    validate_test_name,
 };
-use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 
 pub(crate) const DEFAULT_DATASET: &str = "denmark";
 pub(crate) const DEFAULT_RAW_VARIANT: &str = "raw";
 pub(crate) const DEFAULT_INDEXED_VARIANT: &str = "indexed";
-/// `check-locations`'s default variant, the name `verify all` also looks for:
-/// a LocationsOnWays file that keeps its untagged nodes, so a reference to an
-/// absent node is a failure rather than a node to agree on.
-pub(crate) const CHECK_LOCATIONS_VARIANT: &str = crate::pbfhogg::verify_all::KEEP_UNTAGGED_VARIANT;
+/// `check-locations`'s default variant: a LocationsOnWays file that keeps its
+/// untagged nodes, so a reference to an absent node is a failure rather than
+/// a node to agree on.
+pub(crate) const CHECK_LOCATIONS_VARIANT: &str = "altw-keep-untagged";
 /// `check-locations --agreement`'s default variant: the plain
 /// `add-locations-to-ways` output, which drops most untagged nodes, the nodes
 /// `--agreement` holds to their other references.
 pub(crate) const CHECK_LOCATIONS_AGREEMENT_VARIANT: &str = "altw";
-
-/// Node-index engine selection for `verify add-locations-to-ways`: one of
-/// pbfhogg's `--index-type` engines, or both.
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(crate) enum AltwMode {
-    Sparse,
-    External,
-    All,
-}
 
 /// Version banner: semver plus the short git hash (with a `-dirty` suffix for
 /// an unclean tree) and the UTC build time, stamped at compile time by
@@ -796,8 +787,7 @@ In depth: `brokkr man clippy`."
         pbf: PbfArgs,
         /// Snapshot key to read input from. Use `base` (or omit) for the
         /// dataset's primary data; pass a key registered under
-        /// `[dataset.snapshot.<key>]` for a historical snapshot (e.g. one
-        /// produced by `brokkr degrade --unsort --as-snapshot ...`).
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
         /// Pass `--force` through to pbfhogg sort (proceeds on input without
@@ -814,10 +804,7 @@ In depth: `brokkr man clippy`."
     ///   `--dedupe` runs the two-input dedupe path, the only one that
     ///     supports `--io-uring`, and takes neither `--type` nor `--clean`.
     ///
-    /// Default writes to scratch and is overwritten on each `--bench`
-    /// iteration. Pass `--as-snapshot KEY` to promote the final iteration's
-    /// artifact into the dataset graph under `pbf.indexed` (cat keeps
-    /// indexdata), e.g. a ways-only file from `--type way`.
+    /// Writes to scratch and is overwritten on each `--bench` iteration.
     #[command(name = "cat", display_order = 2)]
     Cat {
         #[command(flatten)]
@@ -843,14 +830,6 @@ In depth: `brokkr man clippy`."
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
-        /// Promote the final iteration's artifact to a snapshot under the
-        /// dataset (writes a [..snapshot.<KEY>.pbf.indexed] entry).
-        #[arg(long, value_name = "KEY")]
-        as_snapshot: Option<String>,
-        /// Overwrite an existing snapshot of the same key. Without this,
-        /// `--as-snapshot KEY` errors when KEY is already registered.
-        #[arg(long, requires = "as_snapshot")]
-        replace_snapshot: bool,
     },
     /// Tags filter. Orthogonal flags:
     ///   `--filter EXPR` - pbfhogg filter expression (default
@@ -1023,7 +1002,7 @@ In depth: `brokkr man clippy`."
         /// the `pbfhogg.WayMembers-v1` / `pbfhogg.SharedNodePins-v1` header
         /// feature strings). Forwarded verbatim to pbfhogg, which hard-errors
         /// on invalid combinations. Enriched output is osmium-incompatible by
-        /// design, so `brokkr verify add-locations-to-ways` refuses this flag.
+        /// design.
         #[arg(long)]
         inject_prepass: bool,
         /// Pass `--force` through to pbfhogg's `add-locations-to-ways`
@@ -1041,18 +1020,13 @@ In depth: `brokkr man clippy`."
         keep_untagged_nodes: bool,
         /// Snapshot key to read input from. Use `base` (or omit) for the
         /// dataset's primary data; pass a key registered under
-        /// `[dataset.snapshot.<key>]` for a historical snapshot (e.g. one
-        /// produced by `brokkr degrade --strip-locations --as-snapshot ...`).
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Re-encode a PBF with a configurable elements-per-blob cap.
     ///
-    /// Default writes to scratch and is overwritten on each `--bench`
-    /// iteration. Pass `--as-snapshot KEY` to promote the final iteration's
-    /// artifact into the dataset graph (registered under
-    /// `[<host>.datasets.<dataset>.snapshot.<KEY>.pbf.indexed]` in
-    /// brokkr.toml). `KEY=base` is reserved.
+    /// Writes to scratch and is overwritten on each `--bench` iteration.
     #[command(name = "repack", display_order = 2)]
     Repack {
         #[command(flatten)]
@@ -1068,14 +1042,6 @@ In depth: `brokkr man clippy`."
         /// Omit to use pbfhogg's default (8000).
         #[arg(long, value_name = "N")]
         elements_per_blob: Option<u32>,
-        /// Promote the final iteration's artifact to a snapshot under the
-        /// dataset (writes a [..snapshot.<KEY>.pbf.indexed] entry).
-        #[arg(long, value_name = "KEY")]
-        as_snapshot: Option<String>,
-        /// Overwrite an existing snapshot of the same key. Without this,
-        /// `--as-snapshot KEY` errors when KEY is already registered.
-        #[arg(long, requires = "as_snapshot")]
-        replace_snapshot: bool,
         /// Pass `--force` through to pbfhogg repack (skips the indexdata
         /// requirement).
         #[arg(long)]
@@ -1085,11 +1051,8 @@ In depth: `brokkr man clippy`."
     /// perturbing structure.
     ///
     /// Flags compose; pbfhogg requires at least one transformation flag and
-    /// brokkr defers to pbfhogg's own validation. Default writes to scratch
-    /// and is overwritten on each `--bench` iteration. With
-    /// `--as-snapshot KEY`, the final artifact is promoted into the dataset
-    /// graph - under `pbf.raw` when `--strip-indexdata` is set, otherwise
-    /// `pbf.indexed`.
+    /// brokkr defers to pbfhogg's own validation. Writes to scratch and is
+    /// overwritten on each `--bench` iteration.
     #[command(name = "degrade", display_order = 2)]
     Degrade {
         #[command(flatten)]
@@ -1113,15 +1076,6 @@ In depth: `brokkr man clippy`."
         /// Clear `BlobHeader.indexdata` on every OsmData blob.
         #[arg(long)]
         strip_indexdata: bool,
-        /// Promote the final iteration's artifact to a snapshot under the
-        /// dataset. Written under `pbf.raw` if `--strip-indexdata` is set,
-        /// otherwise `pbf.indexed`.
-        #[arg(long, value_name = "KEY")]
-        as_snapshot: Option<String>,
-        /// Overwrite an existing snapshot of the same key. Without this,
-        /// `--as-snapshot KEY` errors when KEY is already registered.
-        #[arg(long, requires = "as_snapshot")]
-        replace_snapshot: bool,
     },
     /// Multi-extract benchmark (N regions in one pbfhogg
     /// invocation). `--strategy` picks pbfhogg's extract algorithm
@@ -1218,8 +1172,8 @@ come from independent snapshot resolution. Use this to measure the cost of
 diffing two real weekly dumps where no blob-level byte equality is possible.
 
 The dataset's primary (legacy top-level) pbf data is referenced as `base`.
-Additional snapshots registered via `brokkr download <region> --as-snapshot <key>`
-are referenced by their snapshot key.
+Additional snapshots registered under `[dataset.snapshot.<key>]` are
+referenced by their snapshot key.
 
 Examples:
   brokkr diff-snapshots --dataset planet --from base --to 20260411 --bench 1
@@ -1301,8 +1255,8 @@ Examples:
         modes: String,
         /// Snapshot key to read input from. Use `base` (or omit) for the
         /// dataset's primary data; pass a key registered under
-        /// `[dataset.snapshot.<key>]` for a historical or re-encoded snapshot
-        /// (e.g. `repack --as-snapshot`). Lets pure decode throughput be
+        /// `[dataset.snapshot.<key>]` for a historical or re-encoded snapshot,
+        /// such as a promoted repack. Lets pure decode throughput be
         /// measured against blob count independent of any command layer.
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
@@ -1848,12 +1802,6 @@ In depth: `brokkr man measure`.",
         #[arg(long)]
         all: bool,
 
-        /// Remove only pbfhogg's verify reference cache, nothing else. Its
-        /// placed verify outputs stay, so this frees less than the cache's
-        /// logical size while they exist.
-        #[arg(long, conflicts_with_all = ["worktrees", "cargo", "archives", "all"])]
-        verify_reference: bool,
-
         /// List what would be removed without deleting anything.
         #[arg(long)]
         dry_run: bool,
@@ -2029,9 +1977,7 @@ Examples:
         #[arg(short = 'f', long)]
         force: bool,
     },
-    /// Cross-validate output against reference tools.
-    ///
-    /// In depth: `brokkr man pbfhogg`.
+    /// Verify elivagar or nidhogg output.
     #[command(display_order = 11)]
     Verify {
         /// Stream every check's full detail. Default is quiet on pass (one
@@ -2044,173 +1990,8 @@ Examples:
         #[arg(long)]
         commit: Option<String>,
 
-        /// Run every reference tool for real instead of reusing a cached
-        /// execution, and replace the cache entry with the new run.
-        #[arg(long)]
-        fresh_reference: bool,
-
         #[command(subcommand)]
         verify: VerifyCommand,
-    },
-    /// List or verify the library-use scenarios of the pbfhogg harness
-    ///
-    /// Builds the harness member `[pbfhogg.library.harness]` names, asks it
-    /// for its describe document (`--describe-harness`) and validates it.
-    /// Bare, lists each scenario with its calls, roles and assertions; with
-    /// SCENARIO, runs that scenario once as a verification, quiet on pass
-    /// and loud on fail, keeping a failed run's directory as evidence; with
-    /// SCENARIO `--bench N`, measures it as N verified processes recorded as
-    /// one group of rows; with SCENARIO `--hotpath N` or `--alloc N`,
-    /// profiles a scenario its describe marks hotpath the same way; with
-    /// `--all`, runs every scenario and certifies the capabilities
-    /// `[pbfhogg.library.require]` names, writing a certification record.
-    ///
-    /// In depth: `brokkr man library`.
-    #[command(display_order = 12)]
-    #[command(group(clap::ArgGroup::new("library_run").args(["scenario", "all"])))]
-    #[command(group(
-        clap::ArgGroup::new("library_measure")
-            .args(["bench", "hotpath", "alloc"])
-            .multiple(false)
-    ))]
-    Library {
-        /// The scenario to run, by id; omit to list them.
-        #[arg(value_name = "SCENARIO")]
-        scenario: Option<String>,
-
-        /// Run every scenario, then certify the required capabilities.
-        #[arg(long)]
-        all: bool,
-
-        /// Measure SCENARIO: COUNT whole processes, each verified, recorded
-        /// as one group of rows (bare `--bench` means the default count).
-        #[arg(
-            long,
-            num_args = 0..=1,
-            default_missing_value = DEFAULT_BENCH_RUNS,
-            value_name = "COUNT",
-            requires = "scenario",
-            conflicts_with_all = ["all", "hotpath", "alloc"]
-        )]
-        bench: Option<std::num::NonZeroUsize>,
-
-        /// Profile SCENARIO, which its describe must mark hotpath: COUNT
-        /// whole processes of a harness built with the hotpath feature, each
-        /// verified, recorded as the scenario's row with its function-level
-        /// timing (default one).
-        #[arg(
-            long,
-            num_args = 0..=1,
-            default_missing_value = DEFAULT_SINGLE_RUNS,
-            value_name = "COUNT",
-            requires = "scenario",
-            conflicts_with_all = ["all", "bench", "alloc"]
-        )]
-        hotpath: Option<std::num::NonZeroUsize>,
-
-        /// As `--hotpath`, with per-function allocation tracking (the
-        /// hotpath-alloc feature); its walls are not meaningful.
-        #[arg(
-            long,
-            num_args = 0..=1,
-            default_missing_value = DEFAULT_SINGLE_RUNS,
-            value_name = "COUNT",
-            requires = "scenario",
-            conflicts_with_all = ["all", "bench", "hotpath"]
-        )]
-        alloc: Option<std::num::NonZeroUsize>,
-
-        /// Measure on a dirty tree: the measurement runs and prints, and
-        /// stores no results row.
-        #[arg(long, requires = "library_measure")]
-        force: bool,
-
-        /// Dataset name from brokkr.toml whose files bind the scenario's
-        /// dataset roles, each in the variant the role declares. Defaults
-        /// to the shared default dataset.
-        #[arg(long, value_name = "NAME", requires = "library_run")]
-        dataset: Option<String>,
-
-        /// Snapshot key of the dataset to bind: `base` (or omit) for its
-        /// primary data, or a key under `[dataset.snapshot.<key>]`.
-        #[arg(long, value_name = "KEY", requires = "library_run")]
-        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
-
-        /// Build the harness with the dev profile (`<target>/debug/`).
-        /// Overrides `[pbfhogg.library.harness] debug`.
-        #[arg(long, conflicts_with = "release")]
-        debug: bool,
-
-        /// Build the harness with the release profile, the default.
-        /// Overrides `[pbfhogg.library.harness] debug`.
-        #[arg(long)]
-        release: bool,
-
-        /// Build the harness under this cargo profile: `dev`, `release` or
-        /// a custom `[profile.<name>]`. Overrides
-        /// `[pbfhogg.library.harness] profile`/`debug`.
-        #[arg(long, value_name = "NAME", value_parser = crate::build::RustProfile::parse,
-              conflicts_with_all = ["debug", "release"])]
-        profile: Option<crate::build::RustProfile>,
-
-        /// Build the harness from a git worktree at REF instead of the
-        /// current tree. Config still comes from the current tree.
-        #[arg(long, value_name = "REF")]
-        commit: Option<String>,
-
-        /// Check the invocation and stop before any scenario runs. The
-        /// scenarios are the harness's to declare, so this builds the harness
-        /// as the run would (in the --commit worktree, with the profile and
-        /// any profiling feature) and reads its describe document; it then
-        /// finds the scenario, checks profiling, binds every dataset role and
-        /// for --all the requirement list. Builds no CLI, stores nothing.
-        #[arg(long, requires = "library_run")]
-        dry_run: bool,
-    },
-    /// Download a dataset from Geofabrik or planet.openstreetmap.org
-    #[command(display_order = 20)]
-    Download {
-        /// Region name or Geofabrik path (e.g. denmark, europe/france, asia/japan/kanto)
-        region: String,
-
-        /// Download OSC diffs up to this sequence number
-        #[arg(long)]
-        osc_seq: Option<u64>,
-
-        /// Register the download as an additional snapshot of an existing
-        /// dataset rather than (re-)populating the dataset's primary entry.
-        ///
-        /// Requires the dataset to already exist (run `brokkr download <region>`
-        /// first to create the primary entry). The snapshot key must match
-        /// `[a-zA-Z0-9_-]+` and cannot be `base` (reserved for the dataset's
-        /// legacy/primary data).
-        ///
-        /// Files are written with snapshot-specific names and registered under
-        /// `[<host>.datasets.<region>.snapshot.<key>]` in `brokkr.toml`.
-        #[arg(long, value_parser = validate_snapshot_key_arg, conflicts_with = "refresh")]
-        as_snapshot: Option<String>,
-
-        /// Rotate the dataset to a newer upstream snapshot. Archives the
-        /// existing primary pbf/osc data into a `[snapshot.<key>]` block
-        /// (key derived from download_date or file mtime), then downloads
-        /// the new PBF and resets the OSC chain. HEAD-checks upstream
-        /// `Last-Modified` first and no-ops if the upstream isn't newer
-        /// (use `--force` to rotate anyway).
-        ///
-        /// Mutually exclusive with `--as-snapshot`.
-        #[arg(long, conflicts_with = "as_snapshot")]
-        refresh: bool,
-
-        /// Force `--refresh` to rotate even when the upstream Last-Modified
-        /// header is not newer than the existing pbf.raw's mtime. Use when
-        /// the heuristic gets it wrong (e.g. file mtime was touched by an
-        /// rsync, or you want to re-download for some other reason).
-        ///
-        /// Only meaningful with `--refresh`. Clap rejects it on plain
-        /// `download` and `download --as-snapshot` to avoid silently
-        /// ignoring a flag the user explicitly typed.
-        #[arg(long, requires = "refresh")]
-        force: bool,
     },
     /// Compare feature counts between two PMTiles archives
     #[command(display_order = 30)]
@@ -3371,297 +3152,15 @@ impl PbfArgs {
     }
 }
 
-/// The input PBF a pbfhogg verify subcommand cross-validates, shared by every
-/// one of them.
-///
-/// `--input <path>` is the escape hatch for handcrafted fixtures that no
-/// real-world dataset exercises (e.g. overlapping-blob PBFs from
-/// `pbfhogg/examples/`). When set, dataset / variant resolution is
-/// skipped and the path is used directly. Mutually exclusive with
-/// user-provided `--dataset` / `--variant` (their defaults still
-/// populate the struct, but clap's `conflicts_with` only triggers on
-/// user-supplied flags).
-#[derive(Args, Clone)]
-pub(crate) struct VerifyInputArgs {
-    /// Dataset name from brokkr.toml
-    #[arg(long, default_value = DEFAULT_DATASET, conflicts_with = "input")]
-    pub(crate) dataset: String,
-    /// PBF variant to use (e.g. raw, indexed, altw)
-    #[arg(long, default_value = DEFAULT_INDEXED_VARIANT, conflicts_with = "input")]
-    pub(crate) variant: String,
-    /// Path to a handcrafted input PBF (skips dataset resolution).
-    /// Mutually exclusive with `--dataset` / `--variant`.
-    #[arg(long, value_name = "PATH")]
-    pub(crate) input: Option<std::path::PathBuf>,
-    /// Snapshot key whose PBF to cross-validate. Use `base` (or omit) for
-    /// the dataset's primary data; pass a key registered under
-    /// `[dataset.snapshot.<key>]` for a historical or adversarial encoding
-    /// (e.g. one produced by `brokkr degrade --unsort --as-snapshot` or
-    /// `brokkr repack --as-snapshot`). Mutually exclusive with `--input`.
-    #[arg(long, conflicts_with = "input")]
-    pub(crate) snapshot: Option<crate::datasets::resolve::SnapshotRef>,
-}
-
-/// The input plus `--direct-io`, for the verify subcommands whose command
-/// under test takes it. (Verify doesn't take `--io-uring` or `--compression` -
-/// different surface than `PbfArgs`, hence a separate struct.) `check-refs`
-/// takes [`VerifyInputArgs`] alone.
-#[derive(Args, Clone)]
-pub(crate) struct VerifyPbfArgs {
-    #[command(flatten)]
-    pub(crate) source: VerifyInputArgs,
-    /// Pass --direct-io to every run of the pbfhogg command under test;
-    /// fixture builders, references and comparisons run buffered (`brokkr
-    /// man pbfhogg verify-subcommands`; under `all`, check-refs runs without
-    /// it). Verify builds pbfhogg with the host's configured features and
-    /// does not enable linux-direct-io itself
-    #[arg(long)]
-    pub(crate) direct_io: bool,
-}
-
-/// Where the change files of an OSC-only verify subcommand come from: a
-/// dataset's registered OSCs, through the same snapshot rule as the
-/// change-consuming checks (a named snapshot with its own `osc` table, else
-/// the dataset's primary chain). Neither subcommand taking it offers
-/// `--direct-io`: pbfhogg refuses it for `merge-changes` and an OSC
-/// `tags-filter`.
-#[derive(Args, Clone)]
-pub(crate) struct VerifyOscArgs {
-    /// Dataset name from brokkr.toml
-    #[arg(long, default_value = DEFAULT_DATASET)]
-    pub(crate) dataset: String,
-    /// Snapshot key whose OSC table to read; `base` (or omitted), or a
-    /// snapshot without one, reads the dataset's primary chain
-    #[arg(long)]
-    pub(crate) snapshot: Option<crate::datasets::resolve::SnapshotRef>,
-    /// OSC sequence number from brokkr.toml (needed when several are
-    /// registered)
-    #[arg(long)]
-    pub(crate) osc_seq: Option<String>,
-}
-
 #[derive(Subcommand)]
 pub(crate) enum VerifyCommand {
-    /// Cross-validate sort against osmium sort
-    #[command(display_order = 0)]
-    Sort {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-    },
-    /// Cross-validate cat (type filters) against osmium cat
-    #[command(display_order = 1)]
-    Cat {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-    },
-    /// Cross-validate extract (every strategy, on the bbox and on each
-    /// dataset polygon) against osmium extract
-    #[command(display_order = 2)]
-    Extract {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-        /// Bounding box; without it, the dataset's. Optional when the
-        /// dataset configures a polygon
-        #[arg(long)]
-        bbox: Option<crate::datasets::Bbox>,
-    },
-    /// Cross-validate multi-extract (single-pass vs sequential), on strips
-    /// and, with dataset polygons, on strips and polygons together
-    #[command(name = "multi-extract", display_order = 2)]
-    MultiExtract {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-        #[arg(long)]
-        bbox: Option<crate::datasets::Bbox>,
-        /// Number of non-overlapping bbox regions
-        #[arg(long, default_value_t = crate::pbfhogg::commands::DEFAULT_MULTI_EXTRACT_REGIONS)]
-        regions: usize,
-    },
-    /// Cross-validate tags-filter against osmium tags-filter
-    #[command(display_order = 3)]
-    TagsFilter {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-    },
-    /// Cross-validate getid, getid --invert and getid --add-referenced
-    /// (plain and --remove-tags) against osmium getid
-    #[command(display_order = 4, visible_alias = "getid")]
-    GetidRemoveid {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-    },
-    /// Cross-validate getparents, plain and --add-self, against osmium
-    /// getparents, one request per element kind and one of every kind
-    #[command(display_order = 4)]
-    Getparents {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-    },
-    /// Cross-validate add-locations-to-ways against osmium
-    #[command(display_order = 5)]
-    AddLocationsToWays {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-        /// Which node-index engines to verify. `all` runs sparse and external
-        /// and also requires them to agree on full element records.
-        #[arg(long, value_enum, default_value = "all")]
-        mode: AltwMode,
-        /// Accepted only so the refusal is explicit: enriched (injected-prepass)
-        /// output is osmium-incompatible by design (BlobHeader field 5 headers
-        /// run ~1-8 KB; libosmium 2.23 rejects any BlobHeader over 127 bytes,
-        /// their issue 405). brokkr cannot cross-validate it against osmium, so
-        /// passing this flag errors with a pointer to flag-off verify. Enriched
-        /// correctness is covered by pbfhogg's own oracle-roundtrip + backend
-        /// parity suite.
-        #[arg(long)]
-        inject_prepass: bool,
-    },
-    /// Cross-validate check --refs against osmium check-refs
-    ///
-    /// Takes no --direct-io: pbfhogg refuses it under check --refs alone
-    /// (exit 64, since pbfhogg 930ddfc9), where no selected check reads it.
-    #[command(display_order = 6)]
-    CheckRefs {
-        #[command(flatten)]
-        pbf: VerifyInputArgs,
-    },
-    /// Cross-validate check --ids, plain and --full, against osmium fileinfo
-    /// and the input's indexdata claims, on the input, copies derived from
-    /// it and fixed fixtures
-    #[command(display_order = 6)]
-    CheckIds {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-    },
-    /// Cross-validate repack at the default cap, cap 3000 and cap 64000, and
-    /// the input stripped of indexdata with --force, against osmium diff of
-    /// the input and repack's documented block layout
-    #[command(display_order = 6)]
-    Repack {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-    },
-    /// Cross-validate degrade's decode path (--strip-locations, --drop-ids,
-    /// --unsort, --unsort-intra) against osmium diff of the input, the
-    /// documented block layout and each unsort swap's position
-    #[command(display_order = 6)]
-    Degrade {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-    },
-    /// Cross-validate apply-changes against osmium/osmosis/osmconvert
-    ///
-    /// The OSC comes from the snapshot's own OSC table when `--snapshot`
-    /// names one that has it, and from the dataset's primary chain otherwise
-    /// (encoding-only snapshots).
-    #[command(display_order = 7)]
-    Merge {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-        #[arg(long, conflicts_with = "osc")]
-        osc_seq: Option<String>,
-        /// Path to a handcrafted change file (skips OSC resolution), the
-        /// partner of `--input` for a fixture whose base and diff are built
-        /// together.
-        #[arg(long, value_name = "PATH")]
-        osc: Option<std::path::PathBuf>,
-        /// Run both tools with `--locations-on-ways` and hold pbfhogg's output
-        /// to `pbfhogg check --locations` (every way's inline coordinates
-        /// match its nodes' records). Needs a LocationsOnWays base that keeps
-        /// its untagged nodes. osmosis and osmconvert are skipped.
-        #[arg(long)]
-        locations_on_ways: bool,
-    },
-    /// Cross-validate merge-changes, default and --simplify, against
-    /// osmium's reading of its inputs, the documented merge and osmium
-    /// merge-changes -s, on the inputs, the inputs twice and fixtures
-    ///
-    /// The inputs are one registered OSC (`--osc-seq`, or the only one), a
-    /// registered range (`--osc-range LO..HI`, merged in sequence order), or
-    /// handcrafted change files (`--osc PATH`, repeated, in the given
-    /// order). Takes no --direct-io: pbfhogg refuses it for merge-changes.
-    #[command(name = "merge-changes", display_order = 7)]
-    MergeChanges {
-        #[command(flatten)]
-        osc_source: VerifyOscArgs,
-        /// OSC sequence range LO..HI (inclusive), every sequence registered
-        #[arg(long, conflicts_with_all = ["osc_seq", "osc"])]
-        osc_range: Option<crate::config::OscRange>,
-        /// Path to a handcrafted change file (skips OSC resolution); repeat
-        /// for several, merged in the given order
-        #[arg(long, value_name = "PATH", conflicts_with = "osc_seq")]
-        osc: Vec<std::path::PathBuf>,
-    },
-    /// Cross-validate tags-filter --input-kind osc against osmium
-    /// tags-filter -R on osmium's reading of the change file
-    ///
-    /// Takes no --direct-io: pbfhogg refuses it for an OSC tags-filter.
-    #[command(name = "tags-filter-osc", display_order = 7)]
-    TagsFilterOsc {
-        #[command(flatten)]
-        osc_source: VerifyOscArgs,
-        /// Path to a handcrafted change file (skips OSC resolution)
-        #[arg(long, value_name = "PATH", conflicts_with = "osc_seq")]
-        osc: Option<std::path::PathBuf>,
-    },
-    /// Cross-validate diff --format osc roundtrip against osmium
-    ///
-    /// The OSC comes from the snapshot's own OSC table when `--snapshot`
-    /// names one that has it, and from the dataset's primary chain otherwise
-    /// (encoding-only snapshots).
-    #[command(display_order = 8)]
-    DeriveChanges {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-        #[arg(long)]
-        osc_seq: Option<String>,
-    },
-    /// Cross-validate renumber against osmium renumber
-    #[command(display_order = 9)]
-    Renumber {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-        /// Comma-separated starting IDs (forwarded to both pbfhogg and osmium)
-        #[arg(long = "start-id", value_name = "IDS")]
-        start_id: Option<String>,
-        /// Print detail from the diff log when mismatches are found
-        #[arg(long)]
-        verbose: bool,
-    },
-    /// Cross-validate diff's listing, detail and summary against osmium's content
-    ///
-    /// The OSC comes from the snapshot's own OSC table when `--snapshot`
-    /// names one that has it, and from the dataset's primary chain otherwise
-    /// (encoding-only snapshots).
-    #[command(display_order = 10)]
-    Diff {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-        #[arg(long)]
-        osc_seq: Option<String>,
-    },
-    /// Run all verify commands sequentially
-    ///
-    /// The OSC-consuming checks take the OSC from the snapshot's own OSC
-    /// table when `--snapshot` names one that has it, and from the dataset's
-    /// primary chain otherwise (encoding-only snapshots).
-    #[command(display_order = 11)]
-    All {
-        #[command(flatten)]
-        pbf: VerifyPbfArgs,
-        #[arg(long)]
-        osc_seq: Option<String>,
-        #[arg(long)]
-        bbox: Option<crate::datasets::Bbox>,
-    },
-
     /// Verify PMTiles output integrity
     ///
     /// Addresses the durable output store through the same
     /// `[--dataset D] [--variant V] [--commit H | --file P]` resolver as
     /// `pmtiles-inspect`/`diag`/`svg`/`regress`. It reads the archive with the
     /// current binary, so `--commit` picks which file to open, not which
-    /// toolchain to build - unlike `brokkr verify --commit` on the pbfhogg
+    /// toolchain to build - unlike `brokkr verify --commit` on the nidhogg
     /// subcommands. `--file` is the escape hatch for archives that are not
     /// dataset output at all, such as the world artifact
     /// `data/ocean-tiles.pmtiles`.

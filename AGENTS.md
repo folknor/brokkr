@@ -27,8 +27,6 @@ The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bar
 - `docs/commands/bench.md` - `brokkr bench NAME`: running a script bench, its builtins, what a run stores.
 - `docs/commands/measure.md` - `--bench`/`--hotpath`/`--alloc`/`--stop`, the sidecar profiler, `brokkr sidecar`.
 - `docs/commands/output-channels.md` - where a run's output goes.
-- `docs/commands/library.md` - pbfhogg `brokkr library`.
-- `reference/library-internals.md` - how the library harness consumer is built. Read before changing `src/pbfhogg/library/`.
 - `reference/bench-store.md` - the store of script-bench runs and the results server wire contract. Read before changing `src/bench/store/`.
 - `reference/results-server.md` - how `brokkr-results-server` is built. Read before changing `src/bin/results_server/`. Running it: `docs/results-server.md`.
 - `reference/bench-resources.md` - what a script-bench iteration owns: leases, admission, handles, placement. Read before changing `src/reservations/iteration.rs` or `src/bench/resources.rs`.
@@ -59,7 +57,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `lock`, `strays [--kill]`, `guard [--install|--remove]`, `kill [--hard]` - lock status and process hygiene.
 - `sidecar <uuid>` - sidecar profiler data.
 - `fmt` - locked `cargo fmt` wrapper.
-- Project-specific: `corpus-results`, `mogwai`, `hotpath`, `library`, `pmtiles-stats`, `pmtiles-corpus`, `ocean-build` - see the project docs.
+- Project-specific: `corpus-results`, `mogwai`, `hotpath`, `pmtiles-stats`, `pmtiles-corpus`, `ocean-build` - see the project docs.
 
 ## Conventions
 

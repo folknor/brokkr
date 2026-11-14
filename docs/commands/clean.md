@@ -2,13 +2,7 @@
 
 ```
 brokkr clean [--worktrees] [--cargo [PKG]] [--archives [--keep N]] [--all] [--dry-run]
-brokkr clean --verify-reference [--dry-run]
 ```
-
-`--verify-reference` removes pbfhogg's verify reference cache and nothing
-else. The verify outputs placed from it are hard links that stay, so it frees
-less than the cache's logical size while they exist. To keep the cache
-bounded instead, set `verify_reference_budget` (`brokkr man config`).
 
 Remove the scratch and temporary files a brokkr project accumulates. Runs in
 any project; what it finds is project-shaped, but the rule it follows is not.
@@ -56,7 +50,7 @@ The measurement stores are never removed, by any flag combination:
 | `$XDG_DATA_HOME/brokkr/bench.db` | every attempted script-bench run, all projects |
 | `.brokkr/piners/corpus/runs.db` | the corpus run store, source of truth |
 | `.brokkr/ratatoskr/gate.db` | the gate baselines |
-| `.brokkr/library-certifications/` | `brokkr library --all` certification records |
+| `.brokkr/library-certifications/` | certification records an earlier brokkr's library verification wrote; small, and nothing writes them any more |
 | `.brokkr/bench/` | `brokkr crit`'s criterion baselines + their environment stamps |
 | `$XDG_DATA_HOME/brokkr/sidecar-backups/` | durable profiler backups |
 
@@ -84,7 +78,6 @@ No flag removes these either. What keeps each in check, where anything does:
 | --- | --- |
 | `.brokkr/check-logs/` | each new log prunes its kind to the newest 10, best effort; a single log's size is not capped. The `bench-` logs `brokkr crit` wrote under its old name are no longer any kind's, so nothing prunes them |
 | `.brokkr/accounting/` | each new check run prunes to the newest 10, itself among them, best effort; a plan or journal's size is not capped |
-| `.brokkr/verify-reference/` | `verify_reference_budget` per host (`brokkr man config`), applied when each verify ends; absent, nothing; `--verify-reference` removes it whole |
 | `$XDG_DATA_HOME/brokkr/history.db` | nothing: every invocation, never pruned |
 | `$XDG_DATA_HOME/brokkr/bench.db` | nothing: every attempted run with its evidence, never pruned |
 | `<scratch>/bench-iterations/` | each script-bench iteration's directory goes with its lease, at its end or, after a crash, once nothing holding its reservation runs; the empty container stays |
@@ -100,11 +93,10 @@ Some files exist only while their writer runs, and a writer killed with
 SIGKILL leaves them behind. These, made only by commands that hold the brokkr
 lock, are removed by store maintenance (`src/maintenance.rs`) the next time
 dispatch takes a fresh hold for a command whose spec locks (`check`, `test`,
-`build`, `run`, `clean`, `verify` and the measured commands; not `crit`,
+`build`, `run`, `clean`, `verify` (elivagar and nidhogg) and the measured commands; not `crit`,
 `fmt` or `env`, which lock inside their own handler), before that command
 does anything, with one line saying how many went and the allocated bytes
-observed. `clean --dry-run` only lists them, and `clean --verify-reference`
-leaves them alone:
+observed. `clean --dry-run` only lists them:
 
 - `~/.brokkr/harness/<pid>-<nanos>-<n>/`, a `check` or `test` harness session.
 - `.brokkr/nextest-synth.<pid>-<n>.toml` and
@@ -130,7 +122,7 @@ Nothing sweeps these, and they can accumulate:
 
 Bare `brokkr clean`, in order:
 
-- `<target>/verify` - verify output (pbfhogg).
+- `<target>/verify` - verify output a pbfhogg verify of an earlier brokkr left.
 - `<target>/rustflags-*` - the per-sweep isolated target dirs a
   `rustflags`-carrying `[[check]]` entry builds into. Reproducible caches
   nothing else reaches. Taken from cargo's real resolved target dir, not a
@@ -154,19 +146,18 @@ Bare `brokkr clean`, in order:
   bench/hotpath PBF, OSC and diff text outputs, `multi-extract/`, the `geocode-<dataset>/`
   dirs for configured datasets, merged-PBF cache names constructed from
   configured PBF/OSC entries.
-  Its removals of pbfhogg's verify output and scratch go through the
+  Its removals of pbfhogg's leftover verify output and scratch go through the
   reservation gate, so a path a running pbfhogg launch still uses is named,
   kept and skipped while the rest of the clean goes on, and a tree holding a
   `.pbfhogg-backup-*` is never removed; it also removes the fixed-name
   `.brokkr-pbfhogg/` directories an older brokkr left in scratch and the
   data dir, where a killed child's staging can be a whole PBF. The run
-  directories a failed `brokkr library` run kept
+  directories a failed run of the retired `brokkr library` kept
   (`<scratch>/library/<scenario>/run-N/`) go each through the gate, so one
   an orphaned harness still holds stays alone, and a scenario directory left
   empty goes with them; the brokkr lock clean holds is what protects a live
   run between its launches. Other pbfhogg scratch files survive.
-- **Sidecar marker FIFOs**, every project: in `.brokkr/`, where measured and
-  `brokkr library` runs make them. A FIFO is removed only when its name has the
+- **Sidecar marker FIFOs**, every project: in `.brokkr/`, where measured runs make them. A FIFO is removed only when its name has the
   reserved `.sidecar-<token>.fifo` shape, it is a FIFO, and no process holds
   its read end (a non-blocking write open is refused with `ENXIO`); clean
   never parses the token. A live brokkr always holds its FIFO's read end, and
@@ -182,8 +173,7 @@ Bare `brokkr clean`, in order:
   feature-unification and fixture-lint targets, `<target>/unify-*` and
   `<target>/fixture-*` under cargo's resolved target root, which nothing
   else removes, `.brokkr/artifacts/` (the `brokkr build` snapshots), and
-  pbfhogg's `.brokkr/verify-reference/` (the verify reference cache, see
-  "Reference cache" in `docs/projects/pbfhogg.md`), through the reservation
+  the leftover `.brokkr/verify-reference/` cache, through the reservation
   gate; then, for litehtml, `.brokkr/prepare-cache/` and
   `.brokkr/litehtml-capture/` (the staging a Chrome capture is written to
   before it is published into `fixtures/<id>/`; the published references are
@@ -211,7 +201,7 @@ No clean runs after an interrupted command (Ctrl-C, `brokkr kill`). A sweep
 there would run after the command released the brokkr lock, while another
 brokkr may already be using the same paths, and the routine set holds what
 runs keep on purpose for later: hung-test snapshots, the run directories of
-failed corpus, ratatoskr and library runs, an elivagar archive whose
+failed corpus and ratatoskr runs, an elivagar archive whose
 promotion failed, caches. Instead a measured attempt that a stop ends
 discards its own scratch output as it unwinds, still under its hold
 (`src/measure/runner.rs`): the plan's scratch directories, pbfhogg's command
@@ -219,8 +209,7 @@ output, elivagar's partial archive and `tilegen_tmp`, and an external tool's
 declared outputs. It does so only once a preparation has cleared those
 paths, and never for a stop during promotion, after execution completed; a
 path it cannot remove is named and kept. Other disposable working state an
-interrupted command leaves on disk (an unmeasured command's output, a
-verify's output) sits under a fixed name its next run clears, or goes with
+interrupted command leaves on disk (an unmeasured command's output) sits under a fixed name its next run clears, or goes with
 the next `brokkr clean`. What a stop records on purpose stays: the partial
 sidecar data under `dirty`, the history entry, and every retained
 diagnostic above.

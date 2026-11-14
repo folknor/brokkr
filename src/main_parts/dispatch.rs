@@ -95,23 +95,16 @@ pub(super) fn run(
     // A fresh hold's maintenance phase, before the command does anything:
     // what killed brokkr commands left goes now, and nothing this one makes
     // can be swept. `clean --dry-run` removes nothing, so maintenance only
-    // reports, and `clean --verify-reference` touches only that cache, so it
-    // leaves the phase unused.
+    // reports.
     if let Some(phase) = _lock
         .as_ref()
         .and_then(lockfile::LockGuard::take_maintenance)
     {
         let mode = match &cli.command {
-            Command::Clean {
-                verify_reference: true,
-                ..
-            } => None,
-            Command::Clean { dry_run: true, .. } => Some(crate::maintenance::Mode::Report),
-            _ => Some(crate::maintenance::Mode::Apply),
+            Command::Clean { dry_run: true, .. } => crate::maintenance::Mode::Report,
+            _ => crate::maintenance::Mode::Apply,
         };
-        if let Some(mode) = mode {
-            crate::maintenance::run(phase, mode, state_root.map(project::ProjectRoot::as_path));
-        }
+        crate::maintenance::run(phase, mode, state_root.map(project::ProjectRoot::as_path));
     }
     // Every detected tree is carried, active policy or not: activation also
     // recovers a cargo config a crashed run left filtered, which must happen
@@ -1102,7 +1095,6 @@ fn run_project(
             archives,
             keep,
             all,
-            verify_reference,
             dry_run,
         } => {
             let _lock = context::reenter_command_lock()?;
@@ -1131,7 +1123,6 @@ fn run_project(
                     worktrees: worktrees || all,
                     archives: archives || all,
                     keep,
-                    verify_reference_only: verify_reference,
                     dry_run,
                 },
             )
@@ -1139,16 +1130,14 @@ fn run_project(
         Command::Verify {
             verbose,
             commit,
-            fresh_reference,
             verify,
         } => {
             let features = resolve_features(dev_config, &[]);
             output::set_quiet(!verbose);
-            crate::pbfhogg::verify_reference::set_fresh(fresh_reference);
             // `verify pmtiles` only reads an archive, with the current binary,
             // so it belongs to the resolver family (pmtiles-inspect/diag/svg/
-            // regress) rather than to the pbfhogg cross-validators: no
-            // historical worktree, and its own `--commit` picks the file. It
+            // regress): no historical worktree, and its own `--commit` picks
+            // the file. It
             // takes the same non-blocking lock they do, so it cannot read an
             // archive a concurrent `tilegen` is mid-write.
             if matches!(verify, VerifyCommand::ElivVerify { .. }) {
@@ -1170,7 +1159,6 @@ fn run_project(
                     detection.config_sources.included(),
                     verify,
                     &features,
-                    verbose,
                 );
             }
             with_worktree(
@@ -1190,110 +1178,8 @@ fn run_project(
                         detection.config_sources.included(),
                         verify,
                         &features,
-                        verbose,
                     )
                 },
-            )
-        }
-        Command::Library {
-            scenario,
-            all,
-            bench,
-            hotpath,
-            alloc,
-            force,
-            dataset,
-            snapshot,
-            debug,
-            release,
-            profile,
-            commit,
-            dry_run,
-        } => {
-            use crate::measure::MeasureMode;
-            use crate::pbfhogg::library::Target;
-            // Clap admits at most one of the three.
-            let mode = bench
-                .map(|runs| MeasureMode::Bench { runs })
-                .or(hotpath.map(|runs| MeasureMode::Hotpath { runs }))
-                .or(alloc.map(|runs| MeasureMode::Alloc { runs }));
-            let library = project_config.pbfhogg_library()?;
-            let profile = profile_choice(debug, release, profile.as_ref());
-            let target = match &scenario {
-                Some(id) => Some(Target::One(id)),
-                None if all => Some(Target::All),
-                None => None,
-            };
-            // Host paths are config alone, so a `--commit` run asks the live
-            // tree nothing before its worktree exists.
-            let paths = match &target {
-                Some(_) => Some(context::bootstrap_config(
-                    dev_config,
-                    &detection.project_root,
-                )?),
-                None => None,
-            };
-            let dataset = dataset.as_deref().unwrap_or(crate::cli::DEFAULT_DATASET);
-            let run = match (target, &paths) {
-                (Some(target), Some(paths)) => Some(crate::pbfhogg::library::RunArgs {
-                    target,
-                    dataset,
-                    snapshot: crate::datasets::resolve::SnapshotRef::from_opt(snapshot.as_ref()),
-                    paths,
-                }),
-                _ => None,
-            };
-            with_worktree(
-                Some(project),
-                &detection.project_root,
-                &detection.build_root,
-                commit.as_deref(),
-                false,
-                &crate::tree_policy::TreePolicy::of(dev_config),
-                context::worktree_keep(dev_config)?,
-                |build_root| {
-                    crate::pbfhogg::library::library(&crate::pbfhogg::library::LibraryArgs {
-                        project_root,
-                        build_root: build_root.as_path(),
-                        harness: &library.harness,
-                        require: library.require.as_ref(),
-                        config_files: &dev_config.included_config_files,
-                        commit: commit.as_deref(),
-                        profile,
-                        run,
-                        measure: mode.map(|mode| crate::pbfhogg::library::MeasureArgs {
-                            mode,
-                            force,
-                            dev_config,
-                            project_root: &detection.project_root,
-                            build_root,
-                            invocation,
-                        }),
-                        dry_run,
-                    })
-                },
-            )
-        }
-        Command::Download {
-            region,
-            osc_seq,
-            as_snapshot,
-            refresh,
-            force,
-        } => {
-            let _lock = context::reenter_command_lock()?;
-            // The binary build, the downloads and the osmium/pbfhogg steps are
-            // all captured children that poll the shutdown flag.
-            let _interrupts = crate::shutdown::SigtermGuard::install();
-            pbfhogg::cmd::download(
-                dev_config,
-                &detection.project_root,
-                &detection.build_root,
-                &region,
-                osc_seq,
-                as_snapshot.as_deref(),
-                refresh,
-                force,
             )
         }
         Command::CompareTiles {

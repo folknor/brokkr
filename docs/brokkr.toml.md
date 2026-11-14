@@ -35,12 +35,9 @@ reads the ones that apply to it:
   and stays in the composed config a script's `config()` sees; dellingr
   benchmarks through `[bench.*]` (`docs/brokkr.toml.bench.md`)
 - `[mogwai]` and `[mogwai.targets.*]` -> `docs/projects/mogwai.md`
-- `[pbfhogg.library]`, `[pbfhogg.library.harness]` and
-  `[pbfhogg.library.require]` -> `docs/commands/library.md` (`brokkr man
-  library`)
 
 For project-specific CLI flags that adjust dataset resolution or cargo
-features (`--snapshot`, `--as-snapshot`, `--direct-io`, `--io-uring`,
+features (`--snapshot`, `--direct-io`, `--io-uring`,
 `--compression`, `--locations-on-ways`) see `docs/projects/pbfhogg.md` -
 those are pbfhogg-only.
 
@@ -194,9 +191,8 @@ resolves beside its target.
 naming the file that included it, as is a cycle, or a file reached twice (its
 `[[array]]` entries would be counted twice).
 
-**Where brokkr writes.** Dataset registration (`download`, `--as-snapshot`,
-`--refresh`) edits the file that defines `[<host>.datasets.<name>]`, located
-from the composed config's per-table provenance. A dataset not registered
+**Where brokkr writes.** A write to `[<host>.datasets.<name>]` edits the file
+that defines it, located from the composed config's per-table provenance. A dataset not registered
 anywhere yet goes into the file that already holds that host's datasets, when
 that is one file, and into `brokkr.toml` otherwise. A dataset table split across
 two files is refused: editing one half would leave a mixture.
@@ -216,7 +212,6 @@ scratch = "data/scratch"
 output = "data/tilegen"   # durable tilegen output store (map-data projects)
 target = "target"
 worktree_keep = 6         # persistent --commit worktrees kept before LRU eviction
-verify_reference_budget = "50G"  # pbfhogg verify reference cache, kept most recent first
 port = 3033
 drives.source = "nvme"
 drives.data = "ssd"
@@ -251,7 +246,7 @@ resembles a misspelled section. Datasets are host-scoped (no global
 `[datasets]` section). Path resolution: host config -> defaults (`data/`,
 `data/scratch/`, `data/tilegen/`), from the config alone. `target` is read by
 `brokkr env`'s storage report and by `brokkr clean`, which looks for pbfhogg's
-verify output under it; absent, both use cargo's target dir. Builds always
+leftover verify output under it; absent, both use cargo's target dir. Builds always
 use cargo's. `output` is the durable
 tilegen output store (map-data projects): `ArchiveStore` admits each successful
 tilegen archive as `<output>/<dataset>-<variant>-<commit>.pmtiles` (the
@@ -304,11 +299,9 @@ section, while the `strip_rustflags = [...]` array, the `[[lint_sweep]]` and
 "dir"` and `bench_tests = "dir"` strings and the `bench_scripts_exempt =
 [...]` list (`brokkr man bench-config`) are brokkr's.
 
-`pbfhogg` is brokkr's only as a table holding `library`: such a table, as the
-composed config has it, is the pbfhogg project section (belonging to
-`project = "pbfhogg"` and holding nothing but `library`), and any other
-`[pbfhogg]` table is the hostname section it always was. A host table could
-never hold `library`, so the claim changes no config that loads.
+`[pbfhogg]` is an ordinary hostname section, like any other host name. The
+former `[pbfhogg.library]` claim (harness and require tables) is retired: a
+leftover `[pbfhogg.library]` fails to load as an unknown host field.
 
 ## `worktree_keep`
 
@@ -390,32 +383,9 @@ the commit's name. Such a run fails with the worktree's path; `brokkr clean
 
 ## `verify_reference_budget`
 
-```toml
-[plantasjen]
-verify_reference_budget = "50G"
-```
-
-The retained size of pbfhogg's verify reference cache
-(`.brokkr/verify-reference/`), as bytes or with an `M` or `G` suffix. Absent,
-no entry is ever evicted, as before the key existed. Per host because the
-disk is a host property.
-
-It is applied once each `brokkr verify` ends, on every exit including a
-failed or interrupted check, while that verify still holds the lock: the most
-recently used entries that fit stay, recency being the time an entry was last
-published or hit, and the rest go, including an entry larger than the budget
-on its own; `"0"` keeps none. Nothing is evicted during the run, so the entry
-a check is about to place from never goes. A lowered budget therefore takes
-effect at the next verify, whether its references hit or miss.
-
-The budget counts the logical bytes the entries' manifests record. It is a
-budget on retained cache artifacts, not a disk bound: a check's outputs are
-hard links to an entry's artifacts, so evicting an entry frees little while
-those outputs exist, and a placement across filesystems is a copy that the
-budget never sees. An eviction renames the entry aside before removing it, so
-one cut short by a second interrupt is cleared at the next verify; a failed
-eviction is a warning, never the verify's result. `brokkr clean
---verify-reference` removes the whole cache instead.
+Retired. It bounded pbfhogg's verify reference cache, which no command writes
+any more. A host that still sets it loads, and nothing reads the value.
+`brokkr clean` removes a cache an earlier brokkr left behind.
 
 ## `disable_toolchain`
 

@@ -19,7 +19,6 @@
 mod compare;
 mod dataset;
 mod details;
-pub(crate) mod library;
 mod single;
 mod table;
 

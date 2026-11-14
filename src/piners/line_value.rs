@@ -7,9 +7,7 @@
 //! a repeated key's last value inserted into the same `serde_json::Map`, as
 //! the `Value` deserializer does - and records the path of every key that repeats within
 //! its object, at any depth, so the report parser can refuse a record the
-//! harness did not write once. The library harness's strict reader
-//! (`crate::pbfhogg::library`) keeps duplicates in its own tree instead, but
-//! that tree drops float values a harness line needs for storage.
+//! harness did not write once.
 
 use std::cell::RefCell;
 use std::fmt;

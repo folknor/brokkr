@@ -48,11 +48,6 @@ impl Bbox {
         })
     }
 
-    /// Original bbox spelling, retained for pbfhogg argv and diagnostics.
-    pub fn as_str(&self) -> &str {
-        &self.source
-    }
-
     /// pbfhogg's single-token bbox option. Keeping the `=` is required when
     /// the west longitude begins with `-`.
     pub fn to_pbfhogg_arg(&self) -> String {

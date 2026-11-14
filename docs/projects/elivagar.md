@@ -117,8 +117,7 @@ sibling config blocks as A/B arms.
 
 ## download-ocean
 
-Fetches the ocean polygon dataset used by tile generation. Follows a similar
-pattern to pbfhogg's `download` but is elivagar-specific.
+Fetches the ocean polygon dataset used by tile generation.
 
 ## ocean-build
 
@@ -196,7 +195,7 @@ store survives a routine `brokkr clean`; only the deep clean (`brokkr clean
 --worktrees`) reclaims it. These subcommands only read the file - the current
 release binary can inspect output built by any commit, so `--commit` picks
 which file to open, not which binary to build (no historical worktree rebuild,
-unlike `brokkr verify --commit` on the pbfhogg cross-validators). All four
+unlike `brokkr verify --commit` on nidhogg's checks). All four
 take the blocking brokkr command lock, as `regress` does, because each
 wrapper builds elivagar with Cargo and the lock serializes those build
 shapes. Tilegen writes to scratch and then promotes its finished archive,
@@ -227,9 +226,8 @@ sat under the `Command::Verify` worktree wrapper, where `--commit` meant
 "rebuild that binary" rather than "open that archive". `run()` in
 `src/main_parts/dispatch.rs` now dispatches this one variant *before*
 `with_worktree` and rejects the outer `brokkr verify --commit` with a message
-pointing at the subcommand flag; the rest of `VerifyCommand` (pbfhogg's
-cross-validators, which genuinely do compare a historical binary against a
-reference tool) still runs inside the worktree.
+pointing at the subcommand flag; the rest of `VerifyCommand` (nidhogg's
+checks) still runs inside the worktree.
 
 ## Output regression: regress (tier-3 attribution)
 

@@ -145,20 +145,11 @@ pub enum OutputKind {
     None,
 }
 
-/// Variant-specific output routing for snapshot promotion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromotionVariant {
-    Indexed,
-    Raw,
-    Unsupported,
-}
-
 /// Facts that must stay aligned with a command's argv behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandDescriptor {
     pub id: &'static str,
     pub output: OutputKind,
-    pub promotion_variant: PromotionVariant,
 }
 
 /// Which build-args flavor to produce. The command arguments are shared;
@@ -342,15 +333,6 @@ impl ExtractStrategy {
             Self::Smart => Some("--smart"),
         }
     }
-
-    /// osmium's name for the equivalent extraction strategy.
-    pub fn osmium_name(self) -> &'static str {
-        match self {
-            Self::Simple => "simple",
-            Self::Complete => "complete_ways",
-            Self::Smart => "smart",
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -404,7 +386,7 @@ fn bench_ids(
 /// their run directory lands beside the output, removed on completion and
 /// left by a killed child; the flag probe cannot tell the two apart, and
 /// that loss is accepted. Builds before c97b9985 lack the flag and make
-/// none. The typed command and `verify merge-changes` both ask here.
+/// none.
 pub(crate) fn merge_changes_spills(inputs: usize, simplify: bool, jobs: Option<usize>) -> bool {
     inputs > 1 && !simplify && jobs != Some(1)
 }
@@ -430,7 +412,7 @@ fn canonical_bbox(bbox: &Bbox) -> String {
 /// counted at least this often would still be printed.
 pub(crate) const INSPECT_ALL_TAGS_MIN_COUNT: &str = "999999999";
 
-/// Default `verify multi-extract` region count, shared with the CLI schema.
+/// Default multi-extract region count.
 pub const DEFAULT_MULTI_EXTRACT_REGIONS: usize = 5;
 
 // ---------------------------------------------------------------------------
@@ -577,16 +559,15 @@ impl PbfhoggCommand {
     /// Describe command identity and output routing in one match.
     pub fn descriptor(&self) -> CommandDescriptor {
         use OutputKind::{None, ScratchDir, ScratchOsc, ScratchPbf, ScratchText};
-        use PromotionVariant::{Indexed, Raw, Unsupported};
-        let (id, output, promotion_variant) = match self {
-            Self::Inspect { .. } => ("inspect", None, Unsupported),
-            Self::CheckRefs { .. } => ("check-refs", None, Unsupported),
-            Self::CheckIds { .. } => ("check-ids", None, Unsupported),
-            Self::CheckIndex => ("check-index", None, Unsupported),
-            Self::CheckLocations { .. } => ("check-locations", None, Unsupported),
-            Self::Digest { .. } => ("digest", None, Unsupported),
-            Self::Sort => ("sort", ScratchPbf, Indexed),
-            Self::Cat(_) => ("cat", ScratchPbf, Indexed),
+        let (id, output) = match self {
+            Self::Inspect { .. } => ("inspect", None),
+            Self::CheckRefs { .. } => ("check-refs", None),
+            Self::CheckIds { .. } => ("check-ids", None),
+            Self::CheckIndex => ("check-index", None),
+            Self::CheckLocations { .. } => ("check-locations", None),
+            Self::Digest { .. } => ("digest", None),
+            Self::Sort => ("sort", ScratchPbf),
+            Self::Cat(_) => ("cat", ScratchPbf),
             Self::TagsFilter { input, .. } => (
                 "tags-filter",
                 if matches!(input, TagsFilterInput::Osc) {
@@ -594,56 +575,45 @@ impl PbfhoggCommand {
                 } else {
                     ScratchPbf
                 },
-                Unsupported,
             ),
-            Self::Getid { .. } => ("getid", ScratchPbf, Indexed),
-            Self::Getparents => ("getparents", ScratchPbf, Indexed),
-            Self::Renumber => ("renumber", ScratchPbf, Indexed),
-            Self::MergeChanges { .. } => ("merge-changes", ScratchOsc, Unsupported),
-            Self::ApplyChanges => ("apply-changes", ScratchPbf, Indexed),
-            Self::AddLocationsToWays => ("add-locations-to-ways", ScratchPbf, Indexed),
-            Self::TimeFilter => ("time-filter", ScratchPbf, Indexed),
+            Self::Getid { .. } => ("getid", ScratchPbf),
+            Self::Getparents => ("getparents", ScratchPbf),
+            Self::Renumber => ("renumber", ScratchPbf),
+            Self::MergeChanges { .. } => ("merge-changes", ScratchOsc),
+            Self::ApplyChanges => ("apply-changes", ScratchPbf),
+            Self::AddLocationsToWays => ("add-locations-to-ways", ScratchPbf),
+            Self::TimeFilter => ("time-filter", ScratchPbf),
             Self::Diff {
                 format: DiffFormat::Default,
-            } => ("diff", ScratchText, Unsupported),
+            } => ("diff", ScratchText),
             Self::Diff {
                 format: DiffFormat::Osc,
-            } => ("diff", ScratchOsc, Unsupported),
+            } => ("diff", ScratchOsc),
             Self::DiffSnapshots {
                 format: DiffFormat::Default,
-            } => ("diff-snapshots", ScratchText, Unsupported),
+            } => ("diff-snapshots", ScratchText),
             Self::DiffSnapshots {
                 format: DiffFormat::Osc,
-            } => ("diff-snapshots", ScratchOsc, Unsupported),
-            Self::Repack { .. } => ("repack", ScratchPbf, Indexed),
-            Self::Degrade {
-                strip_indexdata: true,
-                ..
-            } => ("degrade", ScratchPbf, Raw),
-            Self::Degrade { .. } => ("degrade", ScratchPbf, Indexed),
+            } => ("diff-snapshots", ScratchOsc),
+            Self::Repack { .. } => ("repack", ScratchPbf),
+            Self::Degrade { .. } => ("degrade", ScratchPbf),
             Self::BuildGeocodeIndex => (
                 "build-geocode-index",
                 ScratchDir {
                     name: "geocode",
                     dataset_suffix: true,
                 },
-                Unsupported,
             ),
-            Self::Extract { .. } => ("extract", ScratchPbf, Indexed),
+            Self::Extract { .. } => ("extract", ScratchPbf),
             Self::MultiExtract { .. } => (
                 "multi-extract",
                 ScratchDir {
                     name: "multi-extract",
                     dataset_suffix: false,
                 },
-                Unsupported,
             ),
         };
-        CommandDescriptor {
-            id,
-            output,
-            promotion_variant,
-        }
+        CommandDescriptor { id, output }
     }
 
     /// The command ID string used in CLI and result DB.
@@ -1543,8 +1513,8 @@ pub(crate) struct MultiExtractConfig {
     pub(crate) reads: Vec<PathBuf>,
 }
 
-/// Encode multi-extract regions for a resolved output path. Both the measured
-/// command and `verify multi-extract` use serde_json for escaping. A bbox
+/// Encode multi-extract regions for a resolved output path, through
+/// serde_json for escaping. A bbox
 /// region is written as its coordinates, a polygon as a `polygon_file` entry
 /// naming its absolute path, so pbfhogg's relative-path rule never applies.
 pub(crate) fn multi_extract_config(

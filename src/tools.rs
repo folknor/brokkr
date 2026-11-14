@@ -4,7 +4,6 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::civil_date::CivilDate;
 use crate::error::DevError;
 use crate::output;
 use crate::preflight::{Sha256, Xxh128};
@@ -22,11 +21,6 @@ pub struct PlanetilerRuntime {
 
 /// pbfhogg's planetiler read baseline, the Java source under the build root.
 pub(crate) const PLANETILER_BENCH_SOURCE: &str = "bench/planetiler-baseline/BenchPbfRead.java";
-
-pub struct OsmosisTools {
-    pub osmosis: PathBuf,
-    pub java_home: PathBuf,
-}
 
 /// pbfhogg's osmpbf comparison baseline: a standalone crate excluded from
 /// the workspace, at this path under the build root.
@@ -133,8 +127,6 @@ const JDK_RELEASE: &str = "jdk-25.0.4.1+1";
 const JDK_ARCHIVE_VERSION: &str = "25.0.4.1_1";
 const PLANETILER_RELEASE: &str = "v0.10.2";
 const PLANETILER_SHA256: &str = "f310bd0413e2e4512b27f4046d418664e8e1d3bf31603c2a70e23de06c167e4d";
-const OSMOSIS_VERSION: &str = "0.49.2";
-const OSMOSIS_SHA256: &str = "2a23a7bf7499a0727ae6987cf66fcafc03b37379dc02177c730f352bd67a0b97";
 const TILEMAKER_COMMIT: &str = "facdf933f4f5ac2944a9d65c27970270583d68fa";
 const SHORTBREAD_COMMIT: &str = "9ec009826b49b71bb1481a1c28c3681766c600e3";
 
@@ -153,85 +145,6 @@ pub fn ensure_planetiler_runtime(data_dir: &Path) -> Result<PlanetilerRuntime, D
         java,
         planetiler_jar,
     })
-}
-
-/// Ensure JDK + Osmosis are ready for merge verification.
-pub fn ensure_osmosis(data_dir: &Path) -> Result<OsmosisTools, DevError> {
-    check_curl()?;
-
-    let java_home = data_dir.join("jdk");
-    ensure_jdk(data_dir)?;
-
-    let osmosis = ensure_osmosis_binary(data_dir)?;
-
-    Ok(OsmosisTools { osmosis, java_home })
-}
-
-// ---------------------------------------------------------------------------
-// Osmosis
-// ---------------------------------------------------------------------------
-
-fn ensure_osmosis_binary(data_dir: &Path) -> Result<PathBuf, DevError> {
-    let osmosis_dir = data_dir.join("osmosis");
-    let version_file = data_dir.join(".osmosis-version");
-    let osmosis_bin = osmosis_dir.join("bin/osmosis");
-    let marker = format!("{OSMOSIS_VERSION}\n{OSMOSIS_SHA256}\n");
-
-    // A changed checksum pin invalidates the installed cache as well as a
-    // version bump.
-    if osmosis_bin.exists()
-        && let Ok(cached) = fs::read_to_string(&version_file)
-        && cached == marker
-    {
-        return Ok(osmosis_bin);
-    }
-
-    let download_url = format!(
-        "https://github.com/openstreetmap/osmosis/releases/download/{OSMOSIS_VERSION}/osmosis-{OSMOSIS_VERSION}.tar"
-    );
-
-    // The release asset has no published digest, so this pin carries the
-    // reviewed SHA-256 beside its version.
-    let tarball = data_dir.join("osmosis-download.tar");
-    output::verify_msg(&format!("downloading Osmosis {OSMOSIS_VERSION}"));
-    fetch_verified(&download_url, &tarball, Some(OSMOSIS_SHA256))?;
-
-    // Extract into a sibling staging directory. The release archive has a
-    // versioned top-level directory and is an uncompressed tar file.
-    let extract_dir = data_dir.join("osmosis-extract");
-    if extract_dir.exists() {
-        fs::remove_dir_all(&extract_dir)?;
-    }
-    fs::create_dir_all(&extract_dir)?;
-    let tarball_str = tarball.display().to_string();
-    let extract_dir_str = extract_dir.display().to_string();
-    let captured = output::run_captured(
-        "tar",
-        &["xf", &tarball_str, "-C", &extract_dir_str],
-        data_dir,
-    )?;
-    captured.check_success("tar")?;
-
-    let unpacked = extract_dir.join(format!("osmosis-{OSMOSIS_VERSION}"));
-    if !unpacked.join("bin/osmosis").is_file() {
-        return Err(DevError::Config(format!(
-            "Osmosis {OSMOSIS_VERSION} archive has no bin/osmosis"
-        )));
-    }
-
-    // Replace the old version only after the pinned archive was verified and
-    // extracted successfully.
-    replace_directory(&unpacked, &osmosis_dir, &data_dir.join("osmosis-old"))?;
-    fs::remove_dir_all(&extract_dir)?;
-
-    // Write version file.
-    fs::write(&version_file, marker)?;
-
-    // Clean up tarball.
-    fs::remove_file(&tarball).ok();
-
-    output::verify_msg(&format!("installed Osmosis {OSMOSIS_VERSION}"));
-    Ok(osmosis_bin)
 }
 
 // ---------------------------------------------------------------------------
@@ -626,15 +539,7 @@ pub(crate) fn run_curl(args: &[&str], cwd: &Path) -> Result<Vec<u8>, DevError> {
 /// the daily-regenerated ocean archives. What is guaranteed is that `dest` is
 /// absent or a complete transfer.
 pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
-    download_file_inner(url, dest, None, false)
-}
-
-/// [`download_file`] for a dataset a pbfhogg launch reads: the staged write
-/// is reserved (`crate::reservations`) and curl, its writer, carries the
-/// reservation, so no launch reads the file while it is written, even past a
-/// brokkr killed under the transfer.
-pub(crate) fn download_dataset_file(url: &str, dest: &Path) -> Result<(), DevError> {
-    download_file_inner(url, dest, None, true)
+    download_file_inner(url, dest, None)
 }
 
 /// Download a versioned archive and verify its pinned XXH128 before it is
@@ -647,27 +552,20 @@ pub(crate) fn download_file_verified(
     let expected: Xxh128 = expected_xxh128
         .parse()
         .map_err(|error| DevError::Config(format!("invalid XXH128 pin: {error}")))?;
-    download_file_inner(url, dest, Some(expected), false)
+    download_file_inner(url, dest, Some(expected))
 }
 
 fn download_file_inner(
     url: &str,
     dest: &Path,
     expected_xxh128: Option<Xxh128>,
-    reserved: bool,
 ) -> Result<(), DevError> {
     // Download to a staged sibling and rename on success, so a partial file
     // never sits at `dest` to block future retries. The stable `.partial`
     // name (not a per-process one) means a killed multi-gigabyte transfer is
     // overwritten by the retry instead of leaked; downloads run under the
     // global lock, so no second writer shares it.
-    let staged = if reserved {
-        let staged = crate::atomic_write::Staged::stable_reserved(dest)?;
-        staged.lend_to_child("curl");
-        staged
-    } else {
-        crate::atomic_write::Staged::stable(dest)?
-    };
+    let staged = crate::atomic_write::Staged::stable(dest)?;
     let tmp_str = staged.tmp_path().display().to_string();
     let _activity = crate::lockfile::activity::Activity::begin(format!("download {url}"));
 
@@ -739,115 +637,6 @@ fn fetch_verified(url: &str, dest: &Path, sha256: Option<&str>) -> Result<(), De
 fn sha256_file(path: &Path) -> Result<Sha256, DevError> {
     let file = fs::File::open(path)?;
     Sha256::from_reader(file).map_err(DevError::Io)
-}
-
-/// Result of an HTTP HEAD request to a URL. Used by `download::run_refresh`
-/// to detect upstream newness without fetching the full PBF.
-pub(crate) struct HeadResponse {
-    /// `Last-Modified` header parsed as Unix epoch seconds, if present and parseable.
-    /// Refresh compares this against the on-disk mtime of the existing PBF to
-    /// decide whether to rotate.
-    pub last_modified_unix: Option<i64>,
-}
-
-/// HEAD a URL via `curl -fIL` and parse the `Last-Modified` header.
-///
-/// Returns `Ok(HeadResponse { last_modified_unix: None })` when the request
-/// succeeds but no `Last-Modified` header is present (or it can't be parsed).
-/// Errors only when the HEAD request itself fails (e.g. 404, network error).
-pub(crate) fn head_url(url: &str) -> Result<HeadResponse, DevError> {
-    // A HEAD carries no body, so unlike the downloads it can take a hard cap:
-    // a server that accepts the connection and never answers fails in 60s.
-    let output = crate::output::child::command_output(
-        crate::process::spawn::ChildPolicy::plain_command("curl")
-            .args(["--connect-timeout", "30", "--max-time", "60"])
-            .args(CURL_RETRY_ARGS)
-            .args(["-fsIL", url]),
-    )
-    .map_err(|error| DevError::Spawn {
-        program: "curl".into(),
-        error,
-    })?;
-
-    if !output.status.success() {
-        return Err(DevError::Subprocess {
-            program: "curl".into(),
-            ending: crate::error::ProcessEnding::from_status(&output.status),
-            stderr: format!(
-                "HEAD request failed for {url}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-        });
-    }
-
-    // Parse the headers. With `-L`, redirects are followed and we get multiple
-    // header blocks separated by blank lines - we want the LAST one (the final
-    // resource). Look for `Last-Modified:` case-insensitively.
-    let body = String::from_utf8_lossy(&output.stdout);
-    let last_modified = body
-        .lines()
-        .filter_map(|l| {
-            let mut parts = l.splitn(2, ':');
-            let name = parts.next()?.trim();
-            let value = parts.next()?.trim();
-            name.eq_ignore_ascii_case("last-modified").then_some(value)
-        })
-        .next_back()
-        .map(parse_http_date)
-        .and_then(Result::ok);
-
-    Ok(HeadResponse {
-        last_modified_unix: last_modified,
-    })
-}
-
-/// Parse an HTTP-date string (RFC 7231 IMF-fixdate format) into Unix epoch
-/// seconds. Returns `Err` if the format isn't recognized.
-///
-/// Only supports the IMF-fixdate format (`"Sun, 06 Nov 1994 08:49:37 GMT"`)
-/// which is the canonical form per RFC 7231 §7.1.1.1 - what every modern
-/// origin server emits. Doesn't support the obsolete RFC 850 or asctime forms.
-fn parse_http_date(s: &str) -> Result<i64, String> {
-    // Format: "Day, DD Mon YYYY HH:MM:SS GMT"
-    // Example: "Tue, 11 Apr 2026 12:34:56 GMT"
-    let parts: Vec<&str> = s.split_whitespace().collect();
-    if parts.len() != 6 {
-        return Err(format!("expected six parts: '{s}'"));
-    }
-    if parts[5] != "GMT" {
-        return Err(format!(
-            "expected GMT timezone in '{s}', found '{}'",
-            parts[5]
-        ));
-    }
-    let day: u32 = parts[1].parse().map_err(|e| format!("day: {e}"))?;
-    let month: u32 = match parts[2] {
-        "Jan" => 1,
-        "Feb" => 2,
-        "Mar" => 3,
-        "Apr" => 4,
-        "May" => 5,
-        "Jun" => 6,
-        "Jul" => 7,
-        "Aug" => 8,
-        "Sep" => 9,
-        "Oct" => 10,
-        "Nov" => 11,
-        "Dec" => 12,
-        other => return Err(format!("unknown month: {other}")),
-    };
-    let year: i32 = parts[3].parse().map_err(|e| format!("year: {e}"))?;
-    let time_parts: Vec<&str> = parts[4].split(':').collect();
-    if time_parts.len() != 3 {
-        return Err(format!("bad time: '{}'", parts[4]));
-    }
-    let hour: u32 = time_parts[0].parse().map_err(|e| format!("hour: {e}"))?;
-    let minute: u32 = time_parts[1].parse().map_err(|e| format!("minute: {e}"))?;
-    let second: u32 = time_parts[2].parse().map_err(|e| format!("second: {e}"))?;
-
-    let date = CivilDate::new(year, month, day).ok_or_else(|| format!("invalid date: '{s}'"))?;
-    date.to_unix_seconds(hour, minute, second)
-        .ok_or_else(|| format!("invalid time: '{}'", parts[4]))
 }
 
 // ---------------------------------------------------------------------------
@@ -1080,21 +869,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_http_date_imf_fixdate() {
-        // Sun, 06 Nov 1994 08:49:37 GMT - the canonical example from RFC 7231.
-        let unix = parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT").unwrap();
-        assert_eq!(unix, 784111777);
-    }
-
-    #[test]
-    fn parse_http_date_modern() {
-        // Sat, 11 Apr 2026 12:34:56 GMT
-        let unix = parse_http_date("Sat, 11 Apr 2026 12:34:56 GMT").unwrap();
-        // Cross-check: 2026-04-11T12:34:56Z = 1775910896
-        assert_eq!(unix, 1775910896);
-    }
-
-    #[test]
     fn jdk_marker_pins_the_exact_release() {
         assert!(jdk_marker_matches(&jdk_marker("digest-a"), "digest-a"));
         assert!(!jdk_marker_matches(&jdk_marker("digest-a"), "digest-b"));
@@ -1129,9 +903,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_http_date_rejects_garbage() {
-        assert!(parse_http_date("not a date").is_err());
-        assert!(parse_http_date("Sun, 06 XYZ 1994 08:49:37 GMT").is_err());
-    }
 }

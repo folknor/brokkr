@@ -1,13 +1,5 @@
 //! Parse-time validation of command-line values.
 
-/// Validate `--as-snapshot` key: matches `[a-zA-Z0-9_-]+` and is not the
-/// reserved sentinel `base`. Delegates to `config::validate_snapshot_key`
-/// so the parse-time and CLI-time rules stay in sync.
-pub(super) fn validate_snapshot_key_arg(s: &str) -> Result<String, String> {
-    crate::config::validate_snapshot_key(s)?;
-    Ok(s.to_owned())
-}
-
 /// Validate `--meta key=value`: must contain exactly one `=`. Both sides may
 /// be empty (the empty-value case is legitimate for filtering rows where the
 /// stored value is the empty string).
@@ -156,7 +148,7 @@ mod tests {
         clippy::useless_vec
     )]
     use super::*;
-    use crate::cli::{Cli, Command, VerifyCommand};
+    use crate::cli::{Cli, Command};
     use clap::Parser;
 
     /// `Cli::try_parse_from` on a thread with the main thread's stack. An
@@ -175,10 +167,10 @@ mod tests {
 
     /// `brokkr bench --dry-run` reads only, so it takes no lock and writes no
     /// run log, and `--dry-run` after NAME is no option of brokkr's; so do
-    /// listing, `NAME --help` and a refused NAME or param. A run, and
-    /// `brokkr library --dry-run`, which builds, keep the command's lock.
+    /// listing, `NAME --help` and a refused NAME or param. A run keeps the
+    /// command's lock.
     #[test]
-    fn a_bench_dry_run_takes_no_lock_and_a_library_one_does() {
+    fn a_bench_dry_run_takes_no_lock() {
         use crate::cli::{CommandId, CommandSpec, LockPolicy};
         let dir = crate::test_scratch::scratch("cli_validation", "bench_reads_only");
         std::fs::write(
@@ -225,17 +217,6 @@ mod tests {
                 "{argv:?} runs"
             );
         }
-        let library = parse(["brokkr", "library", "cat", "--dry-run"]).unwrap();
-        assert!(matches!(
-            library.command,
-            Command::Library { dry_run: true, .. }
-        ));
-        assert!(!CommandSpec::reads_only(&library.command, benches));
-        assert!(CommandId::Library.spec().lock_for(false) == LockPolicy::Blocking);
-        assert!(
-            parse(["brokkr", "library", "--dry-run"]).is_err(),
-            "it needs a scenario"
-        );
     }
 
     /// `brokkr bench`: brokkr's options before NAME, and nothing after NAME
@@ -518,241 +499,6 @@ mod tests {
         assert!(
             parsed.is_err(),
             "--profile + --no-default-features should conflict"
-        );
-    }
-
-    #[test]
-    fn verify_sort_accepts_input_path() {
-        let parsed = parse([
-            "brokkr",
-            "verify",
-            "sort",
-            "--input",
-            "fixtures/overlapping.osm.pbf",
-        ])
-        .expect("parse");
-        let Command::Verify { verify, .. } = parsed.command else {
-            panic!("expected Verify");
-        };
-        let VerifyCommand::Sort { pbf } = verify else {
-            panic!("expected Verify::Sort");
-        };
-        assert_eq!(pbf.source.dataset, crate::cli::DEFAULT_DATASET);
-        assert!(!pbf.direct_io);
-        assert_eq!(
-            pbf.source
-                .input
-                .as_deref()
-                .map(std::path::Path::display)
-                .map(|d| d.to_string()),
-            Some("fixtures/overlapping.osm.pbf".to_owned())
-        );
-    }
-
-    #[test]
-    fn verify_sort_input_conflicts_with_dataset() {
-        let parsed = parse([
-            "brokkr",
-            "verify",
-            "sort",
-            "--input",
-            "x.pbf",
-            "--dataset",
-            "denmark",
-        ]);
-        assert!(parsed.is_err(), "--input + --dataset should conflict");
-    }
-
-    #[test]
-    fn verify_sort_input_conflicts_with_variant() {
-        let parsed = parse([
-            "brokkr",
-            "verify",
-            "sort",
-            "--input",
-            "x.pbf",
-            "--variant",
-            "raw",
-        ]);
-        assert!(parsed.is_err(), "--input + --variant should conflict");
-    }
-
-    #[test]
-    fn verify_renumber_accepts_input_path() {
-        let parsed =
-            parse(["brokkr", "verify", "renumber", "--input", "fixtures/x.pbf"]).expect("parse");
-        let Command::Verify { verify, .. } = parsed.command else {
-            panic!("expected Verify");
-        };
-        let VerifyCommand::Renumber { pbf, .. } = verify else {
-            panic!("expected Verify::Renumber");
-        };
-        assert!(pbf.source.input.is_some());
-    }
-
-    /// `--input` conflicts with an explicit `--snapshot` through the nested
-    /// flatten too, and on the subcommands that take the input alone.
-    #[test]
-    fn verify_input_conflicts_hold_through_every_flatten() {
-        for argv in [
-            [
-                "brokkr",
-                "verify",
-                "sort",
-                "--input",
-                "x.pbf",
-                "--snapshot",
-                "base",
-            ],
-            [
-                "brokkr",
-                "verify",
-                "all",
-                "--input",
-                "x.pbf",
-                "--variant",
-                "raw",
-            ],
-            [
-                "brokkr",
-                "verify",
-                "check-refs",
-                "--input",
-                "x.pbf",
-                "--dataset",
-                "d",
-            ],
-            [
-                "brokkr",
-                "verify",
-                "renumber",
-                "--input",
-                "x.pbf",
-                "--snapshot",
-                "base",
-            ],
-            [
-                "brokkr",
-                "verify",
-                "diff",
-                "--input",
-                "x.pbf",
-                "--variant",
-                "raw",
-            ],
-        ] {
-            let rendered = argv.join(" ");
-            let Err(err) = parse(argv) else {
-                panic!("{rendered} should conflict");
-            };
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::ArgumentConflict,
-                "{rendered}"
-            );
-        }
-    }
-
-    /// `--direct-io` is on the verify subcommands whose command under test
-    /// takes it, `all` included, and absent from check-refs alone (pbfhogg
-    /// refuses it under check --refs alone).
-    #[test]
-    fn verify_direct_io_is_offered_only_where_forwarded() {
-        for sub in [
-            "sort",
-            "all",
-            "derive-changes",
-            "renumber",
-            "diff",
-            "check-ids",
-            "getparents",
-            "repack",
-            "degrade",
-        ] {
-            let parsed = parse(["brokkr", "verify", sub, "--direct-io"]).expect(sub);
-            let Command::Verify { verify, .. } = parsed.command else {
-                panic!("expected Verify");
-            };
-            let pbf = match verify {
-                VerifyCommand::Sort { pbf }
-                | VerifyCommand::All { pbf, .. }
-                | VerifyCommand::DeriveChanges { pbf, .. }
-                | VerifyCommand::Renumber { pbf, .. }
-                | VerifyCommand::Diff { pbf, .. }
-                | VerifyCommand::CheckIds { pbf }
-                | VerifyCommand::Getparents { pbf }
-                | VerifyCommand::Repack { pbf }
-                | VerifyCommand::Degrade { pbf } => pbf,
-                _ => panic!("unexpected verify subcommand for {sub}"),
-            };
-            assert!(pbf.direct_io, "{sub}");
-        }
-        for sub in ["check-refs", "merge-changes", "tags-filter-osc"] {
-            let Err(err) = parse(["brokkr", "verify", sub, "--direct-io"]) else {
-                panic!("verify {sub} --direct-io should be refused");
-            };
-            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{sub}");
-        }
-    }
-
-    #[test]
-    fn verify_merge_changes_takes_one_source_of_change_files() {
-        let parsed = parse([
-            "brokkr",
-            "verify",
-            "merge-changes",
-            "--osc",
-            "a.osc",
-            "--osc",
-            "b.osc.gz",
-        ])
-        .expect("repeated --osc");
-        let Command::Verify { verify, .. } = parsed.command else {
-            panic!("expected Verify");
-        };
-        let VerifyCommand::MergeChanges { osc, osc_range, .. } = verify else {
-            panic!("expected merge-changes");
-        };
-        assert_eq!(osc.len(), 2);
-        assert!(osc_range.is_none());
-        let parsed = parse([
-            "brokkr",
-            "verify",
-            "merge-changes",
-            "--osc-range",
-            "4705..4712",
-        ])
-        .expect("--osc-range");
-        let Command::Verify { verify, .. } = parsed.command else {
-            panic!("expected Verify");
-        };
-        assert!(matches!(
-            verify,
-            VerifyCommand::MergeChanges {
-                osc_range: Some(_),
-                ..
-            }
-        ));
-        for argv in [
-            &["--osc-seq", "4705", "--osc-range", "4705..4706"][..],
-            &["--osc-seq", "4705", "--osc", "a.osc"],
-            &["--osc-range", "4705..4706", "--osc", "a.osc"],
-        ] {
-            let mut full = vec!["brokkr", "verify", "merge-changes"];
-            full.extend_from_slice(argv);
-            assert!(parse(full).is_err(), "{argv:?} should conflict");
-        }
-        assert!(
-            parse([
-                "brokkr",
-                "verify",
-                "tags-filter-osc",
-                "--osc-seq",
-                "4705",
-                "--osc",
-                "a.osc"
-            ])
-            .is_err()
         );
     }
 

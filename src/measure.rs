@@ -749,13 +749,12 @@ fn config_for(config: &BenchConfig, invocation: &Invocation<'_>) -> BenchConfig 
 mod argv;
 pub use argv::format_cli_args;
 pub(crate) use argv::{
-    Executable, ExternalTool, Invocation, ResolvedExecutable, Supervised, Timed, TimedCapture,
+    Executable, ExternalTool, Invocation, ResolvedExecutable,
 };
 pub(crate) mod capture;
 pub(crate) mod execution;
 pub(crate) mod kv;
 mod record;
-pub(crate) use record::{Filing, GroupRow};
 pub(crate) mod wall;
 
 #[cfg(test)]

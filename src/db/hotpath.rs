@@ -4,8 +4,7 @@
 //! JSON report that hotpath-instrumented binaries write to
 //! `HOTPATH_OUTPUT_PATH`. The env vars brokkr sets on the child are
 //! `HOTPATH_METRICS_SERVER_OFF=true`, `HOTPATH_OUTPUT_FORMAT=json`, and
-//! `HOTPATH_OUTPUT_PATH` - see `BenchHarness::capture_hotpath_into`, and for
-//! a library harness `LibraryHarness::run`.
+//! `HOTPATH_OUTPUT_PATH` - see `BenchHarness::capture_hotpath_into`.
 //!
 use std::collections::BTreeMap;
 
@@ -13,8 +12,7 @@ use super::{HotpathData, HotpathFunction, HotpathThread, KvKey, KvPair, Percenti
 
 /// Convert a hotpath JSON report (from the hotpath crate) into a `HotpathData` struct.
 ///
-/// Used by `capture_hotpath_into`, the library harness's profile reader and
-/// the v2→v3 migration.
+/// Used by `capture_hotpath_into` and the v2→v3 migration.
 pub fn hotpath_data_from_json(extra: &serde_json::Value) -> Option<HotpathData> {
     let obj = extra.as_object()?;
 

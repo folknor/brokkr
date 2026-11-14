@@ -61,7 +61,6 @@ mod measure_dispatch;
 mod mogwai;
 mod nidhogg;
 mod oom;
-mod osc;
 mod output;
 mod passthrough_cmd;
 mod pbfhogg;

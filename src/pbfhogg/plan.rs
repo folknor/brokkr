@@ -83,7 +83,6 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         &self,
         req: &MeasureRequest<'_>,
     ) -> Result<Option<crate::build::BuildConfig>, DevError> {
-        preflight_as_snapshot(self.command, req, self.params)?;
         let io = resolve_io_features(self.command, self.params)?;
         let mut features = req.build_features();
         features.extend(io);
@@ -100,7 +99,6 @@ impl PlannedCommand for PbfhoggPlan<'_> {
     ) -> Result<CommandPlan<PbfhoggState, CommandArgv>, DevError> {
         let binary = match target {
             PlanTarget::DryRun => {
-                preflight_as_snapshot(self.command, req, self.params)?;
                 resolve_io_features(self.command, self.params)?;
                 None
             }
@@ -312,17 +310,9 @@ impl PlannedCommand for PbfhoggPlan<'_> {
     fn finish(
         &self,
         req: &MeasureRequest<'_>,
-        ctx: &MeasurementSession,
+        _ctx: &MeasurementSession,
         plan: &CommandPlan<PbfhoggState, CommandArgv>,
     ) -> Result<(), DevError> {
-        promote_artifact(
-            self.command,
-            &plan.state.ctx,
-            arg_mode(req),
-            &ctx.paths,
-            req.project_root.as_path(),
-            req.variant,
-        )?;
         cleanup_output(self.command, &plan.state.ctx, arg_mode(req))
     }
 }
@@ -336,43 +326,6 @@ fn arg_mode(req: &MeasureRequest<'_>) -> ArgMode {
     } else {
         ArgMode::Bench
     }
-}
-
-/// Pre-flight validation for `--as-snapshot KEY`: bootstrap config (cheap;
-/// cargo metadata + brokkr.toml parse, no compile) and check that KEY is a
-/// valid snapshot key and either unused or `--replace-snapshot` was passed.
-/// No-op when `as_snapshot` is unset.
-fn preflight_as_snapshot(
-    command: &PbfhoggCommand,
-    req: &MeasureRequest,
-    extra_params: &CommandParams,
-) -> Result<(), DevError> {
-    let Some(snap_key) = extra_params.as_snapshot.as_deref() else {
-        return Ok(());
-    };
-
-    require_snapshot_output(command)?;
-
-    let paths = crate::context::bootstrap_config(req.dev_config, req.project_root)?;
-
-    crate::pbfhogg::download::preflight_snapshot_collision(
-        snap_key,
-        extra_params.replace_snapshot,
-        req.dataset,
-        paths.datasets.get(req.dataset),
-    )
-}
-
-/// Snapshot registration accepts a produced PBF file, not an empty path, an
-/// OSC stream, or a directory output.
-fn require_snapshot_output(command: &PbfhoggCommand) -> Result<(), DevError> {
-    if !matches!(command.output_kind(), OutputKind::ScratchPbf) {
-        return Err(DevError::Config(format!(
-            "--as-snapshot requires a PBF-producing command; '{}' does not produce a PBF file",
-            command.id(),
-        )));
-    }
-    Ok(())
 }
 
 /// Run a single pbfhogg command via the wall-clock harness.
@@ -786,72 +739,6 @@ fn build_diff_snapshots_context(
             digest_takes_form: None,
         },
     })
-}
-
-/// Clean up scratch output files after a benchmark run.
-/// If `--as-snapshot KEY` was passed, move the scratch artifact into the
-/// dataset's data dir and register a `[..snapshot.<KEY>...]` block in
-/// `brokkr.toml`. Called after a successful measured/run completes; no-op
-/// when `as_snapshot` is unset.
-///
-/// Variant routing: `degrade --strip-indexdata` writes under `pbf.raw` (the
-/// output has no indexdata); everything else writes under `pbf.indexed`.
-fn promote_artifact(
-    command: &PbfhoggCommand,
-    ctx: &CommandContext,
-    mode: ArgMode,
-    paths: &config::ResolvedPaths,
-    project_root: &Path,
-    variant: &str,
-) -> Result<(), DevError> {
-    let Some(snap_key) = ctx.params.as_snapshot.as_deref() else {
-        return Ok(());
-    };
-
-    require_snapshot_output(command)?;
-    let scratch_pbf = crate::pbfhogg::commands::scratch_output_path(ctx, command, mode)?;
-    let target_variant = match command.descriptor().promotion_variant {
-        crate::pbfhogg::commands::PromotionVariant::Raw => "raw",
-        crate::pbfhogg::commands::PromotionVariant::Indexed => "indexed",
-        crate::pbfhogg::commands::PromotionVariant::Unsupported => {
-            return Err(DevError::Internal(format!(
-                "{} cannot be promoted to a snapshot",
-                command.id()
-            )));
-        }
-    };
-    let dataset = paths.datasets.get(&ctx.dataset);
-    // repack round-trips every element (pbfhogg's repack contract), so its
-    // output holds the same elements as the entry it read: recorded as a
-    // `diff-snapshots` answer of same between the two files, when the
-    // source has a registered digest to address it by. Nothing else is
-    // derived; cat and degrade change what they copy.
-    let same_as = if matches!(command, PbfhoggCommand::Repack { .. }) {
-        let source = resolve::SnapshotRef::from_opt(ctx.params.snapshot.as_ref());
-        dataset
-            .and_then(|ds| match &source {
-                resolve::SnapshotRef::Base => ds.pbf.get(variant),
-                resolve::SnapshotRef::Named(key) => {
-                    ds.snapshot.get(key).and_then(|snap| snap.pbf.get(variant))
-                }
-            })
-            .and_then(|entry| entry.xxhash)
-    } else {
-        None
-    };
-
-    crate::pbfhogg::download::promote_snapshot(
-        project_root,
-        &paths.hostname,
-        &ctx.dataset,
-        snap_key,
-        ctx.params.replace_snapshot,
-        &scratch_pbf,
-        target_variant,
-        dataset,
-        &paths.data_dir,
-        same_as,
-    )
 }
 
 pub(crate) fn cleanup_output(

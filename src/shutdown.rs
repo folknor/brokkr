@@ -630,31 +630,6 @@ pub fn die_with_parent(cmd: &mut std::process::Command) {
     }
 }
 
-/// [`die_with_parent`], but a `prctl` that fails refuses the spawn instead
-/// of running the child without the death signal: for a caller whose child
-/// must not outlive brokkr (a writer into a file nobody else will stop).
-pub fn die_with_parent_strict(cmd: &mut std::process::Command) {
-    use std::os::unix::process::CommandExt;
-
-    // SAFETY: getpid takes no pointers.
-    let parent = unsafe { libc::getpid() };
-    let sig = libc::c_ulong::try_from(libc::SIGKILL).unwrap_or(9);
-    // SAFETY: between fork and exec only async-signal-safe calls are allowed;
-    // prctl, getppid and errno reads are all raw syscalls or libc reads.
-    unsafe {
-        cmd.pre_exec(move || {
-            if libc::prctl(libc::PR_SET_PDEATHSIG, sig, 0, 0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::getppid() != parent {
-                // A raw errno: a message would allocate after the fork.
-                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
-            }
-            Ok(())
-        });
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Killing a process tree.
 //

@@ -45,13 +45,11 @@ paths still resolve against each including project's root.
   OSC applied. Unknown keys and values are load errors. Absent, either
   answer is stored. It belongs to the entry as composed, so an `include`
   override of `file` alone keeps the declarations of the file it replaced.
-  A `--refresh` rotation moves it with its `pbf` table.
 - `expect.diff-snapshots` (pbfhogg, optional) - on the dataset:
   `"<xxhash>+<xxhash>" = "same" | "differs"`, the `diff-snapshots` answer
   between the two PBF files whose registered digests the key names, in
   either order and either hex case; one pair spelled twice is a load error.
-  Addressed by content, it never follows a snapshot key to another file. A
-  `repack --as-snapshot` writes its `same` entry here.
+  Addressed by content, it never follows a snapshot key to another file.
 - `osc.<seq>` - OSC diff file entries keyed by sequence number. Each has
   `file`, optional `xxhash` (XXH128).
 - `snapshot.<key>` - another point-in-time capture of the dataset, with its
@@ -81,16 +79,11 @@ paths still resolve against each including project's root.
   command reads it. `brokkr extract --polygon <name>` measures it instead of
   the bbox and `brokkr multi-extract --polygon <name>` appends it after the
   strips; a bare `extract` or `multi-extract` still measures the bbox alone.
-  `brokkr suite pbfhogg`'s extract bench and `verify extract` run on every
-  configured polygon after the bbox, and `verify multi-extract` adds a config
-  of the strips and every polygon. A polygon row carries `polygon=<name>@<xxh128>`
+  `brokkr suite pbfhogg`'s extract bench runs on every
+  configured polygon after the bbox. A polygon row carries `polygon=<name>@<xxh128>`
   as an arm qualifier, the digest computed from the file whether or not it is
   pinned, so changing the file splits `results --compare` pairing (see
-  `docs/commands/results.md`). For `verify extract` the file must be one
-  osmium reads as pbfhogg does: a single Polygon or MultiPolygon (bare, in a
-  Feature, or in a FeatureCollection of one Feature) with closed rings and no
-  edge crossing the antimeridian (`docs/projects/pbfhogg.md`, Verify
-  subcommands).
+  `docs/commands/results.md`).
 - `getid_ids`, `getparents_ids` (pbfhogg, optional) - the element IDs the
   getid and getparents benches request on this dataset, every variant and
   snapshot of it (`brokkr getid`/`getparents` in any measured mode, and the

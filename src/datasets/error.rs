@@ -125,8 +125,8 @@ impl fmt::Display for ResolveError {
                     "dataset '{dataset}' has no snapshot.{key}.pbf variant '{variant}'\n  \
                      \u{2514}\u{2500} available variants on this snapshot: {available_str}\n  \
                      \u{2514}\u{2500} pass `--variant {suggestion_variant}` to resolve both sides with the available variant,\n     \
-                     or register the {variant} variant via `brokkr download {dataset} --as-snapshot {key}`\n     \
-                     (which auto-generates pbf.indexed from pbf.raw)."
+                     or register the {variant} variant via \
+                     `brokkr run --with pbfhogg pbfhogg-datasets -- download {dataset} --as-snapshot {key}`."
                 )
             }
             Self::Verification(error) => error.fmt(f),

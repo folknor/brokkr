@@ -3,7 +3,7 @@ use crate::{
     cli::VerifyCommand,
     config, context, elivagar,
     error::DevError,
-    nidhogg, pbfhogg,
+    nidhogg,
     project::{self, Project},
 };
 
@@ -17,7 +17,6 @@ pub(crate) fn cmd_verify(
     included_config_files: &[std::path::PathBuf],
     verify: VerifyCommand,
     features: &[String],
-    verbose: bool,
 ) -> Result<(), DevError> {
     // The command catalogue admits the union of verify projects. Keep these
     // variant checks here because each nested verify operation belongs to
@@ -74,18 +73,6 @@ pub(crate) fn cmd_verify(
             // Re-enters the hold when a `--commit` worktree already took it.
             let _lock = context::reenter_command_lock()?;
             nidhogg::cmd::verify_readonly(dev_config, project_root, build_root, &dataset, features)
-        }
-        // ----- pbfhogg verify variants -----
-        _ => {
-            project::require(project, &Project::Pbfhogg, "verify")?;
-            pbfhogg::cmd::verify(
-                dev_config,
-                project_root,
-                build_root,
-                verify,
-                features,
-                verbose,
-            )
         }
     }
 }

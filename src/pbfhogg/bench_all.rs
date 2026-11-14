@@ -314,7 +314,7 @@ fn run_baselines(
     harness.forget_build();
 
     // osmium -- if available
-    if super::verify::which_exists("osmium") {
+    if crate::tools::find_executable("osmium").is_some() {
         output::bench_msg("=== osmium baseline ===");
         skip_on_error(
             "osmium baseline",

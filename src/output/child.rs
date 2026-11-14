@@ -66,18 +66,6 @@ impl Ending {
         matches!(self, Self::Deadline(_))
     }
 
-    /// The child's own exit code or killing signal, when it ended by itself
-    /// (or by a signal) rather than by brokkr's supervision.
-    pub fn process_ending(&self) -> Option<crate::error::ProcessEnding> {
-        match self {
-            Self::Exited(code) => Some(crate::error::ProcessEnding::Code(*code)),
-            Self::Signalled(signal) => Some(crate::error::ProcessEnding::Signal(*signal)),
-            Self::StopMarker(_) | Self::Deadline(_) | Self::Interrupted | Self::WaitFailed(_) => {
-                None
-            }
-        }
-    }
-
     pub fn success(&self) -> bool {
         matches!(self, Self::Exited(0))
     }
@@ -371,8 +359,7 @@ pub(crate) fn run_captured_bounded(
 }
 
 /// [`run_captured_bounded`] with `unset` removed from the inherited
-/// environment, for a child whose contract says a variable must not reach it
-/// (the library harness's describe mode, which must see no marker FIFO).
+/// environment, for a child whose contract says a variable must not reach it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_captured_bounded_unsetting(
     program: &str,
@@ -1086,127 +1073,6 @@ fn run_captured_limited_unsetting(
             stderr: run.stderr,
             elapsed: run.elapsed,
         },
-        output_cut: run.output_cut,
-    })
-}
-
-/// A run whose stdout went to a file, not a pipe: the ending always comes
-/// back, with stderr's bounded capture and whether it was cut short reported
-/// beside it rather than in place of it.
-pub struct FileSinkRun {
-    /// `stdout` is empty: the child wrote it to the sink file.
-    pub captured: CapturedOutput,
-    /// stderr exceeded the default capture cap and was truncated there.
-    pub stderr_truncated: bool,
-    /// The child exited but its stderr did not close within the drain grace.
-    pub output_cut: bool,
-}
-
-impl FileSinkRun {
-    /// The capture failure a caller that trusts stderr must refuse, if any:
-    /// a truncated stream or an output-drain cut. Separate from the ending so
-    /// a caller can classify the ending first (a SIGKILL that came after a
-    /// stderr flood is still a SIGKILL).
-    pub fn capture_failure(&self, program: &str) -> Option<DevError> {
-        let failure = if self.stderr_truncated {
-            crate::error::ChildFailureKind::CaptureLimit {
-                stream: "stderr",
-                limit: ChildOptions::DEFAULT.capture_cap.stderr,
-            }
-        } else if self.output_cut {
-            crate::error::ChildFailureKind::OutputDrain {
-                grace: ChildOptions::DEFAULT.drain_grace,
-            }
-        } else {
-            return None;
-        };
-        Some(DevError::ChildFailure {
-            program: program.to_owned(),
-            failure,
-        })
-    }
-}
-
-/// Run a plain child with its stdout written straight to `stdout` (a file
-/// the caller created) and stderr captured under the default cap. For
-/// output whose size scales with the data - a diff listing of a planet - so
-/// that no byte of it is held in memory.
-///
-/// The child dies with brokkr (`PR_SET_PDEATHSIG`, refused at spawn when it
-/// cannot be armed) and carries the orphan token: unlike a pipe, a file gives
-/// a writer that outlives its reader no reason to stop. Nothing here proves
-/// the file complete beyond the child having been reaped; a descendant that
-/// inherited the descriptor is the caller's to rule out (pbfhogg's launch
-/// lease does that for pbfhogg).
-pub(crate) fn run_stdout_to_file(
-    program: &str,
-    args: &[&str],
-    cwd: &Path,
-    env: &[(&str, &str)],
-    stdout: std::fs::File,
-) -> Result<FileSinkRun, DevError> {
-    let policy = crate::process::spawn::ChildPolicy::from_cargo_profile(SpawnProfile::Plain);
-    let cmd = policy.command(program, args, Some(cwd), env, ChildIsolation::Inherit)?;
-    run_command_to_file(cmd, program, stdout)
-}
-
-/// [`run_stdout_to_file`] with no inherited user environment: the child sees
-/// `env` and the variables brokkr's own lifecycle policy stamps, nothing
-/// else. For a reference run whose identity must describe its launch.
-pub(crate) fn run_stdout_to_file_isolated(
-    program: &str,
-    args: &[&str],
-    cwd: &Path,
-    env: &[(&str, &str)],
-    stdout: std::fs::File,
-) -> Result<FileSinkRun, DevError> {
-    let policy = crate::process::spawn::ChildPolicy::from_cargo_profile(SpawnProfile::Plain);
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args).current_dir(cwd).env_clear();
-    for &(name, value) in env {
-        cmd.env(name, value);
-    }
-    policy.apply_runtime_policy(&mut cmd);
-    run_command_to_file(cmd, program, stdout)
-}
-
-fn run_command_to_file(
-    mut cmd: std::process::Command,
-    program: &str,
-    stdout: std::fs::File,
-) -> Result<FileSinkRun, DevError> {
-    let start = Instant::now();
-    crate::process::spawn::capture_stdio(&mut cmd);
-    cmd.stdout(std::process::Stdio::from(stdout));
-    crate::shutdown::die_with_parent_strict(&mut cmd);
-    crate::test_orphans::stamp(&mut cmd);
-    let child = crate::process::spawn::spawn(cmd, None)?;
-    let options = ChildOptions::DEFAULT;
-    let run = supervise_child_capped(
-        child,
-        program,
-        start,
-        ChildLimit::None,
-        ChildIsolation::Inherit,
-        options,
-        |_| None,
-    );
-    match (
-        &run.ending,
-        verdict(&run.ending, program, &run.stderr, Exits::SUCCESS),
-    ) {
-        (_, IterationVerdict::Interrupted) => return Err(DevError::Interrupted),
-        (Ending::WaitFailed(_), IterationVerdict::Failed(error)) => return Err(error),
-        _ => {}
-    }
-    Ok(FileSinkRun {
-        captured: CapturedOutput {
-            ending: run.ending,
-            stdout: Vec::new(),
-            stderr: run.stderr,
-            elapsed: run.elapsed,
-        },
-        stderr_truncated: run.stderr_truncated,
         output_cut: run.output_cut,
     })
 }

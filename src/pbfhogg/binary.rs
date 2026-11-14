@@ -84,8 +84,7 @@
 //! # Boundary
 //!
 //! Code in `src/pbfhogg` never holds the path of a pbfhogg build brokkr made
-//! except through this handle, or through [`LibraryHarness`], the handle on
-//! the library harness, which this module also makes. The runner's [`Executable`] is guarded by
+//! except through this handle. The runner's [`Executable`] is guarded by
 //! types: its path is readable only with a [`HandleKey`], which only this
 //! module can make, and `Invocation::built` refuses a pbfhogg executable.
 //! The other seams that hand out built paths (the build, harness-build and
@@ -103,7 +102,7 @@ use std::path::{Path, PathBuf};
 
 use crate::build::executable_guard::{self, HandleToken};
 use crate::error::DevError;
-use crate::measure::{Executable, Invocation, Supervised};
+use crate::measure::{Executable, Invocation};
 use crate::output;
 use crate::pbfhogg::argv::{Overwrite, PbfArgv};
 use crate::reservations::PRIVATE_DIR_PLACEHOLDER;
@@ -181,18 +180,6 @@ const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// What a probe's output is kept to; only its exit code is read.
 const PROBE_OUTPUT_KEPT: usize = 64 * 1024;
-
-/// Where a run-scoped launch ([`PbfhoggBinary::run_in`]) runs.
-pub(crate) struct RunScope<'a> {
-    /// The library run directory, reserved whole as coverage.
-    pub(crate) run_dir: &'a Path,
-    /// The launch's working directory, inside the run directory.
-    pub(crate) cwd: &'a Path,
-    /// The launch's wall.
-    pub(crate) deadline: std::time::Duration,
-    /// The stdout bytes kept; one more is captured, so a longer output shows.
-    pub(crate) stdout_kept: usize,
-}
 
 /// The capability to read an [`Executable`]'s path. Its field is private to
 /// this module, so no other code can make one: the runner's executable
@@ -316,96 +303,12 @@ impl PbfhoggBinary {
         self.path.display().to_string()
     }
 
-    /// The XXH128 of the executable this handle runs, for records.
-    pub(crate) fn digest(&self) -> &str {
-        &self.digest
-    }
-
     /// Resolve an argv into the invocation that runs it: `--overwrite` where
     /// negotiated and accepted, the private directory's flags where needed
     /// and accepted, and the reservation each launch makes (module docs).
     /// The invocation runs in the project root.
     pub(crate) fn invocation(&self, argv: PbfArgv) -> Result<Invocation<'_>, DevError> {
-        self.resolve(argv, self.project_root.clone(), Vec::new())
-    }
-
-    /// Run `argv` once inside a library run directory (`brokkr man
-    /// library`, CLI equality): the run-scoped context. The launch runs in
-    /// `scope.cwd`, reserves the whole run directory as coverage beside the
-    /// argv's own paths, keeps the private directory's usual placement (beside
-    /// the first output, inside the run directory), sees neither of the
-    /// variables brokkr hands a running harness, and is killed at
-    /// `scope.deadline`. The executable is checked again after the probes that
-    /// resolving may run, immediately before the launch. The outcome says
-    /// whether the launch was released; one that was not leaves the run
-    /// directory to some other process.
-    pub(crate) fn run_in(&self, argv: PbfArgv, scope: &RunScope<'_>) -> Supervised {
-        let invocation = match self.resolve(
-            argv,
-            scope.cwd.to_path_buf(),
-            vec![scope.run_dir.to_path_buf()],
-        ) {
-            Ok(invocation) => invocation,
-            Err(DevError::Interrupted) => return Supervised::Interrupted,
-            Err(e) => return Supervised::Failed(e),
-        };
-        if let Err(e) = self.check_identity() {
-            return Supervised::Failed(e);
-        }
-        invocation.capture_supervised(
-            scope.cwd,
-            scope.deadline,
-            crate::output::child::CaptureCap {
-                stdout: scope.stdout_kept + 1,
-                stderr: RUN_OUTPUT_KEPT + 1,
-            },
-            &HARNESS_RUN_ENV,
-        )
-    }
-
-    /// [`run_in`](Self::run_in), timed: the launch gets `fifo` as its marker
-    /// FIFO (the one variable of [`HARNESS_RUN_ENV`] it keeps), so the CLI's
-    /// command interval and its process samples are captured as run
-    /// `run_idx` (`brokkr man library`, Isolation scenarios).
-    pub(crate) fn run_in_timed(
-        &self,
-        argv: PbfArgv,
-        scope: &RunScope<'_>,
-        fifo: &mut crate::sidecar::SidecarFifo,
-        run_idx: usize,
-    ) -> crate::measure::Timed {
-        use crate::measure::Timed;
-        let invocation = match self.resolve(
-            argv,
-            scope.cwd.to_path_buf(),
-            vec![scope.run_dir.to_path_buf()],
-        ) {
-            Ok(invocation) => invocation,
-            Err(DevError::Interrupted) => return Timed::Interrupted,
-            Err(e) => return Timed::Failed(e),
-        };
-        if let Err(e) = self.check_identity() {
-            return Timed::Failed(e);
-        }
-        invocation.capture_sidecar(
-            scope.cwd,
-            scope.deadline,
-            crate::output::child::CaptureCap {
-                stdout: scope.stdout_kept + 1,
-                stderr: RUN_OUTPUT_KEPT + 1,
-            },
-            &HARNESS_RUN_ENV,
-            fifo,
-            run_idx,
-        )
-    }
-
-    fn resolve(
-        &self,
-        argv: PbfArgv,
-        cwd: PathBuf,
-        coverage: Vec<PathBuf>,
-    ) -> Result<Invocation<'_>, DevError> {
+        let cwd = self.project_root.clone();
         let Some(subcommand) = argv.args().first().filter(|s| !s.is_empty()).cloned() else {
             return Err(DevError::Internal(
                 "empty pbfhogg argv has no subcommand".into(),
@@ -414,16 +317,7 @@ impl PbfhoggBinary {
         self.check_identity()?;
         let negotiate = match argv.overwrite() {
             Overwrite::Negotiate => self.supports(&subcommand, Flag::Overwrite)?,
-            Overwrite::Required => {
-                if !self.supports(&subcommand, Flag::Overwrite)? {
-                    return Err(DevError::Verify(format!(
-                        "this pbfhogg build's `{subcommand}` does not accept {OVERWRITE_FLAG}, \
-                         which the argv requires"
-                    )));
-                }
-                true
-            }
-            Overwrite::NoOutput | Overwrite::ImpliedByForce | Overwrite::Never => false,
+            Overwrite::NoOutput | Overwrite::ImpliedByForce => false,
         };
         let staging = argv.writes_output() && self.supports(&subcommand, Flag::StagingDir)?;
         let tmp = argv.writes_scratch() && self.supports(&subcommand, Flag::TmpDir)?;
@@ -460,8 +354,7 @@ impl PbfhoggBinary {
                 }
             }
         }
-        let spec = crate::reservations::LaunchSpec::new(cwd, reads, writes, private_in)
-            .with_coverage(coverage);
+        let spec = crate::reservations::LaunchSpec::new(cwd, reads, writes, private_in);
         Ok(Invocation::reserved(&self.path, args, spec))
     }
 
@@ -547,8 +440,8 @@ impl PbfhoggBinary {
                 args.join(" ")
             ))
         };
-        // Bounded like describe mode: a wall, the run variables removed (a
-        // probe must never open a marker FIFO it inherited), its own process
+        // Bounded: a wall, the run variables removed (a probe must never
+        // open a marker FIFO it inherited), its own process
         // group. Only exit codes are read, so help text cut at the cap does
         // not matter; an output left open past the exit does, since the
         // ending it came with cannot be trusted as the whole run.
@@ -683,9 +576,9 @@ impl PbfhoggBinary {
     }
 }
 
-/// The variables brokkr hands a running harness, which describe mode must not
-/// see even when brokkr itself inherited them. brokkr drops the first two
-/// from its own environment at startup, so for them this list restates the
+/// The variables brokkr hands a running harness, which a probe must not see
+/// even when brokkr itself inherited them. brokkr drops the first two from
+/// its own environment at startup, so for them this list restates the
 /// protocol; the profiling ones it may still inherit.
 const HARNESS_RUN_ENV: [&str; 5] = [
     crate::sidecar::MARKER_FIFO_ENV,
@@ -700,385 +593,8 @@ const HOTPATH_OUTPUT_PATH_ENV: &str = "HOTPATH_OUTPUT_PATH";
 const HOTPATH_OUTPUT_FORMAT_ENV: &str = "HOTPATH_OUTPUT_FORMAT";
 const HOTPATH_METRICS_SERVER_OFF_ENV: &str = "HOTPATH_METRICS_SERVER_OFF";
 
-/// The profiling variables, which only a profiled launch carries.
-const HOTPATH_ENV: [&str; 3] = [
-    HOTPATH_OUTPUT_PATH_ENV,
-    HOTPATH_OUTPUT_FORMAT_ENV,
-    HOTPATH_METRICS_SERVER_OFF_ENV,
-];
-
-/// How long describe mode may take.
-const DESCRIBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// The stderr kept from a describe run for its report; any byte fails it.
-const DESCRIBE_STDERR_KEPT: usize = 64 * 1024;
-
-/// The built pbfhogg library harness (`docs/commands/library.md`): a bin of
-/// the workspace member `[pbfhogg.library.harness]` names. Like
-/// [`PbfhoggBinary`] it holds the brokkr lock and an
-/// [`executable_guard`] registration for its whole life, re-stats its
-/// executable before every spawn, and exposes no path.
-pub(crate) struct LibraryHarness {
-    path: PathBuf,
-    identity: FileIdentity,
-    /// The executable's XXH128, for records.
-    digest: String,
-    project_root: PathBuf,
-    /// How the harness was built, which a measured row records (`None` only
-    /// for test fixtures).
-    build: Option<crate::measure::BuildIdentity>,
-    /// The brokkr lock for the handle's life, on which a running harness
-    /// child's pid is published (`None` only for test fixtures).
-    hold: Option<crate::lockfile::LockGuard>,
-    _registered: HandleToken,
-}
-
-impl std::fmt::Debug for LibraryHarness {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LibraryHarness").finish_non_exhaustive()
-    }
-}
-
-impl LibraryHarness {
-    /// Build the harness `config` names from `build_root` under `profile`,
-    /// and with `with_cli` the pbfhogg CLI of the same tree (release, default
-    /// features: the reference its counterparts replay against), then wrap
-    /// them. Both builds run before either handle exists, since a live
-    /// handle refuses a build. `profiled` adds its instrumentation feature
-    /// (`hotpath` or `hotpath-alloc`) to the configured ones, first, as the
-    /// harness member must define it; the CLI is never instrumented.
-    /// `project_root` is the describe run's working directory.
-    pub(crate) fn build(
-        config: &crate::config::HarnessConfig,
-        profile: crate::build::RustProfile,
-        profiled: Option<crate::measure::ProfiledMode>,
-        with_cli: bool,
-        build_root: &Path,
-        project_root: &Path,
-    ) -> Result<(Self, Option<PbfhoggBinary>), DevError> {
-        let mut config = config.clone();
-        if let Some(mode) = profiled {
-            config.features.retain(|f| f != mode.feature());
-            config.features.insert(0, mode.feature().to_owned());
-        }
-        let hold = crate::lockfile::current_hold().ok_or_else(|| {
-            DevError::Lock(
-                "a library harness handle needs the brokkr lock held for its whole life - \
-                 this is a brokkr bug: the command must take the lock first"
-                    .into(),
-            )
-        })?;
-        let sigterm = crate::shutdown::SigtermGuard::install();
-        let built = crate::harness_build::build_for_harness(
-            build_root,
-            &config,
-            profile,
-            Some(&|pid| hold.set_child_pid(pid)),
-            Some(&|| hold.clear_child_pid()),
-            crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
-        )?;
-        let cli = if with_cli {
-            Some(crate::build::cargo_build(
-                &crate::build::BuildConfig::release(crate::project::Project::Pbfhogg.cli_package()),
-                build_root,
-            )?)
-        } else {
-            None
-        };
-        let mut harness = Self::open(&built.binary, project_root, Some(hold))?;
-        harness.build = Some(built.identity);
-        let cli = match cli {
-            Some(built) => Some(PbfhoggBinary::locked(&built.path, project_root)?),
-            None => None,
-        };
-        Ok((harness, cli))
-    }
-
-    /// A handle without the lock, for fixture executables in tests.
-    #[cfg(test)]
-    pub(crate) fn fixture(path: &Path, project_root: &Path) -> Result<Self, DevError> {
-        Self::open(path, project_root, None)
-    }
-
-    fn open(
-        path: &Path,
-        project_root: &Path,
-        hold: Option<crate::lockfile::LockGuard>,
-    ) -> Result<Self, DevError> {
-        let registered = executable_guard::reserve_handle()?;
-        let meta = std::fs::metadata(path).map_err(|e| {
-            DevError::Build(format!(
-                "library harness {} is unreadable: {e}",
-                path.display()
-            ))
-        })?;
-        let digest = match crate::preflight::digest::cached_path_digest(path, project_root)? {
-            crate::preflight::digest::PathDigest::File(digest) => digest.to_string(),
-            crate::preflight::digest::PathDigest::Tree(_) => {
-                return Err(DevError::Build(format!(
-                    "library harness {} is a directory",
-                    path.display()
-                )));
-            }
-        };
-        Ok(Self {
-            path: path.to_path_buf(),
-            identity: FileIdentity::of(&meta),
-            digest,
-            project_root: project_root.to_path_buf(),
-            build: None,
-            hold,
-            _registered: registered,
-        })
-    }
-
-    /// The XXH128 of the harness executable, for records.
-    pub(crate) fn digest(&self) -> &str {
-        &self.digest
-    }
-
-    /// How the harness was built: its profile, canonical features and
-    /// provenance, for the rows a measurement records.
-    pub(crate) fn build_identity(&self) -> Option<&crate::measure::BuildIdentity> {
-        self.build.as_ref()
-    }
-
-    /// Refuse an executable replaced since this handle was made.
-    fn check_identity(&self) -> Result<(), DevError> {
-        let now = std::fs::metadata(&self.path)
-            .map(|meta| FileIdentity::of(&meta))
-            .map_err(|e| {
-                DevError::Internal(format!(
-                    "library harness {} vanished under a live handle: {e}",
-                    self.path.display()
-                ))
-            })?;
-        if now == self.identity {
-            Ok(())
-        } else {
-            Err(DevError::Internal(format!(
-                "library harness {} was replaced under a live handle - something outside \
-                 brokkr's build seam rewrote it",
-                self.path.display()
-            )))
-        }
-    }
-
-    /// Run `HARNESS --describe-harness` and return its stdout, which must be
-    /// at most `limit` bytes: exit 0 within the deadline, nothing on stderr,
-    /// the run's variables absent from its environment.
-    pub(crate) fn describe(&self, limit: usize) -> Result<Vec<u8>, DevError> {
-        self.check_identity()?;
-        let program = crate::utf8_path::path_string(&self.path)?;
-        let sigterm = crate::shutdown::SigtermGuard::install();
-        let capture = crate::output::child::run_captured_bounded_unsetting(
-            &program,
-            &["--describe-harness"],
-            &self.project_root,
-            &[],
-            &HARNESS_RUN_ENV,
-            DESCRIBE_DEADLINE,
-            None,
-            crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
-            crate::output::child::CaptureCap {
-                stdout: limit + 1,
-                stderr: DESCRIBE_STDERR_KEPT + 1,
-            },
-        )?;
-        let fail = |why: String| {
-            DevError::ContractViolation(format!("`{program} --describe-harness` {why}"))
-        };
-        let captured = &capture.captured;
-        if captured.ending.is_deadline() {
-            return Err(fail(format!(
-                "was killed after {}",
-                output::format_duration(DESCRIBE_DEADLINE)
-            )));
-        }
-        if !captured.success() {
-            let ending = match (captured.ending.exit_code(), captured.ending.signal()) {
-                (Some(code), _) => format!("exited {code}"),
-                (None, Some(signal)) => format!("was killed by signal {signal}"),
-                (None, None) => format!("ended as {:?}", captured.ending),
-            };
-            return Err(fail(format!(
-                "{ending}, not 0{}",
-                stderr_tail(&captured.stderr)
-            )));
-        }
-        if !captured.stderr.is_empty() {
-            return Err(fail(format!(
-                "wrote to stderr, which describe mode must leave empty{}",
-                stderr_tail(&captured.stderr)
-            )));
-        }
-        if capture.output_cut {
-            return Err(fail("left its output open after it exited".into()));
-        }
-        if captured.stdout.len() > limit {
-            return Err(fail(format!(
-                "printed more than the {limit}-byte limit of a describe document"
-            )));
-        }
-        Ok(capture.captured.stdout)
-    }
-}
-
 /// The environment variable naming the run's artefact directory.
 pub(crate) const HARNESS_ARTEFACT_DIR_ENV: &str = "BROKKR_HARNESS_ARTEFACT_DIR";
-
-/// The stdout and stderr kept from a verification run for its report; any
-/// byte fails it.
-const RUN_OUTPUT_KEPT: usize = 64 * 1024;
-
-/// One launch of `HARNESS --test-harness REQUEST --private-dir DIR`
-/// (`docs/commands/library.md`), as the run directory lays it out.
-pub(crate) struct HarnessLaunch<'a> {
-    /// The run directory: reserved whole as coverage, and where the private
-    /// directory goes.
-    pub(crate) run_dir: &'a Path,
-    pub(crate) request: &'a Path,
-    pub(crate) cwd: &'a Path,
-    pub(crate) artefacts: &'a Path,
-    /// Bound dataset files, reserved for reading.
-    pub(crate) reads: Vec<PathBuf>,
-    /// Bound output, scratch and generated role paths, reserved for writing.
-    pub(crate) writes: Vec<PathBuf>,
-    pub(crate) deadline: std::time::Duration,
-    pub(crate) fifo: &'a mut crate::sidecar::SidecarFifo,
-    /// The process's index in its run, from 0, for the capture's narration.
-    pub(crate) iteration: usize,
-    /// A profiled launch's hotpath report path, inside the run directory
-    /// (so the coverage reserves it and the release keeps it): the
-    /// profiling variables are set to write it there. `None` removes them.
-    pub(crate) hotpath_report: Option<&'a Path>,
-}
-
-/// What one harness launch came to. The child has been reaped and the launch
-/// released, or the release failed (`released`).
-pub(crate) struct HarnessRun {
-    pub(crate) ending: crate::output::child::Ending,
-    pub(crate) stdout: Vec<u8>,
-    pub(crate) stderr: Vec<u8>,
-    /// Either stream went past the kept bytes (it was not empty).
-    pub(crate) output_truncated: bool,
-    /// The child exited but its output did not close in time.
-    pub(crate) output_cut: bool,
-    /// Spawn to the observed ending, before output settled or the release.
-    pub(crate) elapsed: std::time::Duration,
-    /// The trajectory: every FIFO record kept in arrival order, what the
-    /// capture omitted by cause, every call id a tagged record named, and
-    /// the process samples.
-    pub(crate) data: crate::sidecar::SidecarData,
-    /// The launch's release: an error leaves the lease held by some process.
-    pub(crate) released: Result<(), DevError>,
-}
-
-impl LibraryHarness {
-    /// Run the harness on one request, reserved as `launch` lays it out:
-    /// the whole run directory as coverage, the dataset files read, the role
-    /// paths written, a private directory in the run directory. The FIFO
-    /// reader outlives the release, so a child that still writes is never
-    /// cut off by a closed reader.
-    pub(crate) fn run(&self, launch: HarnessLaunch<'_>) -> Result<HarnessRun, DevError> {
-        self.check_identity()?;
-        let program = crate::utf8_path::path_string(&self.path)?;
-        let request = crate::utf8_path::path_string(launch.request)?;
-        let artefacts = crate::utf8_path::path_string(launch.artefacts)?;
-        let report = match launch.hotpath_report {
-            Some(path) => Some(crate::utf8_path::path_string(path)?),
-            None => None,
-        };
-        let spec = crate::reservations::LaunchSpec::new(
-            launch.cwd.to_path_buf(),
-            launch.reads,
-            launch.writes,
-            Some(launch.run_dir.to_path_buf()),
-        )
-        .with_coverage(vec![launch.run_dir.to_path_buf()]);
-        let args = vec![
-            "--test-harness".to_owned(),
-            request,
-            "--private-dir".to_owned(),
-            PRIVATE_DIR_PLACEHOLDER.to_owned(),
-        ];
-        let launched = spec.launch(&self.path, &args, launch.cwd, &[])?;
-        let fifo_path = launch.fifo.path_str()?.to_owned();
-        let mut env = vec![
-            (HARNESS_ARTEFACT_DIR_ENV, artefacts.as_str()),
-            (crate::sidecar::MARKER_FIFO_ENV, fifo_path.as_str()),
-        ];
-        if let Some(report) = &report {
-            env.extend([
-                (HOTPATH_METRICS_SERVER_OFF_ENV, "true"),
-                (HOTPATH_OUTPUT_FORMAT_ENV, "json"),
-                (HOTPATH_OUTPUT_PATH_ENV, report.as_str()),
-            ]);
-        }
-        let sigterm = crate::shutdown::SigtermGuard::install();
-        let start = std::time::Instant::now();
-        let child = match crate::output::child::spawn_captured_unsetting(
-            &program,
-            &launched.arg_refs(),
-            launch.cwd,
-            &env,
-            &HOTPATH_ENV,
-            crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
-            crate::output::SpawnProfile::Plain,
-        ) {
-            Ok(child) => child,
-            Err(e) => {
-                if let Err(release) = launched.finish() {
-                    output::warn(&release.to_string());
-                }
-                return Err(e);
-            }
-        };
-        if let Some(hold) = &self.hold {
-            hold.set_child_pid(child.id());
-        }
-        let capture = crate::sidecar::run_sidecar_with_deadline(
-            child,
-            launch.fifo,
-            launch.iteration,
-            start,
-            None,
-            Some(launch.deadline),
-            &crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES,
-            crate::output::child::CaptureCap {
-                stdout: RUN_OUTPUT_KEPT + 1,
-                stderr: RUN_OUTPUT_KEPT + 1,
-            },
-            &mut crate::sidecar::ProcSidecarSampler,
-        );
-        if let Some(hold) = &self.hold {
-            hold.clear_child_pid();
-        }
-        drop(sigterm);
-        let released = launched.finish();
-        Ok(HarnessRun {
-            ending: capture.data.ending.clone(),
-            stdout: capture.stdout,
-            stderr: capture.stderr,
-            output_truncated: capture.stdout_truncated || capture.stderr_truncated,
-            output_cut: capture.output_cut,
-            elapsed: capture.elapsed,
-            data: capture.data,
-            released,
-        })
-    }
-}
-
-/// `: <stderr>` for a report, lossy and trimmed; empty when there is none.
-fn stderr_tail(stderr: &[u8]) -> String {
-    let text = String::from_utf8_lossy(stderr);
-    let text = text.trim();
-    if text.is_empty() {
-        String::new()
-    } else {
-        format!(": {text}")
-    }
-}
 
 /// The probe's decision from the three exit codes (`None` is a signal) for
 /// the flag named `flag`. The control's status, one of [`USAGE_STATUSES`],

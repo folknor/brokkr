@@ -53,11 +53,6 @@ pub(crate) fn check_unreserved(path: &Path) -> io::Result<()> {
     gated(&[path], None, || Ok(()))
 }
 
-/// `rename(from, to)`, checking both operands.
-pub(crate) fn rename(from: &Path, to: &Path) -> io::Result<()> {
-    gated(&[from, to], None, || std::fs::rename(from, to))
-}
-
 /// Write `contents` to `path`, replacing it: a file a child reads, such as a
 /// generated extract config.
 pub(crate) fn write(path: &Path, contents: &[u8]) -> io::Result<()> {

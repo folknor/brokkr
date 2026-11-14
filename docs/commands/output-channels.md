@@ -9,7 +9,7 @@ binary itself never knows what mode it runs under. This file is the map.
 ## The two databases
 
 - `.brokkr/results.db` - **gitignored**, kept small. One row per bench
-  run (a library measurement stores one group of rows, see below):
+  run:
   `command`, `elapsed_ms`, `commit`, `input`, and a `kv` column of
   arbitrary `key=value` metrics. Queried with `brokkr results`. Two things
   brokkr records itself rather than receiving over a transport channel: the
@@ -18,8 +18,8 @@ binary itself never knows what mode it runs under. This file is the map.
   comes from the binary - see `docs/commands/measure.md`.
 - `.brokkr/sidecar.db` - **gitignored** (split out of results.db when
   results.db's schema went from v8 to v9). Per-run `/proc` sample
-  trajectories, phase markers, application counters, and for a library
-  measurement each call's sink ends and boundaries. Queried with `brokkr
+  trajectories, phase markers, application counters, and for a
+  harness that runs calls in one process each call's sink ends and boundaries. Queried with `brokkr
   sidecar <uuid>`.
 
 Both live under the project root's `.brokkr/` (never a `--commit` worktree's)
@@ -127,7 +127,7 @@ A running binary can hand data to brokkr three ways:
    `<us> name` (marker) or `<us> @name=value` (counter, value must parse as
    `i64`), `<us>` being microseconds since the process started, optionally
    tagged with a call stream (`<us> %<call_id> ...`, which also carries a
-   library call sink's sealing and terminal records; see "Marker & counter
+   call sink's sealing and terminal records; see "Marker & counter
    rules" in `docs/commands/measure.md`, The clock included). Drained by
    `SidecarFifo::drain` (`src/sidecar.rs`) into one arrival-ordered capture,
    then into sidecar.db. Any project
@@ -167,7 +167,7 @@ from brokkr rather than stderr.
 | `measure_external` | captured, dropped | **yes** | yes | elivagar `self` micro-bench; sluggrs `hotpath --bench` (via `run_external_with_kv`) |
 | `run_invocation_timed` (self-reported) | captured, dropped | **yes** | yes | pbfhogg read/write/merge cells in run mode (stored nowhere) and under `--bench`; under `--hotpath`/`--alloc` they keep the self-reported wall through `run_hotpath` |
 | `run_internal` (+ `run_captured`) | captured, dropped | no | **no** (no FIFO) | elivagar example benches |
-| `capture_hotpath` (stored via `run_hotpath`) | captured | stderr counters + JSON profile | yes | `--hotpath` / `--alloc`, all projects but `brokkr library`, whose measured runs are verifications (see below) |
+| `capture_hotpath` (stored via `run_hotpath`) | captured | stderr counters + JSON profile | yes | `--hotpath` / `--alloc`, all projects |
 
 The two external paths differ in exactly one thing: **which clock the recorded
 `elapsed_ms` comes from.** `run_external_ok` measures the child from outside;
@@ -245,24 +245,8 @@ self-reported.
 | repack | run_external_ok | yes | counters |
 | degrade | run_external_ok | yes | counters |
 
-(`brokkr library SCENARIO` is a correctness check too and records to neither
-DB: the harness gets the FIFO, its records are judged as each call's stream
-and kept only as a failed run's evidence, and its stdout and stderr must
-stay empty. `brokkr library --all` records neither either; it writes one
-certification record, a JSON document under `.brokkr/library-certifications/`.
-`brokkr library SCENARIO --bench N` does record: one group of rows (the
-scenario's and one per call, each call's sealed snapshot as `snapshot.*`
-counters) under one uuid in results.db, and every process's trajectory,
-with its sink ends and call boundaries, in sidecar.db under the same uuid;
-no stdout or stderr reaches either. `--hotpath N` and `--alloc N` record the
-same way, except that the group is the scenario row alone, carrying the
-chosen process's hotpath report, which the harness writes into its run
-directory rather than to any channel above. See `brokkr man library`.)
-
-(`verify` subcommands are correctness checks, not benchmarks - they don't
-record to either DB. Their listing-producing steps and every reference-tool
-run write stdout to a file under `target/verify/<check>/` rather than a
-capture; see "Verify subcommands" in `docs/projects/pbfhogg.md`.)
+(`brokkr verify`, for elivagar and nidhogg, is a correctness check, not a
+benchmark, and records to neither DB.)
 
 ### elivagar
 

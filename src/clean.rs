@@ -24,9 +24,6 @@ pub(crate) struct CleanOpts {
     pub(crate) worktrees: bool,
     pub(crate) archives: bool,
     pub(crate) keep: usize,
-    /// `--verify-reference`: pbfhogg's verify reference cache and nothing
-    /// else.
-    pub(crate) verify_reference_only: bool,
     pub(crate) dry_run: bool,
 }
 
@@ -206,19 +203,9 @@ pub(crate) fn cmd_clean(
         worktrees,
         archives,
         keep,
-        verify_reference_only,
         dry_run,
     } = opts;
     let c = Cleaner::new(dry_run);
-    if verify_reference_only {
-        let state = layout::ProjectState::new(project_root.as_path());
-        if c.guarded_dir(&state.verify_reference_dir())? {
-            output::run_msg(&format!("{} verify reference cache", c.verb()));
-        } else {
-            output::run_msg("nothing to clean");
-        }
-        return Ok(());
-    }
     // Worktrees are keyed by the *build* root, because that is the git repo
     // `Worktree::create` cuts them from and the checkout whose path names their
     // directory in the container (and, for legacy siblings, their parent and
@@ -250,7 +237,7 @@ pub(crate) fn cmd_clean(
     if !dry_run {
         reclaim_launch_leases();
     }
-    // The verify harness writes only under target/verify.
+    // The retired verify harness wrote only under target/verify.
     if *project == Project::Pbfhogg {
         let verify_dir = layout::PbfhoggLayout::verify_output(&host_target);
         if c.guarded_dir(&verify_dir)? {
@@ -411,15 +398,14 @@ fn clean_scratch(
                 output::count(removed, "pbfhogg scratch output")
             ));
         }
-        // Between two launches of a library run no lease covers its
-        // directory; the brokkr lock this clean holds is what does.
+        // Run directories the retired `brokkr library` left.
         clean_library_runs(paths, c)?;
     }
     Ok(())
 }
 
 /// The isolated unification and fixture-lint targets, the build snapshots and
-/// pbfhogg's verify reference cache.
+/// the verify reference cache the retired pbfhogg verify left.
 fn clean_isolated_targets_and_snapshots(
     project: &Project,
     state: &layout::ProjectState,
@@ -450,8 +436,7 @@ fn clean_isolated_targets_and_snapshots(
     if c.dir(&state.artifacts_dir())? {
         output::run_msg(&format!("{} build artifact snapshots", c.verb()));
     }
-    // pbfhogg's verify reference cache spares the next verify its reference
-    // runs.
+    // Left by the retired pbfhogg verify; nothing writes it now.
     if *project == Project::Pbfhogg && c.guarded_dir(&state.verify_reference_dir())? {
         output::run_msg(&format!("{} verify reference cache", c.verb()));
     }
@@ -489,7 +474,7 @@ fn clean_sidecar_fifos(state: &layout::ProjectState, c: &Cleaner) -> Result<(), 
     Ok(())
 }
 
-/// Remove the `brokkr library` run directories a failed run kept, each
+/// Remove the run directories the retired `brokkr library` left, each
 /// through the reservation gate, so a run an orphan still holds keeps only
 /// itself; a scenario directory left empty goes through the gate too.
 fn clean_library_runs(paths: &config::ResolvedPaths, c: &Cleaner) -> Result<(), DevError> {

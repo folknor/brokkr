@@ -104,11 +104,6 @@ pub(crate) fn state_stores(state_root: &Path) -> Vec<Store> {
     let state = ProjectState::new(state_root);
     let mut stores = vec![
         Store {
-            name: "verify-reference",
-            path: state.verify_reference_dir(),
-            remedy: "brokkr clean --verify-reference; verify_reference_budget bounds it",
-        },
-        Store {
             name: "artifacts",
             path: state.artifacts_dir(),
             remedy: "brokkr clean",
@@ -147,11 +142,6 @@ pub(crate) fn state_stores(state_root: &Path) -> Vec<Store> {
             name: "corpus-sort",
             path: state.corpus_sort_dir(),
             remedy: "a killed sort's spill goes when dispatch next takes a fresh hold",
-        },
-        Store {
-            name: "library-certifications",
-            path: state.library_certifications(),
-            remedy: "no pruning: certification records",
         },
         Store {
             name: "litehtml-visual.db",

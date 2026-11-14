@@ -422,49 +422,9 @@ impl SidecarDb {
         tx.commit()?;
         Ok(())
     }
-
-    /// One run of a session stored as soon as it is judged, with the
-    /// session's metadata rewritten in the same transaction, so a session
-    /// stored run by run never names a run that was not stored.
-    pub(crate) fn store_session_run(
-        &self,
-        result_uuid: &str,
-        run_idx: usize,
-        data: &crate::sidecar::SidecarData,
-        meta: &SessionMeta<'_>,
-    ) -> Result<(), DevError> {
-        let tx = self.conn.unchecked_transaction()?;
-        insert_run(&tx, result_uuid, run_idx, data)?;
-        write_meta(&tx, result_uuid, meta)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Store metadata about a sidecar session (best run index, total runs,
-    /// and optional run provenance). `sidecar_only` keeps the command fallback
-    /// only when there is no linked results row to supply that identity.
-    pub fn store_meta(
-        &self,
-        result_uuid: &str,
-        best_run_idx: usize,
-        total_runs: usize,
-        run_info: Option<&RunInfo>,
-        sidecar_only: bool,
-    ) -> Result<(), DevError> {
-        write_meta(
-            &self.conn,
-            result_uuid,
-            &SessionMeta {
-                best_run_idx,
-                total_runs,
-                run_info,
-                sidecar_only,
-            },
-        )
-    }
 }
 
-/// A session's metadata as [`SidecarDb::store_meta`] writes it.
+/// A session's metadata as [`SidecarDb::store_session`] writes it.
 pub(crate) struct SessionMeta<'a> {
     pub(crate) best_run_idx: usize,
     pub(crate) total_runs: usize,
@@ -1319,12 +1279,12 @@ mod tests {
             run_info: None,
             sidecar_only: true,
         };
-        db.store_session_run("cap111", 0, &data, &meta).unwrap();
+        let first = library_capture();
         data.summary.clock = crate::sidecar::ClockOutliers {
             count: 4,
             min_us: Some(-3),
         };
-        db.store_session_run("cap111", 1, &data, &meta).unwrap();
+        db.store_session("cap111", &[&first, &data], &meta).unwrap();
         let cap = super::super::RunId::new("cap111".to_owned());
         let found = db.query_clock_outliers_for(&cap, None).unwrap();
         assert_eq!(found.len(), 1, "a clean capture is not a finding");
@@ -1401,28 +1361,26 @@ mod tests {
         }
     }
 
-    // A session stored run by run keeps every record kind in its arrival
-    // order, the call boundaries and the sink's account exact, is complete
-    // though it carried sink ends, and rewrites its metadata with each run.
+    // A call-tagged session keeps every record kind in its arrival order,
+    // the call boundaries and the sink's account exact, and is complete
+    // though it carried sink ends.
     #[test]
-    fn a_library_session_stores_sink_ends_boundaries_and_arrival_order() {
+    fn a_call_tagged_session_stores_sink_ends_boundaries_and_arrival_order() {
         let path = crate::test_scratch::scratch("db-sidecar", "library").join("s.db");
         let db = SidecarDb::open(&path).unwrap();
-        let data = library_capture();
-        for run in 0..2 {
-            db.store_session_run(
-                "lib111",
-                run,
-                &data,
-                &SessionMeta {
-                    best_run_idx: 0,
-                    total_runs: run + 1,
-                    run_info: None,
-                    sidecar_only: true,
-                },
-            )
-            .unwrap();
-        }
+        let first = library_capture();
+        let second = library_capture();
+        db.store_session(
+            "lib111",
+            &[&first, &second],
+            &SessionMeta {
+                best_run_idx: 0,
+                total_runs: 2,
+                run_info: None,
+                sidecar_only: true,
+            },
+        )
+        .unwrap();
         let id = super::super::RunId::new("lib111".to_owned());
         assert_eq!(db.query_meta_for(&id).unwrap(), (0, 2));
         let names: Vec<String> = db

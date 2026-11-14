@@ -27,9 +27,6 @@ pub(crate) struct LaunchSpec {
     reads: Vec<PathBuf>,
     writes: Vec<PathBuf>,
     private_in: Option<PathBuf>,
-    /// Reserved for writing beside the argv's own paths, never outputs:
-    /// placement does not see them and release never removes them.
-    coverage: Vec<PathBuf>,
 }
 
 impl LaunchSpec {
@@ -47,18 +44,7 @@ impl LaunchSpec {
             reads,
             writes,
             private_in,
-            coverage: Vec::new(),
         }
-    }
-
-    /// Also reserve `coverage` for writing while the launch lives: a tree the
-    /// child's outputs, private directory and other files sit in (a library
-    /// run directory), so the lease the child carries protects all of it.
-    /// Reservation only: not an output, so the private directory's placement
-    /// never compares its mount, and the release keeps it.
-    pub(crate) fn with_coverage(mut self, coverage: Vec<PathBuf>) -> Self {
-        self.coverage = coverage;
-        self
     }
 
     #[cfg(test)]
@@ -112,7 +98,6 @@ impl LaunchSpec {
             .iter()
             .map(|p| (p, Access::Read))
             .chain(self.writes.iter().map(|p| (p, Access::Write)))
-            .chain(self.coverage.iter().map(|p| (p, Access::Write)))
         {
             resources.push(Resource::new(&spell(path)?, access, Disposition::Reserve));
         }
@@ -310,15 +295,16 @@ pub(super) fn conflict(scan: &super::store::Scan, ours: &[Resource]) -> Option<S
     None
 }
 
-/// A write reservation this process holds with no child: a staged write's
-/// temp file and target, from before its first byte until its commit or
-/// drop (`atomic_write::Staged`).
+/// A write reservation this process holds with no child: the tests' stand-in
+/// for another launch writing `paths`.
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct Hold {
     lease: Option<Lease>,
 }
 
 /// Reserve `paths` for writing, refused like a launch that writes them.
+#[cfg(test)]
 pub(crate) fn hold(paths: &[&Path]) -> io::Result<Hold> {
     let Some(store) = super::store() else {
         // No store to hold in ($HOME unset): the gate's own refusals still
@@ -343,37 +329,7 @@ pub(crate) fn hold(paths: &[&Path]) -> io::Result<Hold> {
     })
 }
 
-impl Hold {
-    /// The next spawn of `program` on this thread is the writer: it inherits
-    /// the reservation (with the parent-death signal and the orphan token, at
-    /// the spawn choke point), so the reservation outlives this process as
-    /// long as the writer does.
-    pub(crate) fn lend_to(&self, program: &Path) {
-        if let Some(fd) = self.lease.as_ref().and_then(Lease::fd) {
-            arm(fd, program);
-        }
-    }
-
-    /// Release the reservation and run `op`, a mutation of `targets`, under
-    /// the gate, with no launch admitted in between.
-    pub(crate) fn release_then<T>(
-        mut self,
-        targets: &[&Path],
-        op: impl FnOnce() -> io::Result<T>,
-    ) -> io::Result<T> {
-        let lease = self.lease.take();
-        if let Some(fd) = lease.as_ref().and_then(Lease::fd) {
-            disarm(fd);
-        }
-        let _serial = super::serialize()?;
-        if let Some(lease) = lease {
-            lease.release()?;
-        }
-        super::guard::refuse(targets, &[])?;
-        op()
-    }
-}
-
+#[cfg(test)]
 impl Drop for Hold {
     fn drop(&mut self) {
         let Some(lease) = self.lease.take() else {
@@ -405,8 +361,8 @@ pub(crate) struct ReadHold {
 }
 
 /// Reserve `paths` for reading, refused when any lease writes an overlapping
-/// path or cannot be established. Unlike [`hold`], it fails closed: without
-/// a lease store there is no reservation to stand on, so it is refused.
+/// path or cannot be established. It fails closed: without a lease store
+/// there is no reservation to stand on, so it is refused.
 pub(crate) fn hold_reads(paths: &[&Path]) -> Result<ReadHold, DevError> {
     let store = super::store().ok_or_else(|| {
         DevError::Config("$HOME is not set: the launch lease store has nowhere to live".into())
@@ -683,49 +639,6 @@ mod tests {
         assert!(super::super::guard::is_refusal(&err), "{err}");
         launched.finish().unwrap();
         assert!(!report.exists(), "removed with the lease");
-    }
-
-    /// Coverage reserves a whole tree around the launch's own paths, its
-    /// private directory inside it, without conflicting with them, and
-    /// outlives the release, which removes only the private directory.
-    #[test]
-    fn coverage_reserves_a_tree_and_survives_the_release() {
-        let _serial = crate::test_scratch::process_global_lock();
-        let root = crate::test_scratch::scratch("reservations", "launch-coverage");
-        let run = root.join("run-1");
-        let roles = run.join("roles");
-        std::fs::create_dir_all(&roles).unwrap();
-        std::fs::write(run.join("request.json"), b"{}").unwrap();
-        let spec = LaunchSpec::new(
-            run.clone(),
-            Vec::new(),
-            vec![roles.join("out")],
-            Some(run.clone()),
-        )
-        .with_coverage(vec![run.clone()]);
-        let program = Path::new("/bin/true");
-        let args = vec![PRIVATE_DIR_PLACEHOLDER.to_owned()];
-        let launched = spec.launch(program, &args, &run, &[]).unwrap();
-        let private = PathBuf::from(&launched.args[0]);
-        assert!(private.starts_with(&run) && private.is_dir());
-        let err = super::super::guard::remove_file(&run.join("request.json")).unwrap_err();
-        assert!(super::super::guard::is_refusal(&err), "{err}");
-        let rival = LaunchSpec::new(
-            root.clone(),
-            vec![run.join("request.json")],
-            Vec::new(),
-            None,
-        );
-        assert!(rival.launch(program, &[], &root, &[]).is_err());
-        launched.finish().unwrap();
-        assert!(
-            !private.exists(),
-            "the private directory goes with the lease"
-        );
-        assert!(
-            run.join("request.json").is_file(),
-            "coverage is never removed"
-        );
     }
 
     #[test]

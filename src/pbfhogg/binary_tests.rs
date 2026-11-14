@@ -302,25 +302,6 @@ fn a_build_whose_usage_errors_end_64_is_probed_alike() {
 }
 
 #[test]
-fn a_declared_overwrite_is_required_and_a_declared_none_never_passed() {
-    let (root, path) = install("stance", FAKE_PBFHOGG);
-    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
-    let sort = binary
-        .invocation(writing("sort", "out.pbf").overwrite_stance(false))
-        .unwrap();
-    assert!(!has(sort.args_for_test(), OVERWRITE_FLAG));
-    let sort = binary
-        .invocation(writing("sort", "out.pbf").overwrite_stance(true))
-        .unwrap();
-    assert!(has(sort.args_for_test(), OVERWRITE_FLAG));
-    // `cat` does not accept the flag: a required one refuses the launch.
-    let Err(e) = binary.invocation(writing("cat", "out.pbf").overwrite_stance(true)) else {
-        panic!("a required --overwrite the build lacks was not refused");
-    };
-    assert!(e.to_string().contains("does not accept --overwrite"), "{e}");
-}
-
-#[test]
 fn outputs_get_the_flags_exactly_where_the_subcommand_accepts_them() {
     let (root, path) = install("per-subcommand", FAKE_PBFHOGG);
     let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
@@ -777,65 +758,6 @@ fn a_handle_cannot_be_made_while_a_build_runs() {
     drop(build);
     // The failed construction left no registration behind.
     drop(crate::build::executable_guard::begin_build().unwrap());
-}
-
-/// A run-scoped launch runs in the cwd it is given, inside the run
-/// directory, with its private directory beside its output, and is killed
-/// at its deadline; both come back released.
-#[test]
-fn a_run_scoped_launch_runs_in_its_cwd_and_is_killed_at_its_deadline() {
-    use crate::measure::Supervised;
-    let script = r#"#!/bin/sh
-case "$2" in
-  --help) exit 0 ;;
-  --hel) exit 2 ;;
-  --overwrite|--staging-dir=.) exit 0 ;;
-  --tmp-dir=.) exit 2 ;;
-esac
-case "$1" in
-  sort) pwd -P > "$3"; echo "$6" >> "$3" ;;
-  slow) sleep 5 ;;
-esac
-"#;
-    let (root, path) = install("run-scoped", script);
-    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
-    let run = root.join("run-1");
-    let cwd = run.join("replay/cwd");
-    let outputs = run.join("replay/outputs");
-    std::fs::create_dir_all(&cwd).unwrap();
-    std::fs::create_dir_all(&outputs).unwrap();
-    let scope = super::RunScope {
-        run_dir: &run,
-        cwd: &cwd,
-        deadline: std::time::Duration::from_secs(1),
-        stdout_kept: 64,
-    };
-    let out = outputs.join("out");
-    let argv = PbfArgv::new("sort").arg("-o").written(&out).unwrap();
-    let Supervised::Ran(capture) = binary.run_in(argv, &scope) else {
-        panic!("the launch did not run");
-    };
-    assert!(capture.captured.success());
-    let seen = std::fs::read_to_string(&out).unwrap();
-    let mut lines = seen.lines();
-    assert_eq!(
-        lines.next().map(PathBuf::from),
-        Some(cwd.canonicalize().unwrap())
-    );
-    let private = PathBuf::from(lines.next().unwrap());
-    assert_eq!(private.parent(), Some(outputs.as_path()), "{seen}");
-    assert!(!private.exists(), "released with the launch");
-
-    let Supervised::Ran(capture) = binary.run_in(
-        PbfArgv::new("slow")
-            .arg("-o")
-            .written(outputs.join("slow"))
-            .unwrap(),
-        &scope,
-    ) else {
-        panic!("the launch did not run");
-    };
-    assert!(capture.captured.ending.is_deadline());
 }
 
 #[test]

@@ -52,14 +52,12 @@ impl std::fmt::Debug for Executable<'_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExternalTool {
     Osmium,
-    Osmconvert,
 }
 
 impl ExternalTool {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Osmium => "osmium",
-            Self::Osmconvert => "osmconvert",
         }
     }
 }
@@ -102,9 +100,6 @@ pub(crate) struct Invocation<'a> {
     /// What each launch reserves (`crate::reservations`); `None` runs the
     /// argv as given.
     spec: Option<crate::reservations::LaunchSpec>,
-    /// The child inherits no user environment, only `env` and brokkr's own
-    /// lifecycle variables ([`isolated_env`](Self::isolated_env)).
-    isolated: bool,
 }
 
 impl<'a> Invocation<'a> {
@@ -114,16 +109,7 @@ impl<'a> Invocation<'a> {
             args,
             env: Vec::new(),
             spec: None,
-            isolated: false,
         }
-    }
-
-    /// Drop the inherited environment: the child sees only the variables
-    /// added with [`with_env`](Self::with_env) and brokkr's own lifecycle
-    /// variables. Honoured by [`run_to_file`](Self::run_to_file).
-    pub(crate) fn isolated_env(mut self) -> Self {
-        self.isolated = true;
-        self
     }
 
     /// An invocation each of whose launches reserves `spec`. Its argv may
@@ -193,12 +179,6 @@ impl<'a> Invocation<'a> {
         Self::new(&executable.path, args)
     }
 
-    /// Add one environment variable for the child.
-    pub(crate) fn with_env(mut self, key: &str, value: &str) -> Self {
-        self.env.push((key.to_owned(), value.to_owned()));
-        self
-    }
-
     /// Run to completion with captured output, in `cwd`. Does not check the
     /// exit status; see [`check`](Self::check).
     pub(crate) fn capture_in(&self, cwd: &Path) -> Result<CapturedOutput, DevError> {
@@ -229,189 +209,6 @@ impl<'a> Invocation<'a> {
         };
         finished?;
         Ok(captured)
-    }
-
-    /// Run to completion in `cwd` with stdout written to a new file at
-    /// `stdout` (created, or truncated, here) and stderr captured bounded;
-    /// see [`output::run_stdout_to_file`]. The launch lease is released (and
-    /// a lease the child left held is this run's failure) before this
-    /// returns, so the file is complete when the caller reads it.
-    pub(crate) fn run_to_file(
-        &self,
-        cwd: &Path,
-        stdout: &Path,
-    ) -> Result<output::FileSinkRun, DevError> {
-        let program = self.program_string();
-        let sink = std::fs::File::create(stdout)
-            .map_err(|e| DevError::Config(format!("cannot create {}: {e}", stdout.display())))?;
-        let launched = self.launch(cwd)?;
-        let args = launched.arg_refs();
-        let env: Vec<(&str, &str)> = self
-            .env
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        let run = if self.isolated {
-            output::child::run_stdout_to_file_isolated(&program, &args, cwd, &env, sink)
-        } else {
-            output::run_stdout_to_file(&program, &args, cwd, &env, sink)
-        };
-        let finished = launched.finish();
-        let run = match run {
-            Ok(run) => run,
-            Err(e) => {
-                if let Err(release) = finished {
-                    output::warn(&release.to_string());
-                }
-                return Err(e);
-            }
-        };
-        finished?;
-        Ok(run)
-    }
-
-    /// Run once in `cwd`, killed at `deadline`, each stream kept to `cap`
-    /// (silently past it, so a caller that must see a longer stream asks for
-    /// one byte more than it keeps), `unset` removed from the inherited
-    /// environment, in its own process group. Unlike
-    /// [`capture_in`](Self::capture_in), the release is never folded into a
-    /// spawn failure: a launch whose admission or release did not establish a
-    /// safe state is [`Supervised::Unsafe`], whatever else happened.
-    pub(crate) fn capture_supervised(
-        &self,
-        cwd: &Path,
-        deadline: std::time::Duration,
-        cap: output::child::CaptureCap,
-        unset: &[&str],
-    ) -> Supervised {
-        if crate::shutdown::should_unwind() {
-            return Supervised::Interrupted;
-        }
-        let launched = match self.launch(cwd) {
-            Ok(launched) => launched,
-            // A refusal may come after the lease was made (a private
-            // directory that could not be created), with its release in
-            // doubt: never taken as a clean refusal.
-            Err(e) => return Supervised::Unsafe(e),
-        };
-        let program = self.program_string();
-        let env: Vec<(&str, &str)> = self
-            .env
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        let sigterm = crate::shutdown::SigtermGuard::install();
-        let run = output::child::run_captured_bounded_unsetting(
-            &program,
-            &launched.arg_refs(),
-            cwd,
-            &env,
-            unset,
-            deadline,
-            None,
-            crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
-            cap,
-        );
-        drop(sigterm);
-        let released = launched.finish();
-        match (run, released) {
-            (Err(DevError::Interrupted), released) => {
-                if let Err(e) = released {
-                    output::warn(&e.to_string());
-                }
-                Supervised::Interrupted
-            }
-            (_, Err(e)) => Supervised::Unsafe(e),
-            (Err(e), Ok(())) => Supervised::Failed(e),
-            (Ok(capture), Ok(())) => Supervised::Ran(capture),
-        }
-    }
-
-    /// [`capture_supervised`](Self::capture_supervised) with the sidecar
-    /// attached: the child gets `fifo` as its marker FIFO, and its records
-    /// and process samples are captured as run `run_idx`. The FIFO reader
-    /// outlives the release, so a child that still writes is never cut off by
-    /// a closed reader.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn capture_sidecar(
-        &self,
-        cwd: &Path,
-        deadline: std::time::Duration,
-        cap: output::child::CaptureCap,
-        unset: &[&str],
-        fifo: &mut crate::sidecar::SidecarFifo,
-        run_idx: usize,
-    ) -> Timed {
-        if crate::shutdown::should_unwind() {
-            return Timed::Interrupted;
-        }
-        let launched = match self.launch(cwd) {
-            Ok(launched) => launched,
-            Err(e) => return Timed::Unsafe(e),
-        };
-        let program = self.program_string();
-        let fifo_path = match fifo.path_str() {
-            Ok(path) => path.to_owned(),
-            Err(e) => {
-                return match launched.finish() {
-                    Ok(()) => Timed::Failed(e),
-                    Err(release) => Timed::Unsafe(release),
-                };
-            }
-        };
-        let mut env: Vec<(&str, &str)> = self
-            .env
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        env.push((crate::sidecar::MARKER_FIFO_ENV, fifo_path.as_str()));
-        let sigterm = crate::shutdown::SigtermGuard::install();
-        let start = std::time::Instant::now();
-        let child = output::child::spawn_captured_unsetting(
-            &program,
-            &launched.arg_refs(),
-            cwd,
-            &env,
-            unset,
-            crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
-            output::SpawnProfile::Plain,
-        );
-        let child = match child {
-            Ok(child) => child,
-            Err(e) => {
-                drop(sigterm);
-                return match launched.finish() {
-                    Ok(()) => Timed::Failed(e),
-                    Err(release) => Timed::Unsafe(release),
-                };
-            }
-        };
-        let run = crate::sidecar::run_sidecar_with_deadline(
-            child,
-            fifo,
-            run_idx,
-            start,
-            None,
-            Some(deadline),
-            &crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES,
-            cap,
-            &mut crate::sidecar::ProcSidecarSampler,
-        );
-        drop(sigterm);
-        let released = launched.finish();
-        Timed::Ran(Box::new(TimedCapture {
-            capture: output::child::DeadlineCapture {
-                captured: output::CapturedOutput {
-                    ending: run.data.ending.clone(),
-                    stdout: run.stdout,
-                    stderr: run.stderr,
-                    elapsed: run.elapsed,
-                },
-                output_cut: run.output_cut,
-            },
-            data: run.data,
-            released,
-        }))
     }
 
     /// Fail unless `captured` (this invocation's output) succeeded, naming
@@ -458,44 +255,6 @@ impl<'a> Invocation<'a> {
     pub(crate) fn args_for_test(&self) -> &[String] {
         &self.args
     }
-}
-
-/// What one [`Invocation::capture_supervised`] launch came to.
-pub(crate) enum Supervised {
-    /// The child ran to an ending and the launch was released.
-    Ran(output::child::DeadlineCapture),
-    /// Nothing ran to an ending (resolution, a probe or the spawn failed),
-    /// and nothing was left admitted.
-    Failed(DevError),
-    /// Admission or release did not establish a safe state: some process
-    /// may still hold the launch's paths.
-    Unsafe(DevError),
-    /// A stop request ended it; the release was attempted.
-    Interrupted,
-}
-
-/// What one [`Invocation::capture_sidecar`] launch came to. Unlike
-/// [`Supervised`], a child that was spawned is always `Ran`, its capture kept
-/// whatever its release came to, so a trajectory is never lost to an
-/// interrupt or an unsafe release; the caller judges `released` and the
-/// ending.
-pub(crate) enum Timed {
-    Ran(Box<TimedCapture>),
-    /// Nothing was spawned, and nothing was left admitted.
-    Failed(DevError),
-    /// Admission did not establish a safe state; nothing was spawned.
-    Unsafe(DevError),
-    /// A stop request came before the spawn.
-    Interrupted,
-}
-
-/// A timed launch whose child ran to an ending.
-pub(crate) struct TimedCapture {
-    pub(crate) capture: output::child::DeadlineCapture,
-    /// Its FIFO records, process samples and capture loss.
-    pub(crate) data: crate::sidecar::SidecarData,
-    /// The launch's release: an error leaves the lease held by some process.
-    pub(crate) released: Result<(), DevError>,
 }
 
 impl std::fmt::Debug for Invocation<'_> {

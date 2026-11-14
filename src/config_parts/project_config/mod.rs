@@ -2,7 +2,6 @@ pub mod dellingr;
 pub mod elivagar;
 pub mod litehtml;
 pub mod mogwai;
-pub mod pbfhogg;
 pub mod piners;
 pub mod ratatoskr;
 pub mod sluggrs;
@@ -18,8 +17,6 @@ pub enum ProjectConfig {
     Ratatoskr(Box<ratatoskr::RatatoskrConfig>),
     Piners(piners::PinersConfig),
     Mogwai(mogwai::MogwaiConfig),
-    /// Defaulted when the claimed `[pbfhogg]` table is absent.
-    Pbfhogg(pbfhogg::PbfhoggConfig),
     Generic,
 }
 
@@ -40,7 +37,6 @@ impl ProjectConfig {
                 Ok(Self::Generic)
             }
             Project::Mogwai => Ok(Self::Mogwai(mogwai::parse(table)?)),
-            Project::Pbfhogg => Ok(Self::Pbfhogg(pbfhogg::parse(table)?)),
             _ => Ok(Self::Generic),
         }
     }
@@ -65,33 +61,9 @@ impl ProjectConfig {
             )),
         }
     }
-
-    /// `[pbfhogg.library]`, which `brokkr library` requires.
-    pub(crate) fn pbfhogg_library(&self) -> Result<&pbfhogg::LibraryConfig, DevError> {
-        match self {
-            Self::Pbfhogg(cfg) => cfg.library.as_ref().ok_or_else(|| {
-                DevError::Config(
-                    "brokkr library needs [pbfhogg.library.harness] in brokkr.toml, naming the \
-                     harness member to build (see `brokkr man library`)"
-                        .into(),
-                )
-            }),
-            _ => Err(DevError::Config(
-                "this command needs a pbfhogg project (`project = \"pbfhogg\"`)".into(),
-            )),
-        }
-    }
 }
 
 fn reject_foreign_sections(project: &Project, table: &toml::Table) -> Result<(), DevError> {
-    // `[pbfhogg]` is the project section only when it holds `library`;
-    // without it the table is a hostname section in every project.
-    if pbfhogg::present(table) && project != &Project::Pbfhogg {
-        return Err(DevError::Config(format!(
-            "[pbfhogg.library] belongs to project \"pbfhogg\" (current project: \"{}\")",
-            project.name(),
-        )));
-    }
     for (section, owner) in [
         ("litehtml", Project::Litehtml),
         ("sluggrs", Project::Sluggrs),

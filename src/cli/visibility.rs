@@ -134,9 +134,7 @@ Guard => ("guard", Visibility::Any, None, None, true, crate::measure::MeasureMod
 Kill => ("kill", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
 History => ("history", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Invalidate => ("invalidate", Visibility::Except(MEASURED_DB_ABSENT), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Verify => ("verify", Visibility::Only(&[Project::Pbfhogg, Project::Elivagar, Project::Nidhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Direct),
-Library => ("library", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
-Download => ("download", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium", "curl"]),
+Verify => ("verify", Visibility::Only(&[Project::Elivagar, Project::Nidhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
 CompareTiles => ("compare-tiles", Visibility::Only(&[Project::Elivagar]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
 DownloadOcean => ("download-ocean", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "curl"]),
 OceanBuild => ("ocean-build", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
@@ -306,7 +304,6 @@ impl CommandSpec {
                 | super::Command::Crit { commit, .. }
                 | super::Command::Bench { commit, .. }
                 | super::Command::Verify { commit, .. }
-                | super::Command::Library { commit, .. }
                 | super::Command::Sync { commit, .. }
                 | super::Command::Corpus { commit, .. } => Ok(commit.is_some()),
                 _ => Err(crate::error::DevError::Internal(

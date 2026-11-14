@@ -390,7 +390,7 @@ than this reaper is.
 The reap (and the stale-guard check below) runs inside `lockfile::acquire`
 itself, once per *fresh* hold - never on a re-entrant acquire, whose outer hold
 already reaped. It used to live in one command wrapper, and roughly a dozen
-paths that took the lock directly (bench contexts, the pbfhogg verify harness,
+paths that took the lock directly (bench contexts, the old pbfhogg verify harness,
 piners, ratatoskr) silently skipped it.
 
 A consequence worth naming: the post-acquisition reap runs only once the hold is

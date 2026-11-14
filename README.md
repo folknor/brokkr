@@ -20,7 +20,6 @@ cd ~/Programs/pbfhogg
 brokkr inspect --tags --dataset denmark             # run once, print timing
 brokkr inspect --tags --dataset denmark --bench     # benchmark and store in DB
 brokkr inspect --tags --dataset denmark --hotpath   # function-level timing
-brokkr verify sort                                  # cross-validate against osmium
 
 cd ~/Programs/elivagar
 brokkr tilegen --dataset denmark --bench            # full pipeline benchmark
@@ -115,17 +114,7 @@ Several commands are flag-driven umbrellas that previously had separate subcomma
 
 `add-locations-to-ways` accepts `--index-type`, forwarded verbatim to pbfhogg (omit it for pbfhogg's default). Lands in `cli_args` verbatim.
 
-`repack` re-encodes a PBF with a configurable elements-per-blob cap (`--elements-per-blob N`, default 8000). `degrade` produces an adversarial PBF: `--unsort` (clear `Sort.Type_then_ID` and force one adjacent same-kind blob pair to overlap per kind holding more elements than the cap), `--strip-locations` (drop `LocationsOnWays`), `--strip-indexdata` (clear per-blob indexdata). Flags compose; pbfhogg requires at least one transformation flag on `degrade`. Both write to scratch by default and overwrite each `--bench` iteration. Both, and `cat`, also accept `--as-snapshot KEY` to promote the final iteration's artifact into the dataset graph - `repack` and `cat` always write under `pbf.indexed`; `degrade` writes under `pbf.raw` when `--strip-indexdata` is set, otherwise `pbf.indexed`. `KEY=base` is reserved (CLI sentinel for the dataset's primary data); existing keys are rejected unless `--replace-snapshot` is passed. Subsequent runs address the promoted artifact via `--snapshot KEY` on every measurable pbfhogg command. Closing measurement loops blocked on adversarial inputs:
-
-```
-brokkr repack --dataset planet --elements-per-blob 8000 --as-snapshot packed-8k
-brokkr getparents --dataset planet --snapshot packed-8k --bench
-brokkr degrade --dataset planet --unsort --as-snapshot unsorted
-brokkr sort --dataset planet --snapshot unsorted --bench 1
-brokkr cat --dataset denmark --type way --as-snapshot ways-only
-brokkr check-refs --dataset denmark --snapshot ways-only --bench 1
-```
-
+`repack` re-encodes a PBF with a configurable elements-per-blob cap (`--elements-per-blob N`, default 8000). `degrade` produces an adversarial PBF: `--unsort` (clear `Sort.Type_then_ID` and force one adjacent same-kind blob pair to overlap per kind holding more elements than the cap), `--strip-locations` (drop `LocationsOnWays`), `--strip-indexdata` (clear per-blob indexdata). Flags compose; pbfhogg requires at least one transformation flag on `degrade`. Both write to scratch by default and overwrite each `--bench` iteration. Promoting the artifact into the dataset graph as a snapshot is done by pbfhogg's own tool: `brokkr run --with pbfhogg pbfhogg-datasets -- promote ...`. A promoted snapshot is addressed via `--snapshot KEY` on every measurable pbfhogg command.
 Multi-variant benchmarks: `read`, `write`, `merge`, `extract` (with `--strategy`, `--modes`, `--compressions` flags - `--compressions` is plural because the single-value `--compression` collides with pbfhogg's passthrough flag on `write` / `merge`).
 
 `merge-changes` accepts `--osc-seq <N>` for a single OSC file (back-compat) or `--osc-range LO..HI` to merge a contiguous range of configured OSC entries in one invocation. The range form lands in `cli_args` verbatim, so `brokkr results --command merge-changes --grep 'osc-range'` finds the range-form runs.
@@ -134,7 +123,7 @@ Multi-variant benchmarks: `read`, `write`, `merge`, `extract` (with `--strategy`
 
 `brokkr diff` (with or without `--format osc`) derives its second input by running `apply-changes` on the dataset's PBF + OSC and caching the result at `<scratch>/<pbf-stem>-osc<seq>-bench-merged.osm.pbf`. The cache key includes the OSC seq so different `--osc-seq` invocations don't silently reuse each other's merged files. In any measured mode (`--bench`/`--hotpath`/`--alloc`) the cache is rebuilt before the run so total invocation wall time is reproducible; pass `--keep-cache` to opt back into reuse. Run mode (no measurement flag) always reuses the cache for dev-loop speed. Cache hit/miss + age land in the result row's metadata as `meta.merged_cache` and `meta.merged_cache_age_s`.
 
-`diff-snapshots` benchmarks pbfhogg's `diff` against two independent point-in-time snapshots of the same dataset (e.g. `planet-20260223` vs `planet-20260411`). Unlike `diff` (with or without `--format osc`) - which derives its B side from `apply-changes` and therefore preserves blob-level byte equality with the A side - `diff-snapshots` forces every blob through full decode on both sides. Different working set, different peak memory, different wall time. The dataset's primary (legacy top-level) PBF is referenced as `base`; additional snapshots registered via `brokkr download <region> --as-snapshot <key>` are referenced by their snapshot key. The `--format` flag selects between text diff (default) and OSC-format output; both are written to a scratch file. The `--from`/`--to`/`--format` choices are recorded verbatim in `cli_args` - query osc-only runs via `brokkr results --command diff-snapshots --grep 'format osc'`.
+`diff-snapshots` benchmarks pbfhogg's `diff` against two independent point-in-time snapshots of the same dataset (e.g. `planet-20260223` vs `planet-20260411`). Unlike `diff` (with or without `--format osc`) - which derives its B side from `apply-changes` and therefore preserves blob-level byte equality with the A side - `diff-snapshots` forces every blob through full decode on both sides. Different working set, different peak memory, different wall time. The dataset's primary (legacy top-level) PBF is referenced as `base`; additional snapshots registered in `brokkr.toml` (pbfhogg's `pbfhogg-datasets` tool can add them) are referenced by their snapshot key. The `--format` flag selects between text diff (default) and OSC-format output; both are written to a scratch file. The `--from`/`--to`/`--format` choices are recorded verbatim in `cli_args` - query osc-only runs via `brokkr results --command diff-snapshots --grep 'format osc'`.
 
 ```
 brokkr diff-snapshots --dataset planet --from base --to 20260411 --bench 1
@@ -143,35 +132,9 @@ brokkr diff-snapshots --dataset planet --from 20260411 --to 20260418 --format os
 
 `suite pbfhogg` runs the full benchmark suite.
 
-**Verification** (`brokkr verify <subcommand>`): cross-validates against osmium, osmosis, and osmconvert. Subcommands: `sort`, `cat`, `extract`, `multi-extract`, `tags-filter`, `getid-removeid`, `getparents`, `add-locations-to-ways`, `check-refs`, `check-ids`, `repack`, `degrade` (its decode path), `merge` (apply-changes), `merge-changes` (default and `--simplify`), `tags-filter-osc` (`tags-filter --input-kind osc`), `derive-changes` (diff → osc roundtrip), `renumber`, `diff`, and `all` (runs them all). Verify subcommands keep their own short names; they don't mirror the consolidated CLI umbrella shape.
-
-`verify renumber` is a special case. Most verify commands require pbfhogg's output to be byte-identical (or element-identical) with osmium's. `renumber` does not: pbfhogg's orphan-reference handling in relation members is an intentional deviation documented in pbfhogg's `DEVIATIONS.md`, so a small non-zero diff is expected and does not indicate a regression. The goal of the command is to separate "expected delta" from "actual regression" without a human having to triage every diff.
-
-```
-brokkr verify renumber                              # default: denmark
-brokkr verify renumber --dataset europe --verbose   # print detail on mismatch
-brokkr verify renumber --start-id 1,1,1             # forwarded to both tools
-```
-
-Per run it renumbers the input PBF with both tools, runs `pbfhogg diff -s -c -v` on the two outputs, and classifies the result:
-
-1. Parses the `Summary: left=N right=M same=X different=Y` line to get element counts.
-2. Scans the detail output for `*n<id>` / `*w<id>` / `*r<id>` block headers and counts diff blocks per element type.
-3. Runs `pbfhogg inspect` on the osmium output to recover the total relation count for the threshold check.
-
-**PASS** when element counts match, no node or way block headers appear in the diff, and the total diff count stays under `0.10 * total_relations` (sanity threshold - calibrated from measured rates like Denmark's 306 orphan-ref diffs ÷ 46,103 relations ≈ 0.66%; the threshold catches regressions that would typically be orders of magnitude higher without flagging normal transboundary delta).
-
-**FAIL** when any of those three checks fire: divergent element counts, any node/way diff, or relation diffs that blow past the sanity threshold. On failure the diff log at `target/verify/renumber/verify-renumber-<dataset>-diff.txt` is preserved alongside both renumbered PBFs for human review. On success all three scratch files are removed. The `--verbose` flag additionally prints the first 50 lines of the diff to the terminal when any mismatch (expected or not) is found. `verify all` includes `renumber` as part of the pre-release sweep.
-
-**Other**: `download <region> [--osc-seq N]` fetches datasets from Geofabrik. Accepts short aliases (`denmark`, `europe`) or full Geofabrik paths (`europe/france`, `asia/japan/kanto`). Skips files that already exist (checked against `brokkr.toml` filenames). `--osc-seq N` downloads all missing OSC diffs from the last configured seq through N, hashes them, and appends entries to `brokkr.toml`. New downloads use dated filenames matching the project convention (e.g. `europe-20260329-seq4716.osc.gz`).
-
-`download <region> --as-snapshot <key>` registers a new historical snapshot of an existing dataset under `[host.datasets.<region>.snapshot.<key>]` instead of touching the dataset's primary pbf/osc tables. Requires the dataset to already exist (run `brokkr download <region>` first). The snapshot key must match `[a-zA-Z0-9_-]+`; `base` is reserved as the CLI sentinel for the dataset's legacy/primary data. PBFs are written with snapshot-specific names (`<region>-<key>.osm.pbf`, etc.) and the indexed PBF is generated automatically. OSC diffs are named by sequence alone (`<region>-seq<N>.osc.gz`) in every download flow, so a snapshot and the primary chain share one copy of a diff and no filename date suggests which base it applies to.
-
-`download <region> --refresh` rotates the dataset to a newer upstream snapshot. HEAD-checks upstream `Last-Modified` first; no-ops if not newer than the existing pbf.raw's mtime / `download_date` (use `--force` to rotate anyway). On rotation: archives the existing primary pbf/osc tables under a `[snapshot.<key>]` block (key derived from `download_date` or file mtime as `YYYYMMDD`), downloads the new PBF, generates the indexed PBF via `pbfhogg cat`, updates `download_date` to today, and resets the OSC chain. Errors with a clear message if the derived snapshot key collides with an existing snapshot block. After refresh, the archived state is reachable via `brokkr diff-snapshots --from <key> --to base` and `brokkr apply-changes --dataset <region> --snapshot <key> --osc-seq <N>`.
+Cross-validation against osmium, dataset download and snapshot promotion, and library verification are not brokkr commands. They live in pbfhogg's own binaries and run through brokkr's generic `run`: `brokkr run --with pbfhogg pbfhogg-verify -- CHECK`, `brokkr run --with pbfhogg pbfhogg-datasets -- download ...` (and `-- promote ...`), `brokkr run --with pbfhogg-harness pbfhogg-library -- ...`. Library measurement is the `library-scenario` script bench. `brokkr verify` remains for elivagar (`verify pmtiles`) and nidhogg (`batch`, `geocode`, `readonly`).
 
 Every measurable pbfhogg command accepts `--snapshot <key>` to read its input from a historical snapshot rather than the dataset's primary tables. Producers (`apply-changes`, `merge-changes`, `tags-filter --input-kind osc`, `diff` including `--format osc`, `repack`, `degrade`) consume both PBF and OSC from the snapshot's tables; read-side consumers (`sort`, `cat`, `inspect`, `add-locations-to-ways`, `getid`, `getparents`, `renumber`, `check-refs`, `check-ids`, `check-index`, `check-locations`, `digest`, `time-filter`, `tags-filter`, `extract`, `multi-extract`, `build-geocode-index`) read their PBF input from the snapshot's `pbf.<variant>` table. `--snapshot base` (or omitting the flag) preserves the existing behavior - script-friendly when parameterizing over snapshot keys. The `--snapshot` flag lands verbatim in `cli_args`, so `brokkr results --grep 'snapshot 20260411'` (or just `--grep 20260411`) finds every command run against that snapshot.
-
-Calling plain `brokkr download <region>` against a dataset whose `pbf.raw` is already configured is a SKIP (no auto-refresh), and its one SKIP line names both `--refresh` and `--as-snapshot` so the user knows the alternatives without having to read the source.
 
 ### elivagar
 
@@ -229,7 +192,7 @@ brokkr visual creatine_products
 
 All benchmarks run through `BenchHarness`, which provides:
 
-- **Exclusive lock** - prevents parallel bench/verify/hotpath runs via lockfile
+- **Exclusive lock** - prevents parallel bench/hotpath runs via lockfile
 - **SQLite storage** - results stored in `.brokkr/results.db` per project with git commit, hostname, and full environment snapshot
 - **Multiple timing modes** - in-process (N runs, best-of-N), subprocess (external binary), and distribution (min/p50/p95/max)
 - **Retroactive benchmarking** - `--commit <hash>` builds and benchmarks old commits via a persistent git worktree (sibling `.brokkr-worktree-<project>-<short>/`). Reused on subsequent runs at the same commit so cargo `target/` survives. Run `brokkr clean --worktrees` to garbage collect.
@@ -239,7 +202,7 @@ All benchmarks run through `BenchHarness`, which provides:
 
 Every measured run (bench, hotpath, alloc) automatically samples `/proc/{pid}/stat`, `/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals. Data is stored in `.brokkr/sidecar.db` (gitignored - local to the machine that ran it). The main results in `.brokkr/results.db` stay small, and are gitignored too.
 
-The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe for application phase markers and counters. Markers are lines of the form `<timestamp_us> <name>`, counters are `<timestamp_us> @<name>=<value>`, every timestamp in microseconds since the spawned process started, which lines up approximately with the sample clock (not UNIX epoch; "The clock" in `brokkr man measure`); a library harness running several calls in one process tags either with its call, `<timestamp_us> %<call_id> ...`, and `brokkr sidecar <uuid> --call <call_id>` reads one call's stream (see "Marker & counter rules" in `brokkr man measure`; a tagged body starting `@@` or `!` is reserved for a call sink's sealing and terminal records). Markers are point-in-time bookmarks - the protocol has no notion of spans or pairs. `--durations` and `--phase` read pair spans from a `FOO_START` / `FOO_END` convention if the emitter happens to follow it, and a marker-span wall (ratatoskr's `SYNC_START`..`SYNC_END`) names its two boundaries; nothing else assumes that structure.
+The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe for application phase markers and counters. Markers are lines of the form `<timestamp_us> <name>`, counters are `<timestamp_us> @<name>=<value>`, every timestamp in microseconds since the spawned process started, which lines up approximately with the sample clock (not UNIX epoch; "The clock" in `brokkr man measure`); a harness running several calls in one process tags either with its call, `<timestamp_us> %<call_id> ...`, and `brokkr sidecar <uuid> --call <call_id>` reads one call's stream (see "Marker & counter rules" in `brokkr man measure`; a tagged body starting `@@` or `!` is reserved for a call sink's sealing and terminal records). Markers are point-in-time bookmarks - the protocol has no notion of spans or pairs. `--durations` and `--phase` read pair spans from a `FOO_START` / `FOO_END` convention if the emitter happens to follow it, and a marker-span wall (ratatoskr's `SYNC_START`..`SYNC_END`) names its two boundaries; nothing else assumes that structure.
 
 `--stop <marker>` kills the child process as soon as the named untagged marker is emitted, allowing benchmarks of individual phases without waiting for the full run to complete. The SIGKILL exit is treated as success.
 
@@ -396,7 +359,7 @@ file = "denmark-4705.osc.gz"
 xxhash = "f1e2d3c4b5a6..."
 
 # Optional historical snapshots - additional point-in-time captures of the
-# same dataset, registered via `brokkr download denmark --as-snapshot <key>`.
+# same dataset, registered by hand or by pbfhogg's `pbfhogg-datasets` tool.
 # The legacy top-level pbf/osc data above is implicitly snapshot `base`.
 # `diff-snapshots --from base --to 20260411` diffs the two.
 [plantasjen.datasets.denmark.snapshot.20260411]
@@ -415,7 +378,7 @@ xxhash = "..."
 
 - `project` - which supported project this config belongs to
 - `[hostname.datasets.*]` - named datasets with PBF variants, OSC diffs, PMTiles entries, bounding box, and (pbfhogg) named GeoJSON extract polygons under `polygon.<name>`
-- `[hostname.datasets.*.snapshot.<key>]` - additional historical snapshots of the dataset (different point-in-time PBFs of the same region). Each snapshot has its own `pbf` and optional `osc` tables. The legacy top-level data is implicitly snapshot `base` (a reserved name). Snapshot keys must match `[a-zA-Z0-9_-]+`. Snapshots are first-class for `diff-snapshots` and addressable via `--snapshot <key>` on every measurable pbfhogg command (`apply-changes`, `merge-changes`, `tags-filter`, `diff` including `--format osc`, `repack`, `degrade`, `sort`, `cat`, `inspect`, `add-locations-to-ways`, `getid`, `getparents`, `renumber`, `check-refs`, `check-ids`, `check-index`, `check-locations`, `digest`, `time-filter`, `extract`, `multi-extract`, `build-geocode-index`). Refresh-mode downloads (`brokkr download <region> --refresh`) populate snapshot blocks automatically by archiving the previous primary state. Generative commands `brokkr repack --as-snapshot KEY`, `brokkr degrade --as-snapshot KEY` and `brokkr cat --as-snapshot KEY` register newly-produced artifacts under this same shape
+- `[hostname.datasets.*.snapshot.<key>]` - additional historical snapshots of the dataset (different point-in-time PBFs of the same region). Each snapshot has its own `pbf` and optional `osc` tables. The legacy top-level data is implicitly snapshot `base` (a reserved name). Snapshot keys must match `[a-zA-Z0-9_-]+`. Snapshots are first-class for `diff-snapshots` and addressable via `--snapshot <key>` on every measurable pbfhogg command (`apply-changes`, `merge-changes`, `tags-filter`, `diff` including `--format osc`, `repack`, `degrade`, `sort`, `cat`, `inspect`, `add-locations-to-ways`, `getid`, `getparents`, `renumber`, `check-refs`, `check-ids`, `check-index`, `check-locations`, `digest`, `time-filter`, `extract`, `multi-extract`, `build-geocode-index`). Download and promotion into snapshot blocks is pbfhogg's `pbfhogg-datasets` tool (`brokkr run --with pbfhogg pbfhogg-datasets -- download ...`), not a brokkr command.
 - `xxhash` - optional XXH128 hash for file integrity checks (`sha256` accepted as alias during migration). Run `brokkr env` to see computed hashes for updating config
 - `[hostname]` - per-host path overrides, port, drive configuration, and default cargo features; defaults to `data/`, `data/scratch/`, and cargo target dir
 - `features` - host Cargo feature defaults, inherited according to the command's build path. See `docs/brokkr.toml.md` for the policy. CLI `--features` are additive where host features apply.

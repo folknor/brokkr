@@ -179,8 +179,6 @@ impl Command {
                 dedupe,
                 clean,
                 snapshot,
-                as_snapshot,
-                replace_snapshot,
             } => {
                 // clap refuses `--dedupe` with `--type` or `--clean`, so a
                 // dedupe run carries neither.
@@ -194,8 +192,6 @@ impl Command {
                 };
                 let params = CommandParams {
                     snapshot,
-                    as_snapshot,
-                    replace_snapshot,
                     ..Default::default()
                 };
                 RoutedCommand::Pbf {
@@ -458,14 +454,10 @@ impl Command {
                 pbf,
                 snapshot,
                 elements_per_blob,
-                as_snapshot,
-                replace_snapshot,
                 force_repack,
             } => {
                 let params = CommandParams {
                     snapshot,
-                    as_snapshot,
-                    replace_snapshot,
                     ..Default::default()
                 };
                 RoutedCommand::Pbf {
@@ -487,13 +479,9 @@ impl Command {
                 unsort,
                 strip_locations,
                 strip_indexdata,
-                as_snapshot,
-                replace_snapshot,
             } => {
                 let params = CommandParams {
                     snapshot,
-                    as_snapshot,
-                    replace_snapshot,
                     ..Default::default()
                 };
                 RoutedCommand::Pbf {
@@ -551,8 +539,6 @@ impl Command {
             | Self::History { .. }
             | Self::Invalidate { .. }
             | Self::Verify { .. }
-            | Self::Library { .. }
-            | Self::Download { .. }
             | Self::CompareTiles { .. }
             | Self::DownloadOcean
             | Self::OceanBuild { .. }

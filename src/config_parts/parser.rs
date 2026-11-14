@@ -1174,19 +1174,14 @@ fn parse_hosts(
 
 /// Whether the top-level `key`, holding `value`, is a `[<hostname>]` section
 /// (or, not being a table, a misplaced one): neither a reserved section, nor
-/// a value key brokkr claims, nor the pbfhogg project section. The explicit
-/// `[host]` namespace is a reserved section. A script bench's resolved view
-/// (`crate::bench::view`) drops exactly these.
+/// a value key brokkr claims. The explicit `[host]` namespace is a reserved
+/// section. A script bench's resolved view (`crate::bench::view`) drops
+/// exactly these.
 pub(crate) fn is_host_key(key: &str, value: &toml::Value) -> bool {
     if SECTIONS.contains(&key) {
         return false;
     }
-    if !value.is_table() && VALUE_KEYS.contains(&key) {
-        return false;
-    }
-    // A `[pbfhogg]` table holding `library` is the pbfhogg project section;
-    // without it the name stays the hostname it always was.
-    !(key == project_config::pbfhogg::SECTION && project_config::pbfhogg::claims(value))
+    value.is_table() || !VALUE_KEYS.contains(&key)
 }
 
 /// Judge one host section as a config load judges `[host.<name>]`: its

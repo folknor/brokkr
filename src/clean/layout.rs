@@ -146,16 +146,10 @@ impl ProjectState {
         self.root.join("pbfhogg-exit-probe-missing.osm.pbf")
     }
 
-    /// `brokkr verify`'s reference cache: one directory per execution key,
-    /// holding a manifest and the reference run's artifacts.
+    /// The reference cache the retired `brokkr verify` left under the state
+    /// root. Nothing writes it now; `brokkr clean` still sweeps it.
     pub(crate) fn verify_reference_dir(&self) -> PathBuf {
         self.root.join("verify-reference")
-    }
-
-    /// `brokkr library --all`'s certification records, one JSON document
-    /// each, `<uuid>.json`. A result, never cleaned.
-    pub(crate) fn library_certifications(&self) -> PathBuf {
-        self.root.join("library-certifications")
     }
 
     pub(crate) fn worktrees_file(&self) -> PathBuf {
@@ -398,7 +392,7 @@ impl<'a> PbfhoggLayout<'a> {
         Self { paths }
     }
 
-    /// Where clean looks for pbfhogg's verify output: under `target_dir`,
+    /// Where clean looks for the output the retired pbfhogg verify left: under `target_dir`,
     /// the host section's `target` else cargo's (`config::host_target_dir`).
     pub(crate) fn verify_output(target_dir: &Path) -> PathBuf {
         target_dir.join(crate::target_namespace::VERIFY)
@@ -426,8 +420,9 @@ impl<'a> PbfhoggLayout<'a> {
         scratch_dir.join(format!("{prefix}-{command}-output.{extension}"))
     }
 
-    /// `<scratch>/library`: `brokkr library` run directories, one
-    /// `<scenario>/run-N/` each, kept after a failed run.
+    /// `<scratch>/library`: the run directories the retired `brokkr library`
+    /// left, one `<scenario>/run-N/` each. Nothing writes them now;
+    /// `brokkr clean` still sweeps them.
     pub(crate) fn library_runs(scratch_dir: &Path) -> PathBuf {
         scratch_dir.join("library")
     }

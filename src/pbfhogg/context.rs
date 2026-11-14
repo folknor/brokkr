@@ -71,8 +71,6 @@ pub struct CommandParams {
     pub keep_cache: bool,
     /// `0` asks pbfhogg to resolve the worker count from available CPUs.
     pub jobs: Option<usize>,
-    pub as_snapshot: Option<String>,
-    pub replace_snapshot: bool,
     /// The dataset's configured getid/getparents bench IDs; `None` uses the
     /// built-in lists.
     pub selection: BenchSelection,

@@ -169,15 +169,9 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "pbfhogg",
-        summary: "pbfhogg commands, verify subcommands, snapshot graph, OSC parser",
+        summary: "pbfhogg commands and snapshot graph",
         content: include_str!("../docs/projects/pbfhogg.md"),
         commands: &[CommandId::Read],
-    },
-    Topic {
-        name: "library",
-        summary: "brokkr library: the pbfhogg library harness, [pbfhogg.library], its protocol, --bench and --hotpath/--alloc measurement, --all certification",
-        content: include_str!("../docs/commands/library.md"),
-        commands: &[CommandId::Library],
     },
     Topic {
         name: "elivagar",

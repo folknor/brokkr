@@ -2185,15 +2185,6 @@ impl DevConfig {
             .and_then(|h| h.worktree_keep.map(std::num::NonZeroUsize::get))
             .unwrap_or(crate::worktree_record::DEFAULT_KEEP)
     }
-
-    /// The verify reference cache budget for `hostname`, in bytes; `None`
-    /// keeps every entry.
-    pub fn verify_reference_budget(&self, hostname: &str) -> Option<u64> {
-        self.hosts
-            .get(hostname)
-            .and_then(|h| h.verify_reference_budget)
-            .map(|budget| u64::try_from(budget.bytes()).unwrap_or(u64::MAX))
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2218,12 +2209,9 @@ pub struct HostConfig {
     /// is this times the number of projects in play, which is why it is a
     /// growth damper rather than a bound.
     pub worktree_keep: Option<std::num::NonZeroUsize>,
-    /// The retained size of pbfhogg's verify reference cache, in the logical
-    /// bytes its manifests record (`"50G"`, `"500M"` or bytes). Absent: no
-    /// eviction. Applied when each verify ends, keeping the most recently
-    /// used entries that fit; zero keeps none. Per host because the disk is
-    /// a host property. A retained-artifact budget, not a disk bound: placed
-    /// outputs share an entry's blocks.
+    /// Retired: it bounded pbfhogg's verify reference cache, which no
+    /// command writes any more. Still accepted so a config that sets it loads;
+    /// nothing reads it.
     pub verify_reference_budget: Option<crate::elivagar::tilegen_config::ByteSize>,
     pub port: Option<u16>,
     pub drives: Option<DriveConfig>,
@@ -2291,13 +2279,6 @@ impl HarnessConfig {
     /// the section in the override warning.
     pub fn configured_profile(&self, table: &str) -> Option<crate::build::RustProfile> {
         crate::build::configured_profile(table, self.profile.as_ref(), self.debug)
-    }
-
-    /// Resolved binary name (defaults to `package` when unset), as records
-    /// name the bin that ran; `cargo build` itself takes `--package` and
-    /// `--bin` separately.
-    pub fn binary_name(&self) -> &str {
-        self.binary.as_deref().unwrap_or(&self.package)
     }
 }
 

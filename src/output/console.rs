@@ -31,47 +31,8 @@ pub fn is_quiet() -> bool {
 // printers always print because they represent user-facing actions that should
 // be visible even in non-verbose mode. The others (`build_msg`, `bench_msg`,
 // `result_msg`) are suppressed in quiet mode because they are
-// internal progress messages. `verify_msg` has its own gate (the buffer
-// below). Hotpath interpretation notes, errors and warnings are never suppressed.
-
-// --- Verify detail buffer ---
-// `verify_msg` carries the per-subcommand detail (section headers, inspect
-// dumps, element diffs). By default each verify check runs "quiet on pass,
-// loud on fail": the detail is captured into a buffer and only replayed if
-// the check fails; on success it's discarded and just a one-line summary
-// prints. `-v`/`--verbose` skips the buffer so detail streams live.
-//
-// `None` = live (print immediately). `Some(vec)` = capturing into the buffer,
-// one rendered block (every line prefixed) per call.
-// verify holds an exclusive process lock, so the Mutex is uncontended.
-static VERIFY_BUFFER: Mutex<Option<Vec<String>>> = Mutex::new(None);
-
-/// Start capturing `verify_msg` detail into the buffer (drops any prior).
-pub fn verify_buffer_begin() {
-    *VERIFY_BUFFER
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Vec::new());
-}
-
-/// Stop capturing and discard the buffered detail (the pass path).
-pub fn verify_buffer_discard() {
-    *VERIFY_BUFFER
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-}
-
-/// Stop capturing and print the buffered detail (the fail path).
-pub fn verify_buffer_flush() {
-    let buffered = VERIFY_BUFFER
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    if let Some(blocks) = buffered {
-        for block in blocks {
-            emit_text(Stream::Out, &block);
-        }
-    }
-}
+// internal progress messages. `verify_msg` prints live. Hotpath
+// interpretation notes, errors and warnings are never suppressed.
 
 // --- Run log and status line ---
 // `brokkr check` tees every line it prints - plus the narration it no longer
@@ -435,23 +396,7 @@ pub fn bench_msg(msg: &str) {
 
 pub fn verify_msg(msg: &str) {
     let text = prefixed(&tag_prefix("[verify]"), msg);
-    let mut guard = VERIFY_BUFFER
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match guard.as_mut() {
-        Some(buf) => buf.push(text),
-        None => {
-            // Release the buffer lock before taking the renderer's.
-            drop(guard);
-            emit_text(Stream::Out, &text);
-        }
-    }
-}
-
-/// Verify summary line - always printed immediately, bypassing the detail
-/// buffer (used for each check's one-line PASS/FAIL result and the final tally).
-pub fn verify_summary(msg: &str) {
-    emit_tag("[verify]", msg);
+    emit_text(Stream::Out, &text);
 }
 
 /// Interpretation notes must remain visible even on a quiet measured run.
@@ -782,7 +727,6 @@ mod channel_tests {
                 guard_msg,
                 hotpath_msg,
                 download_msg,
-                verify_summary,
                 litehtml_msg,
                 sluggrs_msg,
                 ratatoskr_msg,
@@ -795,9 +739,7 @@ mod channel_tests {
             ] {
                 printer("logged action");
             }
-            verify_buffer_begin();
-            verify_msg("buffered detail");
-            verify_buffer_flush();
+            verify_msg("verify detail");
             // Simulate a drawn terminal status line even though stdout is a pipe.
             RENDER.lock().unwrap().drawn = true;
             test_msg("clears status");
@@ -834,8 +776,8 @@ mod channel_tests {
         assert!(stdout.contains("[result]  unretrievable result\n"));
         assert!(stdout.contains("[warn]    visible warning\n"));
         assert!(stdout.contains("\r\x1b[2K[test]    clears status\n"));
-        assert!(stdout.contains("[verify]  buffered detail\n"));
-        assert_eq!(log.matches("logged action").count(), 15);
+        assert!(stdout.contains("[verify]  verify detail\n"));
+        assert_eq!(log.matches("logged action").count(), 14);
         assert!(!log.contains('\x1b'));
         assert!(stderr.contains("[sidecar] query provenance\n"));
         assert!(stderr.contains("[sidecar] unstored session\n"));

@@ -154,10 +154,10 @@ mod tests {
 
         let explicit_bbox = "9,9,9,9".parse().unwrap();
         let explicit = resolve_bbox(Some(&explicit_bbox), "denmark", &paths).expect("bbox");
-        assert_eq!(explicit.as_str(), "9,9,9,9");
+        assert_eq!(explicit.to_string(), "9,9,9,9");
 
         let from_dataset = resolve_bbox(None, "denmark", &paths).expect("bbox");
-        assert_eq!(from_dataset.as_str(), "1,2,3,4");
+        assert_eq!(from_dataset.to_string(), "1,2,3,4");
     }
 
     #[test]
@@ -370,7 +370,7 @@ mod tests {
         assert!(err.contains("--variant raw"), "got: {err}");
         // Names the re-download path as the proper fix.
         assert!(
-            err.contains("brokkr download planet --as-snapshot 20260411"),
+            err.contains("pbfhogg-datasets -- download planet --as-snapshot 20260411"),
             "got: {err}"
         );
 

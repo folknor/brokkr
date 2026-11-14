@@ -42,23 +42,15 @@ fn render_single_or_multi(
         return;
     }
 
-    // One library measurement's group (`brokkr man library`, Measuring a
-    // scenario): its rows share one uuid, and each is shown whole, the
-    // scenario's first, iterations and provenance included.
+    // One stored group (a retired library measurement's): its rows share one
+    // uuid, and each is shown whole, the scenario's first, iterations and
+    // provenance included.
     if !force_table && rows.len() > 1 && rows.iter().all(|r| r.uuid == rows[0].uuid) {
         for (i, row) in rows.iter().enumerate() {
             if i > 0 {
                 println!();
             }
             println!("{}", db::format_single_result(row, has_sidecar(&row.uuid)));
-        }
-        // A library against CLI measurement's comparison, never folded into
-        // `--compare`.
-        if let Some(lines) = crate::pbfhogg::library::cli_comparison(rows) {
-            println!();
-            for line in lines {
-                println!("{line}");
-            }
         }
         return;
     }
@@ -323,21 +315,12 @@ fn show_typed_compare(
     if rows_a.is_empty() && rows_b.is_empty() && !bench_empty {
         return Ok(false);
     }
-    // The canonical plans and contexts library rows name, so an unpaired one
-    // can be explained down to the field.
-    let digests: std::collections::BTreeSet<String> = rows_a
-        .iter()
-        .chain(&rows_b)
-        .flat_map(db::library_rows::digests)
-        .collect();
-    let documents = results_db.library_documents(&digests)?;
     let table = db::format_compare_with_limit(
         &db::Sides {
             commit_a,
             rows_a: &rows_a,
             commit_b,
             rows_b: &rows_b,
-            documents: &documents,
         },
         q.top,
         q.filter.limit,

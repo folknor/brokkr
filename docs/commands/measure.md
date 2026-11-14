@@ -32,10 +32,7 @@ the command name.
 The measurable commands are pbfhogg's data ops, elivagar's tilegen/etc., and
 nidhogg's query/ingest. Piners' `corpus` is **not** measurable: it takes no
 measurement flag, and its timing is the parity run row's `wall_ms` (why:
-`docs/commands/corpus.md`). Pbfhogg's `library SCENARIO` takes `--bench`, and `--hotpath`/`--alloc` for a
-scenario its harness declares hotpath, building the
-`[pbfhogg.library.harness]` member with the instrumentation feature added;
-every process is a full verification (`brokkr man library`).
+`docs/commands/corpus.md`).
 
 ## Command plans
 
@@ -200,10 +197,7 @@ One fact, one place. A run with a clean tree prints, in order:
   is what it would have been: the alias is bookkeeping, not part of the
   measurement. A harness measurement writes its session in one transaction
   after the last iteration, so a storage failure leaves no session behind
-  under an id no line named. A library measurement is the exception: it
-  stores each process as soon as it is judged, keeping the earlier ones if a
-  later write fails, and names its session on that error (`brokkr man
-  library`, Measuring a scenario).
+  under an id no line named.
 
 Sent to the run-log channel (`detail`) instead of the console: the per-run
 sidecar attach (`sidecar attached to pid P, run k`, one-indexed like `run i/n`)
@@ -311,7 +305,7 @@ Key files: `src/sidecar.rs` (sampler and FIFO),
 
 The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named
 pipe, `.brokkr/.sidecar-<token>.fifo` with a fresh 128-bit random token per
-measurement or library run (`src/sidecar/namespace.rs`; what `brokkr clean`
+measurement run (`src/sidecar/namespace.rs`; what `brokkr clean`
 removes is in `brokkr man clean`). Only a child brokkr attaches a FIFO to
 gets the variable: brokkr drops `BROKKR_MARKER_FIFO` and
 `BROKKR_HARNESS_ARTEFACT_DIR` from its own environment when a command starts
@@ -481,7 +475,7 @@ The FIFO carries these line types (parsed in `SidecarFifo::drain`,
   either type. What a timestamp means is under "The clock" below.
 - **Call stream** - `<ts_us> %<call_id> <name>` and
   `<ts_us> %<call_id> @<name>=<value>` are the same records in one call's
-  stream, for a library harness that runs several calls in one process.
+  stream, for a harness that runs several calls in one process.
   `call_id` is 1 to 64 bytes of `A-Z a-z 0-9 _ . -`, so nothing is ever
   escaped; it names one invocation within one process run, the producer
   keeps it unique, and a human label belongs in the harness artefact, not
@@ -502,9 +496,8 @@ The FIFO carries these line types (parsed in `SidecarFifo::drain`,
   tagged body starting `@@` or `!` is rejected, so a tagged counter name
   cannot start with `@` and a tagged marker name cannot start with `!`.
   Untagged lines read as before (`<ts> @@x=1` is a counter named `@x`). A
-  library harness's call sink writes them when it is sealed; what they mean
-  is `brokkr man library`, The call stream. They are never markers or
-  counters in any view. sidecar.db stores them (`sidecar_sink_records`,
+  harness's call sink writes them when it is sealed. They are never markers
+  or counters in any view. sidecar.db stores them (`sidecar_sink_records`,
   since its v10, a terminal's drops as exact decimal text) and the default
   summary reads them; a run stored before v10 had no place for them and
   was stored as incomplete, which it stays.
@@ -512,8 +505,8 @@ The FIFO carries these line types (parsed in `SidecarFifo::drain`,
 **The clock.** Every `<ts_us>` on the FIFO is a non-negative integer count
 of microseconds on one monotonic elapsed-time clock whose zero is the start
 of the process brokkr spawned. Every thread, call stream, counter and sink
-end shares that origin, and so do a library harness's call boundaries
-(`brokkr man library`). Nothing resets it: not opening the FIFO, not
+end shares that origin, and so do a harness's call boundaries.
+Nothing resets it: not opening the FIFO, not
 initialising instrumentation, not beginning a call, not the first record.
 UNIX-epoch stamps do not conform. The origin matters because brokkr stamps
 each `/proc` sample (the `t` field) from an `Instant` it takes just before
@@ -552,14 +545,13 @@ The capture keeps every record in the one order it arrived in, markers,
 counters and sink ends alike, and sidecar.db stores each record's position
 in it (`record_idx`, since v10; NULL on older rows, whose cross-kind order
 was never recorded): counters and sink ends read back in arrival order,
-markers in `marker_idx` order, the same order among markers. A library
-measurement also stores each call's boundaries and its sink's own account
-from its call document (`sidecar_calls`; `brokkr man library`, Measuring a
-scenario). Every rejected line, including invalid UTF-8
+markers in `marker_idx` order, the same order among markers. Runs
+stored by the retired `brokkr library` also hold each call's boundaries and
+its sink's own account (`sidecar_calls`), which still read. Every rejected line, including invalid UTF-8
 and a record cut off without a newline when the writers close, warns and
 marks the run's stored trajectory incomplete, so a later `brokkr sidecar`
 query still says so. A query that finds no fault does not mean every line
-arrived: the FIFO is best effort, and a library harness's own end-of-call
+arrived: the FIFO is best effort, and a harness's own end-of-call
 snapshot is the authoritative figure. brokkr asks the kernel for a 1 MiB
 FIFO buffer (the unprivileged default ceiling) so a producer between two
 drains drops fewer lines; where that is refused the default stays.
@@ -603,7 +595,7 @@ concept instead:
 
 | View | Counter interpretation |
 |---|---|
-| `--stalls` | rolls up `*_wait_ns` counters per stream: max value per name (strictly-monotonic, so max == cumulative total), category = name minus the `_wait_ns` suffix, reported as ms + `% of wall` for the process stream, as ms + `%` of the call's own wall (return minus entry) for a call with boundaries, and as ms alone for any other call stream (the process wall would understate a short call). The observed max is a best-effort reading, not the call's total; a library measurement's call rows carry the call's authoritative snapshot (`brokkr man library`, Measuring a scenario). The `%` can exceed 100 for waits accumulated across concurrent threads (it's the avg threads parked in that category; single-threaded waits read as clean sub-100%). Unifies both projects - it picks up pbfhogg's `pipeline_*_wait_ns` and elivagar's `sort_chunk_write_wait_ns` etc. in one table. |
+| `--stalls` | rolls up `*_wait_ns` counters per stream: max value per name (strictly-monotonic, so max == cumulative total), category = name minus the `_wait_ns` suffix, reported as ms + `% of wall` for the process stream, as ms + `%` of the call's own wall (return minus entry) for a call with boundaries, and as ms alone for any other call stream (the process wall would understate a short call). The observed max is a best-effort reading, not the call's total; a stored library measurement's call rows carry the call's authoritative snapshot. The `%` can exceed 100 for waits accumulated across concurrent threads (it's the avg threads parked in that category; single-threaded waits read as clean sub-100%). Unifies both projects - it picks up pbfhogg's `pipeline_*_wait_ns` and elivagar's `sort_chunk_write_wait_ns` etc. in one table. |
 | `--counters` | prints every counter point verbatim (`t=<sec> name=value`, `[call]` before the name when tagged; JSONL carries `run` and `call`), no aggregation. `--grep <SUBSTR>` keeps only counters whose name contains the substring, and composes with `--phase`; a run emitting a progress counter every 64 blobs otherwise buries the lines that matter |
 
 See the README "Sidecar conventions" section for the emitter-side contract.
@@ -763,12 +755,7 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`, `--comp
 Samples, markers, counters, and FIFO records have explicit limits in
 `MeasurementTunables`. The sample, marker, and counter budgets apply across
 all iterations in one measurement, so a large `--bench N` request cannot
-multiply the retained trajectory without bound. A library measurement
-(`--bench`, `--hotpath` or `--alloc`) is the exception (`brokkr man library`, Measuring a scenario): each of its
-processes is verified whole and has the budgets a verification has, and
-the bound is instead on memory, since each process's trajectory is stored
-as soon as it is judged and brokkr holds at most one; the stored volume
-grows with N, as it does not for other measurements. Overlong FIFO records are
+multiply the retained trajectory without bound. Overlong FIFO records are
 discarded through their newline without growing the temporary line buffer.
 Reading the FIFO is bounded too: each supervisor tick consumes at most 4 MiB
 of it, discarded bytes included, so a child writing without pause cannot
@@ -782,15 +769,13 @@ When anything is omitted, the run warns naming each cause (rejected lines,
 records possibly unread, the marker or counter limit, the sample limit, cut
 child output) and stores a truncation flag beside that iteration's sidecar
 rows; querying an affected run with `brokkr sidecar` warns that the stored
-trajectory is incomplete. A library verification tells the causes apart: only
-those that may have lost a FIFO record make a call stream incomplete.
+trajectory is incomplete.
 
 The shared child supervisor also bounds captured stdout and stderr: 16 MiB per
 stream for ordinary commands and sidecar measurements, 64 MiB for the ratatoskr
 harness and piners corpus report, and 128 MiB for Cargo output. The
-`[cargo_env]` evaluator, `script_check` and a `brokkr library` verification
-run (whose harness must write nothing, so 64 KiB of each is kept for the
-report) have smaller contract-specific limits.
+`[cargo_env]` evaluator and `script_check`
+have smaller contract-specific limits.
 The supervisor keeps reading after a limit so the child cannot block on a full
 pipe. A captured command that exceeds its limit fails with a capture error rather
 than returning partial bytes to a result parser. A sidecar measurement retains
@@ -853,8 +838,4 @@ Env vars brokkr sets on hotpath child processes:
 `capture_hotpath` uses a fixed `hotpath-report.json`, cleared before and
 after; the shared measure runner gives every launch a name of its own,
 declares it to the launch's reservation where there is one, and removes it
-after the launch. A `brokkr library` profiled run is the
-exception: its report goes in the run directory, is judged by a stricter
-rule than the parse above (a called function of the requested dimension)
-and is removed with the directory (`brokkr man library`, Profiling a
-scenario).
+after the launch.

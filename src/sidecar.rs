@@ -691,40 +691,6 @@ pub(crate) enum Record {
     Sealing(Sealing),
     Terminal(Terminal),
 }
-
-impl Record {
-    /// The call stream it belongs to; `None` is the process-wide stream.
-    pub(crate) fn call(&self) -> Option<&str> {
-        match self {
-            Self::Marker(m) => m.call.as_deref(),
-            Self::Counter(c) => c.call.as_deref(),
-            Self::Sealing(s) => Some(&s.call),
-            Self::Terminal(t) => Some(&t.call),
-        }
-    }
-
-    pub(crate) fn timestamp_us(&self) -> i64 {
-        match self {
-            Self::Marker(m) => m.timestamp_us,
-            Self::Counter(c) => c.timestamp_us,
-            Self::Sealing(s) => s.timestamp_us,
-            Self::Terminal(t) => t.timestamp_us,
-        }
-    }
-
-    /// The record in its wire spelling, without the newline.
-    pub(crate) fn wire(&self) -> String {
-        let tag = self.call().map_or_else(String::new, |c| format!("%{c} "));
-        let ts = self.timestamp_us();
-        match self {
-            Self::Marker(m) => format!("{ts} {tag}{}", m.name),
-            Self::Counter(c) => format!("{ts} {tag}@{}={}", c.name, c.value),
-            Self::Sealing(s) => format!("{ts} {tag}@@{}={}", s.name, s.value),
-            Self::Terminal(t) => format!("{ts} {tag}!{} drops={}", t.end.name(), t.drops),
-        }
-    }
-}
-
 /// What a capture omitted, by cause. A record the FIFO reader may not hold
 /// (`stream_lost`) is a different fact from a sample or output byte it did
 /// not keep: a library verification's call-stream verdict reads the first
@@ -809,8 +775,8 @@ impl CallCensus {
     }
 }
 
-/// The census bound a capture uses unless its caller sets one.
-const DEFAULT_CALL_CENSUS_LIMIT: usize = 4096;
+/// The bound on the census of call ids each capture keeps.
+const CALL_CENSUS_LIMIT: usize = 4096;
 
 /// Summary of a sidecar run.
 #[derive(Debug, Clone)]
@@ -865,6 +831,17 @@ impl ClockOutliers {
              Marker & counter rules)",
             crate::output::count(self.count, "FIFO record")
         ))
+    }
+}
+
+impl Record {
+    pub(crate) fn timestamp_us(&self) -> i64 {
+        match self {
+            Self::Marker(m) => m.timestamp_us,
+            Self::Counter(c) => c.timestamp_us,
+            Self::Sealing(s) => s.timestamp_us,
+            Self::Terminal(t) => t.timestamp_us,
+        }
     }
 }
 
@@ -1223,7 +1200,6 @@ pub(crate) struct SidecarFifo {
     samples_remaining: usize,
     markers_remaining: usize,
     counters_remaining: usize,
-    call_census_limit: usize,
 }
 
 /// What the drains of one child's run have gathered.
@@ -1303,15 +1279,7 @@ impl SidecarFifo {
             samples_remaining: tunables.max_samples,
             markers_remaining: tunables.max_markers,
             counters_remaining: tunables.max_counters,
-            call_census_limit: DEFAULT_CALL_CENSUS_LIMIT,
         })
-    }
-
-    /// Bound the census of call ids each capture keeps. A caller that
-    /// declared `n` calls sets `n + 1`: a census that overflows it proves
-    /// an id beyond the declared ones.
-    pub(crate) fn limit_call_census(&mut self, limit: usize) {
-        self.call_census_limit = limit;
     }
 
     /// Open the FIFO read end with `O_RDONLY|O_NONBLOCK`, asking for a
@@ -1371,7 +1339,7 @@ impl SidecarFifo {
         let mut preferred_stop: Option<String> = None;
         let mut fallback_stop: Option<String> = None;
         let mut budget = budget;
-        let census_limit = self.call_census_limit;
+        let census_limit = CALL_CENSUS_LIMIT;
         let stop = loop {
             match self.read_bounded_line(max_line_bytes, &mut budget) {
                 Ok(BoundedLine::Pending) => break DrainStop::Closed,
@@ -2153,7 +2121,6 @@ mod tests {
         use std::io::Write;
         let dir = crate::test_scratch::scratch("sidecar", "fifo_arrival");
         let mut fifo = SidecarFifo::create(&dir, &DEFAULT_MEASUREMENT_TUNABLES).unwrap();
-        fifo.limit_call_census(2);
         fifo.counters_remaining = 1;
         let mut writer = fs::OpenOptions::new().write(true).open(&fifo.path).unwrap();
         writer
@@ -2162,19 +2129,40 @@ mod tests {
         drop(writer);
         let mut capture = FifoCapture::default();
         fifo.drain(&mut capture, None, 1024, TICK_DRAIN_BUDGET);
-        let wire: Vec<String> = capture.records.iter().map(Record::wire).collect();
+        let kept: Vec<(&str, i64)> = capture
+            .records
+            .iter()
+            .map(|record| match record {
+                Record::Counter(c) => ("counter", c.timestamp_us),
+                Record::Marker(m) => ("marker", m.timestamp_us),
+                Record::Sealing(s) => ("sealing", s.timestamp_us),
+                Record::Terminal(t) => ("terminal", t.timestamp_us),
+            })
+            .collect();
         assert_eq!(
-            wire,
-            ["5 %a @n=1", "4 %a GO", "7 %a !sealed drops=0", "9 %c X"],
+            kept,
+            [("counter", 5), ("marker", 4), ("terminal", 7), ("marker", 9)],
             "the sealing emission and %b's counter went past the counter budget"
         );
         assert!(capture.loss.records_capped);
         assert_eq!(
             capture.calls_seen.ids.iter().collect::<Vec<_>>(),
-            ["a", "b"],
+            ["a", "b", "c"],
             "a dropped record's call is still counted"
         );
-        assert!(capture.calls_seen.overflowed, "a third id passed the bound");
+        assert!(!capture.calls_seen.overflowed);
+    }
+
+    #[test]
+    fn a_call_census_past_its_bound_only_says_so() {
+        let mut census = CallCensus::default();
+        for call in ["a", "b", "a"] {
+            census.note(call, 2);
+        }
+        assert!(!census.overflowed);
+        census.note("c", 2);
+        assert_eq!(census.ids.iter().collect::<Vec<_>>(), ["a", "b"]);
+        assert!(census.overflowed, "a third id passed the bound");
     }
 
     /// A read error ends the drain and marks records possibly unread.
@@ -2251,7 +2239,10 @@ mod tests {
             TICK_DRAIN_BUDGET,
         );
         assert_eq!(capture.records.len(), 1);
-        assert_eq!(capture.records[0].call(), Some("a"));
+        assert!(matches!(
+            &capture.records[0],
+            Record::Marker(m) if m.call.as_deref() == Some("a")
+        ));
         assert_eq!(capture.loss.rejected_lines, 1);
     }
 

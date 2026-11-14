@@ -163,7 +163,7 @@ paths = ["src/pbfhogg/**/*.rs"]
 exclude = ["src/pbfhogg/binary.rs"]
 region = "code"
 test_code = "skip"
-must_scan = ["src/pbfhogg/bench_all.rs", "src/pbfhogg/verify.rs"]
+must_scan = ["src/pbfhogg/bench_all.rs", "src/pbfhogg/plan.rs"]
 message = "pbfhogg executables reach src/pbfhogg only as a PbfhoggBinary; build, wrap and spawn through src/pbfhogg/binary.rs"
 
 # The same seams as imports, matched against whole reconstructed `use`

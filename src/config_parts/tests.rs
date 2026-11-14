@@ -1315,7 +1315,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
         let dk = resolved.datasets.get("dk").unwrap();
         assert_eq!(dk.pbf.get("indexed").unwrap().file, "dk-indexed.osm.pbf");
         assert_eq!(
-            dk.bbox.as_ref().map(crate::datasets::Bbox::as_str),
+            dk.bbox.as_ref().map(crate::datasets::Bbox::to_string).as_deref(),
             Some("1,2,3,4")
         );
     }
@@ -1509,7 +1509,7 @@ xxhash = "cccccccccccccccccccccccccccccccc"
         assert_eq!(dk.origin.as_deref(), Some("Geofabrik"));
         assert_eq!(dk.download_date.as_deref(), Some("2026-02-20"));
         assert_eq!(
-            dk.bbox.as_ref().map(crate::datasets::Bbox::as_str),
+            dk.bbox.as_ref().map(crate::datasets::Bbox::to_string).as_deref(),
             Some("8.0,54.5,13.0,58.0")
         );
         assert_eq!(dk.pbf.get("raw").unwrap().file, "dk-raw.osm.pbf");
@@ -2800,30 +2800,6 @@ sweeps = ["all"]
     }
 
     #[test]
-    fn ratatoskr_harness_binary_defaults_to_package() {
-        let h = HarnessConfig {
-            package: "app".into(),
-            binary: None,
-            features: Vec::new(),
-            debug: None,
-            profile: None,
-        };
-        assert_eq!(h.binary_name(), "app");
-    }
-
-    #[test]
-    fn ratatoskr_harness_binary_override_wins() {
-        let h = HarnessConfig {
-            package: "app".into(),
-            binary: Some("parent_death_helper".into()),
-            features: Vec::new(),
-            debug: None,
-            profile: None,
-        };
-        assert_eq!(h.binary_name(), "parent_death_helper");
-    }
-
-    #[test]
     fn ratatoskr_harness_rejects_legacy_sweep_field() {
         let raw = r#"
 project = "ratatoskr"
@@ -2851,7 +2827,6 @@ debug = true
         let cfg = project_config::ratatoskr::parse(table).unwrap();
         let h = cfg.harness.unwrap();
         assert_eq!(h.package, "app");
-        assert_eq!(h.binary_name(), "app");
         assert!(h.features.is_empty());
         assert_eq!(h.debug, Some(true));
     }
@@ -3351,91 +3326,13 @@ profile = "corpus"
     }
 
     #[test]
-    fn a_pbfhogg_table_without_library_stays_the_hostname_section_it_was() {
+    fn a_pbfhogg_table_is_the_hostname_section() {
         let table = root_table("project = \"pbfhogg\"\n[pbfhogg]\ndata = \"d\"\n");
         let cfg = parse_dev_config(&table).unwrap();
         assert_eq!(cfg.hosts["pbfhogg"].data.as_deref(), Some("d"));
-        let project = project_config::ProjectConfig::parse(&Project::Pbfhogg, &table).unwrap();
-        assert!(project.pbfhogg_library().is_err());
+        assert!(project_config::ProjectConfig::parse(&Project::Pbfhogg, &table).is_ok());
         // Under another project too: a host named pbfhogg is not a section.
         let elivagar = root_table("project = \"elivagar\"\n[pbfhogg]\ndata = \"d\"\n");
         assert!(project_config::ProjectConfig::parse(&Project::Elivagar, &elivagar).is_ok());
-    }
-
-    #[test]
-    fn a_pbfhogg_table_holding_library_is_the_pbfhogg_section() {
-        let table = root_table(
-            "project = \"pbfhogg\"\n[pbfhogg.library.harness]\npackage = \"pbfhogg-harness\"\n\
-             [host.pbfhogg]\ndata = \"d\"\n",
-        );
-        let cfg = parse_dev_config(&table).unwrap();
-        // The claimed table is no host; [host.pbfhogg] still is.
-        assert_eq!(cfg.hosts.len(), 1);
-        assert_eq!(cfg.hosts["pbfhogg"].data.as_deref(), Some("d"));
-        let project = project_config::ProjectConfig::parse(&Project::Pbfhogg, &table).unwrap();
-        assert_eq!(project.pbfhogg_library().unwrap().harness.package, "pbfhogg-harness");
-    }
-
-    #[test]
-    fn the_claimed_pbfhogg_section_refuses_host_fields_other_projects_and_unknown_keys() {
-        let mixed = root_table(
-            "project = \"pbfhogg\"\n[pbfhogg]\ndata = \"d\"\n[pbfhogg.library.harness]\n\
-             package = \"h\"\n",
-        );
-        let e = project_config::ProjectConfig::parse(&Project::Pbfhogg, &mixed)
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("[host.pbfhogg]") && e.contains("`data`"), "{e}");
-
-        let foreign = root_table(
-            "project = \"elivagar\"\n[pbfhogg.library.harness]\npackage = \"h\"\n",
-        );
-        let e = project_config::ProjectConfig::parse(&Project::Elivagar, &foreign)
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("belongs to project \"pbfhogg\""), "{e}");
-
-        for bad in [
-            "[pbfhogg.library]\n",
-            "[pbfhogg.library]\nrequire = 1\n[pbfhogg.library.harness]\npackage = \"h\"\n",
-            "[pbfhogg.library.harness]\npackage = \"h\"\nbinaries = []\n",
-        ] {
-            let table = root_table(&format!("project = \"pbfhogg\"\n{bad}"));
-            assert!(
-                project_config::ProjectConfig::parse(&Project::Pbfhogg, &table).is_err(),
-                "{bad}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_required_capabilities_are_capability_ids_with_one_line_meanings() {
-        let parse = |require: &str| {
-            let table = root_table(&format!(
-                "project = \"pbfhogg\"\n[pbfhogg.library.harness]\npackage = \"h\"\n\
-                 [pbfhogg.library.require]\n{require}"
-            ));
-            project_config::ProjectConfig::parse(&Project::Pbfhogg, &table)
-                .map(|p| p.pbfhogg_library().unwrap().require.clone())
-                .map_err(|e| e.to_string())
-        };
-        let good = parse("\"cancel.pre-decision.v1\" = \"a cancel before the decision refuses\"\n")
-            .unwrap()
-            .unwrap();
-        assert_eq!(good.len(), 1);
-        assert_eq!(parse("").unwrap().unwrap().len(), 0, "an empty table requires nothing");
-        for (bad, needle) in [
-            ("cancel = \"x\"\n", "not a capability id"),
-            ("\"cancel.v0\" = \"x\"\n", "not a capability id"),
-            ("\"cancel.v1\" = \"\"\n", "1 to 200 bytes"),
-            ("\"cancel.v1\" = \"a\\nb\"\n", "one line"),
-            ("\"cancel.v1\" = 1\n", "pbfhogg"),
-        ] {
-            let e = parse(bad).unwrap_err();
-            assert!(e.contains(needle), "{bad}: {e}");
-        }
-        let table = root_table("project = \"pbfhogg\"\n[pbfhogg.library.harness]\npackage = \"h\"\n");
-        let absent = project_config::ProjectConfig::parse(&Project::Pbfhogg, &table).unwrap();
-        assert!(absent.pbfhogg_library().unwrap().require.is_none());
     }
 }

@@ -85,11 +85,6 @@ pub struct UserLayerSources {
 }
 
 impl ConfigSources {
-    /// The highest-precedence file (`brokkr.toml` for a project composition).
-    pub fn root(&self) -> Option<&Path> {
-        self.files.last().map(PathBuf::as_path)
-    }
-
     /// The project config's included files, lowest precedence first.
     pub fn included(&self) -> &[PathBuf] {
         &self.included_files
@@ -103,51 +98,6 @@ impl ConfigSources {
     /// The user-wide config's effective contribution, if its file was read.
     pub fn user_layer(&self) -> Option<&UserLayerSources> {
         self.user_layer.as_ref()
-    }
-
-    /// The files that define the table at `path`.
-    pub fn table_files(&self, path: &[&str]) -> Vec<&Path> {
-        let key: Vec<String> = path.iter().map(|s| (*s).to_owned()).collect();
-        self.tables
-            .get(&key)
-            .into_iter()
-            .flatten()
-            .map(|&i| self.files[i].as_path())
-            .collect()
-    }
-
-    /// The file a writer should edit to change the table at `path`.
-    ///
-    /// The file that defines it, when exactly one does. A table no file
-    /// defines yet goes where its nearest defined ancestor lives, when that is
-    /// one file - a new dataset lands beside the host's other datasets - and
-    /// in the root otherwise. A table split across several files is refused:
-    /// an edit to one half would leave the composed entry a mixture of the
-    /// edited half and a stale other half.
-    pub fn owner_of_table(&self, path: &[&str]) -> Result<&Path, DevError> {
-        let root = self
-            .root()
-            .ok_or_else(|| DevError::Config("no config files resolved".into()))?;
-        for depth in (1..=path.len()).rev() {
-            let files = self.table_files(&path[..depth]);
-            match files.as_slice() {
-                [] => {}
-                [one] => return Ok(one),
-                many if depth == path.len() => {
-                    let list: Vec<String> =
-                        many.iter().map(|p| p.display().to_string()).collect();
-                    return Err(DevError::Config(format!(
-                        "[{}] is defined in more than one config file ({}); brokkr \
-                         writes a table into the one file that holds it - move the \
-                         whole table into one of them",
-                        path.join("."),
-                        list.join(", ")
-                    )));
-                }
-                _ => return Ok(root),
-            }
-        }
-        Ok(root)
     }
 
     /// The file that supplied the value at `path`, and the directory a
@@ -643,17 +593,6 @@ mod compose_tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, ["c.toml", "a.toml", "b.toml"]);
-        assert_eq!(sources.root(), Some(root.as_path()));
-    }
-
-    #[test]
-    fn a_replaced_value_takes_its_provenance_with_it() {
-        let dir = tree("replaced", &[
-            ("brokkr.toml", "project = \"p\"\ninclude = [\"a.toml\"]\n[h]\ndatasets = \"gone\"\n"),
-            ("a.toml", "[h.datasets.x]\norigin = \"o\"\n"),
-        ]);
-        let (_, sources) = compose(&dir.join("brokkr.toml")).unwrap();
-        assert!(sources.table_files(&["h", "datasets", "x"]).is_empty());
     }
 
     #[test]
@@ -703,36 +642,6 @@ mod compose_tests {
         // Shown as spelled, resolved where the file really is.
         assert_eq!(origin.file, root);
         assert_eq!(origin.base, std::fs::canonicalize(dir.join("shared")).unwrap());
-    }
-
-    #[test]
-    fn owner_is_the_defining_file_then_the_ancestors_then_the_root() {
-        let dir = tree("owner", &[
-            ("brokkr.toml", "project = \"p\"\ninclude = [\"hosts.toml\"]\n[h.datasets.local]\norigin = \"l\"\n"),
-            ("hosts.toml", "[h.datasets.shared]\norigin = \"s\"\n[g.datasets.only]\norigin = \"o\"\n"),
-        ]);
-        let root = dir.join("brokkr.toml");
-        let hosts = std::fs::canonicalize(dir.join("hosts.toml")).unwrap();
-        let (_, s) = compose(&root).unwrap();
-        assert_eq!(s.owner_of_table(&["h", "datasets", "shared"]).unwrap(), hosts);
-        assert_eq!(s.owner_of_table(&["h", "datasets", "local"]).unwrap(), root);
-        // New dataset, host's datasets split across both files -> root.
-        assert_eq!(s.owner_of_table(&["h", "datasets", "new"]).unwrap(), root);
-        // New dataset, host's datasets live in one file -> that file.
-        assert_eq!(s.owner_of_table(&["g", "datasets", "new"]).unwrap(), hosts);
-        // Unknown host -> root.
-        assert_eq!(s.owner_of_table(&["z", "datasets", "new"]).unwrap(), root);
-    }
-
-    #[test]
-    fn a_split_table_has_no_owner() {
-        let dir = tree("split", &[
-            ("brokkr.toml", "project = \"p\"\ninclude = [\"a.toml\"]\n[h.datasets.d]\norigin = \"l\"\n"),
-            ("a.toml", "[h.datasets.d.pbf.raw]\nfile = \"f\"\nxxhash = \"x\"\n"),
-        ]);
-        let (_, s) = compose(&dir.join("brokkr.toml")).unwrap();
-        let err = s.owner_of_table(&["h", "datasets", "d"]).unwrap_err().to_string();
-        assert!(err.contains("more than one config file"), "{err}");
     }
 
     #[test]

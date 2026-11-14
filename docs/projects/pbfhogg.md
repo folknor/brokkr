@@ -12,34 +12,27 @@
 - `src/pbfhogg/binary.rs` - `PbfhoggBinary`, through which every pbfhogg
   CLI spawn is made; see [Output overwrite](#output-overwrite) and
   [Launch reservations](#launch-reservations-and-the-private-directory).
-  Also `LibraryHarness`, the handle on the built library harness.
-- `src/pbfhogg/library/` - `brokkr library`, pbfhogg used as a library
-  through a harness a pbfhogg workspace member provides: listing its
-  scenarios and verifying one, its calls' CLI counterparts replayed and
-  compared by `pbfhogg digest`, measuring or profiling one, and certifying
-  every scenario against `[pbfhogg.library.require]`; the command and its
-  protocol are `brokkr man library`, its internals
-  `reference/library-internals.md`.
 - `src/pbfhogg/argv.rs` - `PbfArgv`, an argv with what it reads, writes and
   scratches.
 - `src/pbfhogg/...` - benchmarks (read, write, merge, commands, extract,
-  blob-filter, planetiler, all), verify (one check per
-  cross-validated command, plus `all`),
-  download (Geofabrik or Planet PBF/OSC fetcher with auto-registration in
-  `brokkr.toml`).
+  blob-filter, planetiler, all).
+
+Library verification, dataset download and snapshot promotion, and the
+cross-validation checks are not brokkr commands: they live in pbfhogg's own
+binaries (`pbfhogg-library`, `pbfhogg-datasets`, `pbfhogg-verify`), run
+through `brokkr run --with`, for example `brokkr run --with pbfhogg
+pbfhogg-verify -- CHECK`. Library measurement is the `library-scenario`
+script bench.
 
 ## Output overwrite
 
 pbfhogg refuses to write an output path that already exists unless it is
 given `--overwrite`, and brokkr reuses its outputs: every `--bench` iteration
 writes the same scratch file, and a killed staged write (the merged diff
-cache, the indexed PBF a download generates) leaves its partial file for the
+cache) leaves its partial file for the
 retry. So brokkr passes `--overwrite` on every pbfhogg invocation that writes
-an output brokkr owns - measured commands, the suite, the benches and every
-verify check - and on nothing that only reads. The one exception is a
-`brokkr library` CLI counterpart that declares its own `overwrite` stance
-(`brokkr man library`, CLI equality): `true` requires the flag, `false`
-never passes it.
+an output brokkr owns - measured commands, the suite and the benches - and on
+nothing that only reads.
 
 Old pbfhogg commits, which `--commit` baselines build, predate the flag and
 reject it as an unknown argument. The flag is therefore passed only when the
@@ -72,9 +65,8 @@ writes and scratches built by the same calls: a path goes in as an input, an
 output, a directory output or an extract config with the outputs it names and
 the polygon files it reads, and
 only arguments naming no path go in bare. The overwrite decision follows from
-that (an argv with outputs negotiates `--overwrite` unless it forces its own
-or declares its stance, as a library counterpart may),
-so the typed commands' arms and the hand-built verify and bench argvs decide it
+that (an argv with outputs negotiates `--overwrite` unless it forces its own),
+so the typed commands' arms and the hand-built bench argvs decide it
 the same way. A measured plan carries that one argv value: dry run prints it,
 and the runner resolves the same value through the handle.
 
@@ -87,14 +79,11 @@ suite does before building the osmpbf baseline. Cargo started any other way
 is outside that protocol.
 
 Code under `src/pbfhogg` holds a pbfhogg executable brokkr built only as a
-`PbfhoggBinary`, or, for the library harness (`brokkr man library`), as a
-`LibraryHarness`, the same kind of handle made in the same module: it holds
-the lock and the build registration, re-stats its executable before each
-spawn and exposes no path. The executable the runner hands a plan is guarded by types:
+`PbfhoggBinary`, which holds the lock and the build registration, re-stats
+its executable before each spawn and exposes no path. The executable the runner hands a plan is guarded by types:
 its path needs a key only the handle can make, and pairing it with argv
 directly is refused for a pbfhogg build. The handle and its invocations
-expose no path, and reference tools are a closed set (osmium, osmconvert,
-osmosis) launched by the absolute path their resolver produced. The remaining seams that hand out a
+expose no path. The remaining seams that hand out a
 built path (the build, harness-build and check modules, cargo spawned
 directly, a session's binary) are kept out by two rules in brokkr's own
 `brokkr.toml`, `pbfhogg-executables-through-the-handle` for code and
@@ -124,22 +113,15 @@ directory, passed as `--staging-dir` when the argv writes an output and as
 is in there. It goes in the directory holding the first output (for a
 `build-geocode-index --output-dir`, the index directory's parent, never inside
 the directory publication replaces), or for scratch with no output (a parallel
-text `diff` to stdout, which only verify runs) in the root the argv names, the
-verify directory. Before anything is
+text `diff` to stdout) in the root the argv names. Before anything is
 created, every output's directory must be on the same mount as that location,
-or the launch is refused, since pbfhogg publishes by rename. A launch in a
-`brokkr library` run directory (a CLI counterpart's replay and the digests
-that compare it, `brokkr man library`, CLI equality) runs in a working
-directory inside the run directory rather than the project root and
-reserves the whole run directory as coverage; its private directory follows
-the same rule, so it goes beside the replay's first output, inside the run
-directory, and a digest, which writes nothing, gets none. Scratch is
+or the launch is refused, since pbfhogg publishes by rename. Scratch is
 declared by what pbfhogg's implementation actually does:
 `add-locations-to-ways`, `build-geocode-index` and `diff --format osc` on
 every path, and `merge-changes` only where it can spill: several inputs, no
 `--simplify`, and a `--jobs` other than 1 (an omitted or 0 `--jobs` is auto
-and counts, whatever it resolves to on the host; the typed command and `verify
-merge-changes` ask one predicate, `commands::merge_changes_spills`). Since pbfhogg 2b1c6ba1 only
+and counts, whatever it resolves to on the host; `commands::merge_changes_spills`
+is the one predicate). Since pbfhogg 2b1c6ba1 only
 those make a run directory, and every other merge-changes refuses `--tmp-dir`
 as a usage error. Builds from c97b9985, which gave merge-changes `--tmp-dir`,
 up to 2b1c6ba1 made a run directory on every merge-changes; the flag probe
@@ -153,9 +135,7 @@ one; a `--commit` baseline from before that commit puts its text-diff scratch
 wherever pbfhogg defaults it. brokkr spells every
 pbfhogg flag it forwards long (`--output`, `--jobs`, `--invert-match`, ...),
 since pbfhogg has reassigned short letters between versions and a `--commit`
-baseline accepts the long forms; the one exception is `verify renumber`'s
-`diff -s`, whose long form was renamed while the short kept its meaning.
-Rows recorded earlier carry short spellings in `cli_args`. The argv carries
+baseline accepts the long forms. Rows recorded earlier carry short spellings in `cli_args`. The argv carries
 `@brokkr-private-dir@` until the launch, and the recorded `cli_args` keep that
 placeholder (no shell metacharacter, so a pasted line runs), so a row does not
 change with the random name; the column differs from rows recorded before
@@ -175,10 +155,8 @@ older than a command's scratch lacks `--tmp-dir` because it writes none.
 `~/.brokkr/launch-leases/`, flocks it, and writes a durable record of every
 path the launch declared - inputs read, outputs written, any coverage, the
 private directory - all synced before the private directory exists.
-Coverage is a tree reserved for writing around the launch's own paths: the
-library harness's launch, and every CLI launch of the same run, covers the
-whole run directory (`brokkr man library`), so the lease protects the
-request and artefacts beside its outputs. It is reservation only: the private directory's placement compares
+A launch may also declare coverage, a tree reserved for writing around its own
+paths. It is reservation only: the private directory's placement compares
 outputs alone, and the release never removes it. The child, and
 only that child, inherits the locked description (it is made inheritable in
 the child between fork and exec; every other descriptor brokkr opens stays
@@ -199,18 +177,13 @@ A profiled launch (`--hotpath`, `--alloc`) also reserves its hotpath report,
 at a path unique per launch, so a profiled child that outlived its run can
 never write the next run's report. The report is recorded as disposable, like
 the private directory: it goes with the lease, at the release or, if the child
-outlived its run, at a later scan. A profiled `brokkr library` harness launch
-is the exception: its report lies in its run directory, which the launch's
-coverage already reserves, so it survives the release to be judged and goes
-with the directory (`brokkr man library`, Profiling a scenario).
+outlived its run, at a later scan.
 
 **What the reservation protects.** Every brokkr deletion, rename or
 replacement that can touch these paths - `brokkr clean`'s removals of
-pbfhogg's verify output and scratch, a `brokkr library` run directory's
-removal, a pbfhogg measured run's scratch dirs,
-verify's per-check directories, the plan and bench cleanups, the staged
-writes of dataset files and of a child's output, snapshot promotion, a
-generated extract config, a `--commit` worktree's removal (its target dir,
+pbfhogg's leftover output and scratch, a pbfhogg measured run's scratch dirs,
+the plan and bench cleanups, the staged
+writes of a child's output, a generated extract config, a `--commit` worktree's removal (its target dir,
 checkout and slot, `git worktree remove` included, under one exclusive
 section) - goes through one gate, which scans the store (reclaiming free
 leases on the way) and refuses when a reservation's path is the target, lies
@@ -222,7 +195,7 @@ that holds an intermediate link is refused too; a path that cannot be resolved
 is refused. A recursive removal also refuses a tree holding a
 `.pbfhogg-backup-*` (matched on the name's bytes), which can be the only copy
 of a replaced output; brokkr never deletes one. For a worktree the tree
-searched is its target dir's `verify`, where `verify --commit` writes pbfhogg
+searched is its target dir's `verify`, where older runs wrote pbfhogg
 outputs, not the whole checkout and cargo target dir. `brokkr clean` names a
 refused target or worktree and goes on with the rest.
 
@@ -237,16 +210,9 @@ nidhogg's ingest output. brokkr's own state and config files (brokkr.toml,
 journals, caches) are staged plainly, and its fixed-name `brokkr clean`
 targets are removed plainly, so a lease store problem never stops them.
 
-A staged write of a file a launch can use is a reservation of its own
-(`Staged::stable_reserved`, for dataset downloads and the data dir's
-cross-filesystem copy): from before its first byte until its commit or drop it
-holds a write reservation on its temp file and its target, so no launch
-reading or writing either is admitted meanwhile, and its rename or removal
-runs as that reservation is released. `curl`, the download's writer, inherits
-the reservation as a pbfhogg child inherits its lease, so a `curl` that
-outlives a killed brokkr keeps it held. A temp file a pbfhogg launch writes
-itself (the merged-PBF cache, a download's indexed PBF) is staged with
-`stable_keeping_for_child`, which holds nothing: the launch reserves it.
+A temp file a pbfhogg launch writes itself (the merged-PBF cache) is staged
+with `stable_keeping_for_child`, which holds no reservation of its own: the
+launch reserves it, and its commit and drop go through the gate.
 
 Each scan and the admission, release or mutation it decides run in one
 critical section: a process-wide mutex and an exclusive flock on the store's
@@ -336,10 +302,9 @@ disproves.
   cached merge is keyed by name, not by the OSC's content or the build that
   made it. The suite always rebuilds it.
 - `diff-snapshots` reads `[..datasets.<name>.expect.diff-snapshots]`, keyed
-  by the registered digests of both files, so a rotation by `download
-  --refresh` or a `--replace-snapshot` can never point a declaration at
-  another file. A side without an `xxhash` cannot be addressed and stays
-  undeclared.
+  by the registered digests of both files, so a rotation of a
+  snapshot file can never point a declaration at another file. A side
+  without an `xxhash` cannot be addressed and stays undeclared.
 
 The accepted exits are the answers the build can be trusted to give
 intersected with the declared one. A build from before the split, asked to
@@ -348,14 +313,10 @@ refused before it starts. A declared run says what it expects before it
 runs, and a dry run lists it. The suite reads the declarations of the
 primary entry it measures.
 
-`repack --as-snapshot` records one declaration itself: pbfhogg's repack
-round-trips every element, so the new file and the entry it read are
-recorded as `same` under `diff-snapshots` when the source has a registered
-digest. `cat` and `degrade` record nothing: `--type` drops kinds, `--clean`
-drops versions, `--strip-locations` drops way coordinates, and whether
-`--unsort` leaves an ID-order violation depends on the input's size. No
-check verdict is ever derived: a repack can repair the metadata its input
-lied about.
+brokkr records no declaration itself, and no check verdict is ever derived:
+a repack can repair the metadata its input lied about. Snapshot promotion is
+pbfhogg's own tool now (`brokkr run --with pbfhogg pbfhogg-datasets --
+promote ...`), and it is that tool's to say what it records.
 
 ## Diff text output
 
@@ -526,7 +487,7 @@ answer, and is declared separately (Declared answers).
 pbfhogg refuses an input that does not declare LocationsOnWays, or declares
 HistoricalInformation, before reading any data blob, exit 2. So
 `check-locations` alone defaults `--variant` to an `add-locations-to-ways`
-output: `altw-keep-untagged`, the name `verify all` also looks for, which
+output: `altw-keep-untagged`, which
 keeps every referenced node so a reference to an absent node is a failure;
 with `--agreement`, `altw`, which drops most untagged nodes, the ones
 `--agreement` holds to their other references. An explicit `--variant` wins,
@@ -540,884 +501,6 @@ input, by default `indexed`, which is generally not LocationsOnWays.
 no pbfhogg revision gives any of them effect there; for direct I/O, which its
 unaligned parallel reads never take, pbfhogg printed a note until 930ddfc9
 and refuses it since.
-
-## Verify subcommands
-
-`brokkr verify` holds the brokkr command lock for the whole invocation,
-including `verify all` and its per-check runs, and a `SigtermGuard` alongside
-it, so `brokkr kill` or Ctrl-C ends the running pbfhogg/osmium child, prints
-`<name>: INTERRUPTED`, stops `verify all` at that check (no further checks, no
-tally banner) and exits 130.
-
-**Output model.** Every verify check runs "quiet on pass, loud on fail" via
-`verify::run_check`: by default a check's detail (`verify_msg` output - section
-headers, inspect dumps, element diffs) is captured into a buffer and only
-replayed if the check fails; a passing check prints just a one-line
-`<name>: PASS (<ms>ms; <steps>)` summary. `<steps>` is the check's wall time
-per tool run label, slowest first, with a run count when a label ran more
-than once (`osmium sort 2m0s, pbfhogg sort 41.2s, pbfhogg diff 15.1s (2
-runs)`), so the summary says how a check's time splits between the pbfhogg
-command under test, the reference tool and the comparisons; a reference step
-served from the reference cache is listed last as `osmium sort cached`, with
-no duration. A passing check adds at most one informational line of its own on
-the summary channel, naming the file that holds the detail. INTERRUPTED and
-FAIL lines carry the same breakdown. While a check runs on a terminal, a live
-status line names the step in flight (the same activity `brokkr lock` shows),
-so a long osmium step is not silent. `-v`/`--verbose` skips the buffer so
-detail streams live even on pass. `verify all` applies this per check, so its default
-output is one line per check plus a final tally, and only failing checks spew.
-The buffer lives in `output.rs` (`verify_buffer_begin/flush/discard`, fed by
-`verify_msg`); one-line results use `verify_summary`, which bypasses it. On
-failure `run_check` returns `DevError::ExitCode(1)` so `main` exits non-zero
-without re-printing an error it already reported.
-
-**Environment outcomes.** A reference tool (osmium, osmconvert, osmosis)
-killed by `SIGKILL` is not a pbfhogg failure: brokkr never sends a reference
-tool SIGKILL (its own stop is a SIGTERM that ends as INTERRUPTED), so the
-kill came from outside, commonly the kernel OOM killer on a host too small
-for the reference tool at that scale. osmosis's start script `exec`s java,
-so an OOM-killed JVM ends as that signal too, while a Java
-`OutOfMemoryError` is an ordinary non-zero exit. `VerifyHarness::reference`
-raises it as `DevError::VerifyEnvironment`, classified from the child's ending before any
-capture failure, and the check prints `<name>: ENVIRONMENT (<ms>; <steps>):
-<reason>` with its detail replayed. A comparison failure recorded earlier in
-the same check still wins: `Findings::fail` also writes a check-scoped
-ledger that an early `?` cannot drop, so the check is a FAIL naming both.
-Only `SIGKILL` of a reference tool is environmental; another signal, a
-non-zero exit, or pbfhogg itself being killed (its memory at scale is under
-test) stays a FAIL. A single check exits 75 (`EX_TEMPFAIL`) on ENVIRONMENT;
-`verify all` tallies `environment` beside passed, failed and skipped and
-exits 1 if any check failed, else 75 if any was environmental. An
-environment kill of osmosis or osmconvert, which `verify merge` runs for
-context only, is reported on the summary channel and changes no verdict.
-
-**Output that scales with the data.** No verify step holds a listing in
-memory. Every reference-tool run, and every pbfhogg step whose stdout is a
-listing (`diff_pbfs`, renumber's `diff -s -c -v`, `verify diff`'s text
-diffs), writes stdout to a file in the check's directory
-(`Invocation::run_to_file`, `output::run_stdout_to_file`); stderr stays a
-bounded capture. Such a child dies with brokkr (`PR_SET_PDEATHSIG`, refused at
-spawn if it cannot be armed), since a file, unlike a pipe, gives an orphaned
-writer no reason to stop. The signal reaches the process brokkr spawned; a
-launcher that `exec`s its program passes it on, while helpers a launcher
-forks first (osmosis's start-script preamble) are left to the orphan
-reaper. Consumers read the files through fixed buffers
-(`verify_stream`): per-line heads for renumber's block count, emptiness for
-`diff_pbfs`'s verdict; `verify diff` reads its listings and osmium's OPL record
-by record, holding one identity's objects and detail at a time. A FAIL replays a bounded head of a listing (lines and bytes per
-line) and always names the file holding all of it. Every `inspect` verify
-reads - element counts, the header's sort flag, the computed order
-(`check_sorted`) and the summary `print_inspect` shows - is `inspect --json`
-(with `--extended` where the order or the extended summary is needed)
-written to a file beside the inspected output and read by a streaming
-parser that keeps only those fields and skips every other value as it
-streams, without collecting its contents. The file stays as the full report and the
-printed summary names it. An extended report without `data.objects_ordered`
-is an error, never read as unordered. `check --refs` counts stay captured;
-every report consumer still requires its documented exit codes before
-trusting what it parsed. (pbfhogg itself builds the whole report as
-one JSON value in memory before writing it.)
-`verify merge`'s element diff OSC is classified as it streams into per-class
-counts and the ten smallest IDs; the one structure it holds is the input
-OSC's delete set, O(delete entries in the change file), which the osmium
-apply-changes step before it dominates by holding every change as a full
-object. `verify extract`'s simple relation judgement holds the node and way
-IDs osmium's complete_ways relations reference, the subset of them present,
-and the IDs of the relations each diff lists, all sorted vectors; the OPL
-relation records stream past twice. `verify getid-removeid`'s
-`--add-referenced` arm holds, from the input's relation records (streamed
-twice), only the relations that hold relations with their relation members,
-and the objects of osmium's `getid -r` output, one closure. `verify diff` holds the identities to fetch:
-those its input OSC touches and those pbfhogg reports modified, as a sorted
-vector, O(change set), and the identities of osmium's listing, O(differences).
-`verify check-ids` reads each `check --ids --json` report from its file,
-keeping the counts and the verdict and counting the violations, which
-pbfhogg bounds by its `--max-errors` default; osmium's `fileinfo` report is
-read the same way. `verify getparents` holds the objects of one osmium
-output at a time, outputs of a handful of requested IDs, and from the
-input's relations only the first member of each kind. `verify repack` and
-`verify degrade` read osmium diff's listings one identity at a time, pull the
-input's and the output's blob claims side by side, and decode at most one
-output blob at a time, for the few IDs they locate. `verify merge-changes`
-and `verify tags-filter-osc` write every change listing and every expected
-output to files and compare them record by record; the simplify model is an
-external sort with a bounded buffer and fan-in, its expected records fetched
-from the listing by offset.
-
-**Verdicts.** A check fails by returning `Err` (a tool crashed, output could
-not be parsed) or by returning `Findings` that carry a failed comparison;
-`run_check` folds the latter into a FAIL exactly like the former, detail
-replay included. The comparison helpers on `VerifyHarness` (`diff_pbfs`,
-`check_sorted`, `compare_sort_feature`) return a `#[must_use]` `Verdict`
-rather than a `bool`, so a comparison whose result is dropped is a compile
-warning instead of a silent PASS - the only way to consume one is
-`findings.record(...)`. `diff_pbfs` writes its listing to a file the caller
-names in the check's directory and reads `pbfhogg diff`'s exit status: 0 with
-no listing is identical, 1 is different, anything else (a signal, another
-code) is an error - never "identical". A check whose PASS establishes less
-than its name suggests builds its findings with `Findings::claiming` (or
-states it once known with `Findings::with_claim`, where what it established
-depends on the input), and the claim is printed in its PASS line, under
-`verify all` too.
-
-`extract` and `verify merge` classify a `pbfhogg diff --format osc` between
-pbfhogg's and osmium's outputs as it streams (`verify_element_diff`); the
-diff's exit status must agree with the OSC (0 with no entries, 1 with some),
-or it is an error; the generated OSC is read strictly, so an entry without a
-parsable ID, an entry outside an action block or inside another entry, a
-nested action block and an end tag closing nothing open are errors rather than
-skipped. `extract` fails on a `<modify>`:
-an ID both tools emit with unequal content, which no strategy explains, since
-neither tool rewrites an element it extracts.
-
-`extract` also gates membership, per pbfhogg's stated per-strategy contract
-against osmium (its DEVIATIONS.md, "extract: per-strategy membership against
-osmium"). complete_ways must hold osmium's element set, and smart the set of
-`osmium extract -s smart -S types=multipolygon,boundary` (the `-S` is in the
-reference argv, so in the cache key): any element only one tool holds is a
-FAIL. simple must hold osmium's nodes and ways and every relation osmium's
-simple holds; its relations differ by design, since osmium's simple decides a
-relation on its first node or way member and pbfhogg's on any direct one. They
-are judged against osmium's complete_ways output, which holds every relation
-simple's node and way sets match plus their parents
-(`verify_extract_simple`): its relations go to OPL (`osmium cat -t relation
--f opl`), read by a strict reader (`verify_opl`) whose record count must equal
-inspect's; `osmium removeid` of every node and way they reference, diffed
-against osmium's simple output, names the members simple's sets hold; and a
-second element diff from pbfhogg's simple output to osmium's complete_ways
-output must list nothing only simple holds and no content difference, which
-checks the content of the relations osmium's simple omits too. Then every
-complete_ways relation must be in pbfhogg's simple output exactly when one of
-its direct node or way members is in those sets, and every relation only
-pbfhogg's simple holds must have its first node or way member outside them.
-That judgement runs only when simple's node and way membership agrees with
-osmium's, which a disagreement already fails. A negative node or way member
-reference is an error, not a verdict: `osmium removeid` cannot look one up.
-
-Both outputs go through the strict order check; an osmium output that fails
-it is an error, since a repeated ID could hide a content conflict from a by-ID
-comparison. The detail gets, per strategy, the shared coverage per kind (given
-only when pbfhogg's output is strictly ordered too, so every count is of
-distinct IDs, and an error when the arithmetic does not close) and the
-pbfhogg-only and osmium-only counts with their smallest IDs. The summary
-channel gets one line naming, per strategy that differs, the nonzero
-pbfhogg-only and osmium-only counts, and the strategies' diff OSCs
-(`pbfhogg-vs-osmium-<strategy>.osc`), which list every element; on a pass its
-only clause is simple's pbfhogg-only relations. A PASS line says `output
-order, element content and membership against osmium: complete_ways and smart
-(-S types=multipolygon,boundary) as osmium's, simple as osmium's but for the
-relations osmium's first-member rule omits`, followed by the regions it ran
-on.
-
-`extract` runs every strategy on each region: the bbox (`--bbox`, else the
-dataset's) in `target/verify/extract/`, then every dataset polygon, by name,
-in `polygon-<name>/` below it, pbfhogg with `--polygon <file>` and osmium with
-`-p <file>`, the file an input of the reference run and so keyed by its
-content and extension. Each pass takes every gate above unchanged, and its
-failures, detail sections and summary line name the polygon. With polygons
-configured the bbox is optional; without either the check is a configuration
-error. The PASS line ends `on the bbox and on polygons <names>`, or names the
-kind it did not exercise: `on the bbox only: no dataset polygon is
-configured, ...` or `on polygons <names> only: no bbox is given or
-configured, ...`. Before any run, each polygon file must be one osmium reads
-as pbfhogg does (`verify_polygon`), since pbfhogg's DEVIATIONS.md ("extract:
-polygon input beyond osmium") names three readings where the tools select
-different regions by design: a FeatureCollection of several features
-(pbfhogg unions them, osmium takes the first), an open ring (pbfhogg closes
-it), and a ring with an edge spanning more than 180 degrees of longitude
-(pbfhogg unwraps it across the antimeridian). The gate accepts a bare Polygon
-or MultiPolygon, a Feature holding one, or a FeatureCollection of exactly one
-Feature, every ring closed and no edge, the closing one included, spanning
-more than 180 degrees, judged on coordinates parsed correctly rounded as
-pbfhogg parses them; anything else refuses the check as cannot-compare. What
-a tool refuses outright (a zero-area ring, a coordinate outside WGS84, a third
-coordinate for osmium, a file osmium does not read as GeoJSON by its `.json`
-or `.geojson` extension) fails as that tool's error.
-
-`extract` branches on `Sort.Type_then_ID` among the input header's optional
-features, where pbfhogg's extract reads it. On an input without it (a
-`degrade --unsort` snapshot), osmium,
-which refuses out-of-order input, extracts from an osmium-sorted copy (the
-run and artifact name `verify sort` uses, so one cached sort serves both),
-and pbfhogg extracts the input as it is, through its unsorted fallbacks. Its
-order verdict becomes its header contract: an output that claims
-`Sort.Type_then_ID` (in either feature list) fails. Each pbfhogg output is
-then compared through an osmium-sorted copy, whose strict order proves it
-repeats no ID; osmium's outputs, read from a sorted copy, are compared as
-they are. The input
-header's report goes to the check's directory, never beside the input. Which
-order pbfhogg keeps an unsorted input's elements in is not promised and not
-checked. The PASS line then opens `on unsorted input, against osmium on an
-osmium-sorted copy: no sorted claim and no repeated ID in pbfhogg's output`.
-
-`multi-extract` holds each region
-of a simple `--config` run to strict order and diffs it (not its counts)
-against a sequential pbfhogg extract of the region; it never consults
-osmium's extract membership (on unsorted input osmium only sorts the
-comparison copies) and does not prove the single-pass path ran. It runs two configs: the strips
-alone, and, when the dataset configures polygons, the strips followed by
-every polygon as a `polygon_file` entry (in `mixed/`), since pbfhogg's single
-pass takes another route once any region is a polygon. Both compare against
-the same sequential extracts, one per region. Its PASS line names the configs
-it ran, or that no mixed config ran for lack of a polygon. On an input
-without `Sort.Type_then_ID` among its optional features pbfhogg declines its
-single pass, so no single-pass route is exercised, and the PASS line opens
-saying so: every multi and sequential output must then not claim the flag,
-and each is compared through an osmium-sorted copy whose strict order proves
-it repeats no ID.
-
-`cat` and `tags-filter` take any order and keep it, and branch the same way
-(`verify_input_order`): on sorted input each pbfhogg output must be in strict
-order and its sort declaration is compared with osmium's; on an input
-without the claim osmium reads the osmium-sorted copy, each pbfhogg output
-must not claim the flag and is compared through an osmium-sorted copy, and
-the PASS line opens `on unsorted input`. On either, an osmium output that is
-not in strict order is an error. `check-refs` has no output to compare:
-pbfhogg's `check --refs` reads the input as it is, `osmium check-refs`
-(which refuses out-of-order input) the osmium-sorted copy, whose elements are
-the input's, and the PASS line says so. Its comparison is the missing count
-per class (nodes in ways, and with `--check-relations` also nodes, ways and
-relations in relations), and each tool's exit must agree with its report:
-exit 1 exactly when something is missing. pbfhogg's report must carry one
-integrity verdict, `OK` with exit 0 or `FAILED` naming a positive count with
-exit 1, or the check fails; an `OK` beside a class line or a `FAILED` total
-its class lines do not account for leaves no count to compare, a FAIL too. osmium prints its summary to stderr only after a
-whole read and also exits 1 when an exception ends its run (`Node IDs out of
-order`), so its exit 1 completes the run only on a complete summary for its
-mode as the last lines of stderr; a summary that is missing, ambiguous or
-contradicts its exit, or anything on its stdout, is an error.
-
-`merge`, `derive-changes`, `diff` and `renumber` verify commands whose
-documented contract refuses input without `Sort.Type_then_ID` (pbfhogg's
-`apply-changes` takes a sorted base, `diff` in both formats needs both inputs
-to claim it, `renumber` requires sorted input), and osmium's
-`apply-changes` and `renumber` require sorted input too, so on such input
-(read from the header's optional features, as the checks above read it)
-nothing can be compared and the check is held to that refusal instead
-(`verify_input_order`). The command under test runs on the input with the
-argv the check would give it (`--direct-io`, `--locations-on-ways` and
-`--start-id` included): an answering exit (0, or 1 for a diff) fails the check
-as acceptance of input pbfhogg refuses, which its general apply-changes path
-once did, silently dropping creates; so does an output under any name the
-argv writes, or a text diff listing on stdout, whatever the run's ending. Exit
-2 must carry exactly one of the `pbfhogg sort --distrust-metadata <input> -o
-sorted.osm.pbf` advice lines pbfhogg's CLI gives every `Unsorted` refusal,
-its shell word decoded and equal to the claimless operand as the argv spelled
-it (one naming another file is a failed finding); exit 2 without it, another
-exit or a signal is an error, a failure of another kind. `merge` and
-`renumber` run once; `apply-changes` itself is the step that refuses, so
-`derive-changes` and `diff` never build their new PBF and instead run the
-command under test twice, the input as OLD and then as NEW against an
-osmium-sorted copy (verify sort's cached run) that must itself declare the
-flag, each with an output of its own. A mixed indexed pair, so neither diff
-engine is exercised. Under `--locations-on-ways` the base must declare
-`LocationsOnWays`, or the check is an error before apply-changes runs, since pbfhogg
-refuses that too and the check would otherwise depend on which refusal it
-raises first. No osmium run is compared. The PASS line opens `on input without
-Sort.Type_then_ID among its optional features, refusal only` and says what it
-does not establish: which of pbfhogg's order checks refused (the header gate,
-or a later one meeting the content out of order), and under `--direct-io`
-that any O_DIRECT read ran. A base that claims the flag over disordered
-content takes the ordinary path, where pbfhogg's refusal of it is an error.
-
-**Fresh outputs.** `VerifyHarness::subdir` empties `target/verify/<check>/`
-before handing it back, so every file a check finds there was written or
-placed by this run. Checks rely on that: `verify_merge` treats the diff OSC's
-existence as proof the diff ran. The optional osmosis/osmconvert outputs are
-printed only for a tool whose run succeeded (tracked from the run, not from
-the file existing), and a failed optional tool's partial output is removed.
-
-**Reference cache.** Every reference run (osmium, osmosis, osmconvert) is a
-declared `ToolRun` - literal arguments, inputs and outputs kept apart - run
-through `VerifyHarness::reference` (`src/pbfhogg/verify_reference.rs`), which
-reuses a completed execution of the same run from `.brokkr/verify-reference/`.
-Only the tool's execution is skipped: every pbfhogg step (inspect, diff, sort
-normalisation, `check --locations`, the element diffs) still runs, against the
-reused reference bytes, and no pbfhogg observation or verdict is cached. The
-contract is reuse of a completed execution of the same declared computation,
-with its artifacts and its exit code; it does not claim a rerun would write the
-same bytes. A hit shows as `<tool> <command> cached` among the step times
-and, in the detail, the entry's key and stored exit.
-
-- **Key**: the run id, the tool's identity, the controlled environment, each
-  input's content digest and file-name extension (taken from the resolved
-  path, which is what the launch passes), and the argv with inputs and outputs
-  as placeholders. Identity is osmium's or osmconvert's resolved executable,
-  osmium's `--version` and every shared library `ldd` resolves for it; for
-  osmosis, its install tree, its Java runtime tree and the libraries `ldd`
-  resolves for `java` and `libjvm.so`. The probes run in the same controlled
-  environment as the tool. A program whose identity cannot be established runs
-  the same way but is never cached, said once per program.
-- **Launch**: every reference run, cached or not, runs in a fresh staging
-  directory with no inherited user environment - `PATH=/usr/bin:/bin`,
-  `C.UTF-8`, `TZ=UTC`, `HOME` and `TMPDIR` inside staging, and for osmosis
-  `JAVA_HOME` plus `JAVA_OPTS` setting `user.home` and `java.io.tmpdir` inside
-  staging, since osmosis looks for plugins under `user.home` - beside brokkr's
-  own lifecycle variables. Its inputs are reserved for reading and staging for
-  writing. Where the staging path holds characters the osmosis launcher splits
-  (whitespace, quotes, backslashes), osmosis runs without those two properties
-  and is never cached.
-- **Publication**: only a run that exited with an accepted code (0, or 1 for
-  `osmium diff`; 1 for `osmium getid -r` and `check-refs` only when its
-  stderr shows the run completed, `ToolRun::accept_if`), wrote every declared
-  output, and whose key
-  is unchanged when recomputed after the run is published: artifacts made
-  read-only, hashed and stamped, a manifest written, everything synced, and the
-  staging directory renamed into place, an older entry renamed aside first. A
-  signalled, interrupted or failed run is never stored. A storage failure is a
-  warning; the run's result is still used.
-- **Placement**: a check never receives a cache path. Each artifact is
-  hard-linked into the check's own directory under a name that must not exist
-  (copied through a temporary name across filesystems), so the check owns its
-  names as it owns a fresh output, inspect reports land beside them, and
-  removing or replacing an entry never takes a file from a live check. Nothing
-  writes a reference artifact in place.
-- **Integrity**: a lookup rechecks the stored exit against today's accepted
-  codes and the artifact set against the run's, and compares each artifact's
-  stamp (device, inode, size, mtime); a moved stamp is rehashed against the
-  digest recorded at publication; a stored exit accepted only on a stderr
-  condition is held to it again on the stored stderr. ctime is not in the
-  stamp, since placing a link moves it. This catches a replaced or rewritten artifact whose stamp
-  moved, not an mtime-preserving rewrite or silent media corruption. An
-  invalid entry is removed and the run is a miss.
-- **Outside the identity**, so able to change a run without a miss: system
-  utilities a launcher script runs from the fixed `PATH`, libraries loaded at
-  run time outside the `ldd` closure, symlink referents inside a hashed tree,
-  and an input or tool changed while a run is in flight by something other than
-  a cooperating brokkr process.
-- `brokkr verify --fresh-reference` runs every reference tool for real and
-  replaces its entry. `brokkr clean` removes the whole cache, and `brokkr
-  clean --verify-reference` removes it and nothing else. A host's
-  `verify_reference_budget` (`brokkr man config verify_reference_budget`)
-  bounds it: when each verify ends, the most recently used entries that fit
-  stay, a hit refreshing an entry's recency through its manifest's mtime.
-  Without the key nothing evicts entries.
-
-**`verify all` inputs.** The OSC- and bbox-consuming checks skip only when
-the input is not configured at all (no `--osc-seq` and no OSC registered for
-the dataset or named snapshot; no `--bbox` and no dataset `bbox`, and for
-`extract` no dataset polygon either; `multi-extract` cuts its strips from the
-bbox, so it skips without one). A configured input that fails to resolve -
-hash mismatch, missing file, several OSCs and no `--osc-seq`, a malformed
-bbox, a polygon file that is missing or fails its pin - fails the command
-before the suite runs rather than turning its checks into skips. osmosis
-setup failure is non-fatal but narrated.
-
-Every verify subcommand that takes `--dataset` also accepts `--input <PATH>`
-to skip dataset resolution and use a handcrafted fixture, and `--snapshot
-<key>` to cross-validate a registered snapshot (e.g. an adversarial encoding
-from `degrade`/`repack --as-snapshot`) instead of the primary data. `--input`
-and `--snapshot` are mutually exclusive. PBF resolution is centralised in
-`resolve_verify_input` (`src/pbfhogg/cmd.rs`), which routes through
-`resolve_snapshot_pbf_path` for both the base and named cases.
-
-**`--direct-io`.** Verify defines one operation set and `--commit` only picks
-the binary that runs it, so a verify subcommand offers `--direct-io` only
-where the current pbfhogg takes it on the step it is forwarded to. It
-reaches every run of the command a check verifies, and nothing else: `sort`,
-`cat`, `extract`, `multi-extract` (the single-pass runs), `tags-filter`,
-`getid-removeid` (every pbfhogg getid run), `getparents` (every pbfhogg
-getparents run), `add-locations-to-ways` (each
-engine), `check-ids` (every `check --ids` run, plain and `--full`), `repack`
-(every `repack` run) and `degrade` (every decode-path `degrade` run), `merge`
-(`apply-changes`), `derive-changes` (`diff --format osc`,
-on the indexed pair and on the pair stripped of indexdata), `renumber`
-(`renumber`) and `diff` (the text diff, indexed and stripped, plain and
-`--verbose`). The steps a
-verdict is judged against run buffered, so an O_DIRECT fault cannot sit on
-both sides of a comparison or hand both tools the same wrong input: fixture
-builders (the `apply-changes` that makes `derive-changes`' and `diff`'s new
-PBF, `degrade --strip-indexdata`, `check-ids`' `degrade --unsort` and
-`--unsort-intra` copies and its `cat` fixtures), references (`multi-extract`'s sequential
-single-region extracts, `derive-changes`' roundtrip `apply-changes`) and
-comparators (inspections, normalising sorts, element diffs, `renumber`'s
-comparison `diff`, `check --locations`, `check --index`). `verify merge` and `verify extract`
-hold `apply-changes` and the single-region extract to osmium under the flag.
-`check-refs` does not take the flag, so passing it there is a parse error,
-and `verify all --direct-io` runs it buffered: pbfhogg refuses
-`--direct-io` under `check --refs` alone (exit 64, since 930ddfc9), where
-its ref check reads through buffered parallel unaligned preads. Revisions
-from fb8dd3c0 until 053def6a did read it there; O_DIRECT oracle coverage of
-their ref check is given up rather than reached by probing the binary or
-retrying a refusal. `merge-changes` and `tags-filter-osc` do not take the
-flag either, since pbfhogg refuses it for both commands, and `verify all
---direct-io` runs them without it.
-Verify builds pbfhogg with the host's configured features and does not enable
-`linux-direct-io` itself.
-
-OSC resolution for the change-consuming verifies (`merge` / `derive-changes`
-/ `diff` / `merge-changes` / `tags-filter-osc`) is snapshot-aware via
-`resolve_verify_osc` (and `resolve_verify_osc_range` for a range): a named snapshot that
-carries its own `osc` table (a point-in-time snapshot) is diffed against
-*that* chain; an encoding-only snapshot (degrade/repack has no OSC table)
-falls back to the dataset's primary chain - the logically-correct diff stream,
-since such snapshots are same-sequence re-encodings of the base PBF. Which
-chain resolved is narrated to stderr (`[verify] osc: snapshot-scoped (<key>)`
-vs `[verify] osc: base fallback (<key> has no osc table)`), but only when
-`--snapshot` was actually passed. Even a deliberately misaligned OSC is still
-a valid tool-vs-tool check - both pbfhogg and osmium apply the same changes to
-the same input - so the fallback never invalidates the cross-check.
-
-`verify_merge` reads the input OSC's delete set via `osc::scan_osc_file` and
-runs a strict `pbfhogg diff --format osc` between pbfhogg's and osmium's
-outputs - osmium-only IDs that appear in the input OSC's delete set are
-exempt (osmium does version-based deletes; pbfhogg/osmosis/osmconvert delete
-unconditionally), everything else fails.
-
-`verify merge --osc <PATH>` takes a handcrafted change file instead of
-resolving one (it conflicts with `--osc-seq`), the partner of `--input` for a
-fixture whose base and diff are built together.
-
-`verify merge --locations-on-ways` runs both tools with `-l`. `pbfhogg diff`
-treats inline way coordinates as derived data, not content, so the element
-diff cannot see a stale coordinate; instead pbfhogg's output must pass
-`pbfhogg check --locations` (each way's inline coordinates equal its nodes'
-records in the same file; exit 1 is a FAIL, any other non-zero exit an
-error). osmium's output gets the same check, reported only: one summary line,
-consistent or STALE with the report's mismatch count, so a change in what
-osmium gets wrong shows from run to run, naming `osmium-locations.txt` in the
-check's directory, which holds the whole report (the detail carries it too):
-its location index is searched before it is sorted and resolves
-duplicate keys to the smallest location, so multi-version diffs can make
-osmium itself write stale coordinates. osmosis and osmconvert, which write no
-inline locations, are not run. The base must be LocationsOnWays and keep its
-untagged nodes (osmium's `--keep-untagged-nodes`): pbfhogg refuses `-l` with
-unresolved refs, and `check --locations` can only judge a ref whose node is
-in the file.
-
-`verify all` runs this mode as its own check, `apply-changes -l`, beside the
-plain merge: same OSC, but on the dataset's (or the `--snapshot`'s)
-`altw-keep-untagged` PBF variant, whatever `--variant` says, since a plain
-`altw` variant drops untagged nodes. It skips when no OSC is configured, when
-no `altw-keep-untagged` variant is registered, or under `--input` (a fixture
-has no keep-untagged partner; run `verify merge --input --osc
---locations-on-ways` instead). A registered variant that fails to resolve
-fails the command, as a configured OSC does.
-
-`pbfhogg diff` is a merge-join and refuses an input that does not declare
-`Sort.Type_then_ID`. osmium's `apply-changes` output is content-sorted but does
-not stamp the feature, so `verify_merge` and `verify_derive_changes` pass it
-through `pbfhogg sort --force` (content unchanged) before diffing.
-
-`pbfhogg diff` has a separate code path for inputs without indexdata, meant
-to answer exactly as the indexed one does. `apply-changes` refuses an
-unindexed base, so `--variant raw` cannot reach it; instead `verify_diff` and
-`verify_derive_changes` strip both sides of their verified pair with `pbfhogg
-degrade --strip-indexdata` and rerun the diff. `verify_derive_changes`
-requires the indexed OSC's decompressed content (gzip framing is not
-compared), and `verify_diff` requires the indexed verbose listing byte for
-byte (see below). The indexed answer is the one held to osmium, so the match
-holds the unindexed path to osmium too. Both treat exit 1 from `pbfhogg
-diff`, text or OSC, as "the inputs differ", and 2 and above as a failed run.
-
-`verify diff` holds pbfhogg's text diff, every line of it, to osmium's
-reading of the pair (the input and pbfhogg `apply-changes` of it with the
-OSC). pbfhogg `diff --suppress-common` runs on the indexed pair and on the
-stripped pair, each with and without `--verbose`. The expected listing comes
-from osmium's content, never from pbfhogg: `osmium diff --suppress-common
---output-format opl` gives, with full content, every one-sided object and
-every pair whose version, timestamp or osmium checksum differs. osmium's
-checksum feeds tags without lengths, so a pair whose content differs can be
-"same" to it (`a=bc` against `ab=c`, or a replayed equal-version change that
-reorders tags), and it withholds that pair; every identity the input OSC
-touches (read with the strict OSC scanner), and every one pbfhogg reports
-modified, that the listing lacks is fetched from both inputs with `osmium
-getid --output-format opl` (exit 1 accepted only on its completed verbose
-output, the not-found count reconciled with what came back), and an
-identity found on one side only is an error. Content is pbfhogg's definition
-(node location and tags, way tags and refs, relation tags and members, in
-order; metadata never), so a version or metadata change alone is no
-difference. The indexed verbose listing must then hold exactly one record
-per identity whose content differs, in object order, rendered as pbfhogg's
-CLI reference documents: the header's class, type, ID and versions, and for a
-modification each detail component (a node's coordinates, a way's ref and a
-relation's member edit script, the tags keyed or, with a duplicate key, as
-a script) accounting for its whole change and printing nothing when
-unchanged, its literals and coordinates compared as the documented spelling
-of osmium's decoded values. An edit script must be faithful and shortest
-(the edit distance is recomputed) within 1000 edits, and a replacement must
-name exactly the ranges left after trimming the common prefix and suffix.
-The stripped verbose listing must equal it byte for byte, each plain
-listing must equal its header lines, and every run must exit 1 exactly when
-osmium's content shows a difference and summarise the created, modified and
-deleted counts it gives and a common count of osmium's `same`, less the
-fetched pairs whose content differs, plus the listed pairs whose content is
-equal. osmium's own summary must match its listing's line counts.
-
-What it does not prove: that `apply-changes` left the diff content of every
-identity the OSC does not touch alone (an untouched object it changed while
-keeping osmium's checksum, which pbfhogg's diff then wrongly called common,
-would pass; `verify merge` holds `apply-changes` to osmium); which of
-several shortest scripts pbfhogg prints; and whether a replacement within the
-1000-edit cap was due to pbfhogg's search budget. A version 0 in osmium's OPL
-cannot say whether a version is present, so either spelling is accepted;
-the PASS line says so when one was seen, and names the renderings no record
-exercised and any replacement accepted on the budget. A changed identity
-with a negative ID that must be fetched, and a member pbfhogg prints with an
-unknown type, cannot be compared and are errors.
-
-`verify renumber` requires the comparison diff to exit 0 or 1 and its `-s`
-summary (on stderr) to carry all four of `left`, `right`, `same` and
-`different`; `same + different` must equal both totals, so equal totals
-cannot hide one-sided elements, and the block headers classified by kind in
-the listing must number exactly `different` (pbfhogg writes one per modified
-element), so a listing the classifier does not fully read fails rather than
-passing node or way differences as tolerated relation ones.
-
-`verify getid-removeid` (alias `verify getid`) chooses its IDs from the
-input, not from a fixed list. The include and `--invert` IDs come from a header-only walk of the
-PBF's blob framing (`pbf_frames`), which reads each `BlobHeader` and its
-indexdata and seeks past every data payload, so that choice costs the blob
-count, never the data, at any scale (the `--add-referenced` request below
-also reads the input's relations). For each kind
-present it takes the lowest and highest ID the indexdata claims, which exist
-in any input whose claims are true, drops either if negative (pbfhogg getid
-does not accept negative IDs), and asserts per kind that getid selected
-exactly as many as were requested. The walk decodes indexdata in
-pbfhogg's wire format (versions 1 to 3) and refuses whatever pbfhogg could not
-read through it - a data blob without indexdata, two non-empty indexdata
-fields, an unknown version, a length the version does not declare, an
-unknown kind, an inverted range - as well as malformed framing; an unknown
-future version is refused by name. The one payload it reads is the
-`OSMHeader`'s, and a header declaring `HistoricalInformation` is refused,
-since the cardinality assertion needs one object per kind and ID. The
-original's counts for the complement test are the indexdata claims from the
-same walk. The input must not change on disk while the check runs. Its domain
-is a snapshot with one record per kind and ID and true indexdata claims;
-repeated records in a file that does not declare history are not looked for
-in the input, but every output the check diffs, pbfhogg's and osmium's, must
-pass the strict order check (an osmium output that fails it is an error), so
-a repeat either tool wrote is caught. It branches on `Sort.Type_then_ID` as
-`extract` does: on unsorted input every osmium run reads the osmium-sorted
-copy `verify sort` shares, each pbfhogg output it diffs must not claim the
-flag and is compared through an osmium-sorted copy (the `--invert` output is
-only counted), and the PASS line opens `on unsorted input`.
-
-The check then compares `getid --add-referenced` with `osmium getid -r`, and
-`--add-referenced --remove-tags` with `-r -t` (`verify_getid_refs`), content
-and tags compared by the same diff. The request is its own: one relation, the
-highest claimed way and the highest claimed node. The relation comes from the
-input's relations as OPL (`osmium cat -t relation -f opl` of the reference
-input, its record count held to the indexdata claim), chosen so recursion
-shows in the output: it holds a relation that holds relations, one of which
-is present in the input and is neither the requested relation nor its direct
-member, so that object is in the closure only through two hops. The lowest
-such relation whose members include both nodes and ways is taken, else the
-lowest including one of them, else the lowest such; without one, the lowest
-relation by the same preference. What the run exercised is read from osmium's `-r` output as
-OPL, never pbfhogg's: the two-hop relation, a pulled-in node and a pulled-in
-way member of a relation, a node only a way pulls in, a tagged pulled-in
-object (which `-t` must strip) and a tagged requested one (which it must
-keep). The PASS line names each the input did not offer. osmium exits 1
-whenever a requested or pulled-in object is missing, the normal case on an
-extract and a documented pbfhogg deviation, and also when an exception ends
-its run; it runs with `-v`, and exit 1 completes it only when the verbose
-output reports `Did not find N object(s).` followed by the final `Done.`,
-which the reference cache requires too before storing or replaying the run.
-An input whose indexdata claims a negative ID is refused, and so is a
-negative node or member reference in any object of osmium's output: osmium
-folds a negative ID to its absolute value and pbfhogg does not, and every
-reference either tool follows belongs to an object osmium wrote.
-
-`verify getparents` compares `pbfhogg getparents` with `osmium getparents`,
-each request with and without pbfhogg's `--add-self` (osmium's `-s`), by
-`compare_outputs` as getid is: osmium reads the reference input (the
-osmium-sorted copy on input without `Sort.Type_then_ID`) and pbfhogg the
-input. The requests are one per element kind, since what a request holds
-decides which blob kinds pbfhogg reads (a node request needs way and
-relation blobs, a way or relation request relation blobs, and `--add-self`
-adds the requested kind's own), so each exercises its own combination, and
-one of every kind: W is the lowest and
-highest way and the first way member of the lowest relation holding one, R
-the same for relations, N the lowest and highest node, the first node member
-of the lowest relation holding one and the first ref of a requested way (read
-from osmium's W `-s` output), and M all of them. Lowest and highest come from
-`osmium fileinfo -e` of the reference input, which must also show no ID
-repeated, since the outputs are compared by ID, and no negative ID. Members
-come from the input's relations as OPL, the run `verify getid-removeid`
-reads, so one cached execution serves both. A member or ref need not exist:
-a parent is found by its reference. osmium matches a reference by its
-absolute value and pbfhogg does not, so every osmium output is read as OPL
-before any comparison records a verdict, and a negative way ref or relation
-member in any of them is an error: that is where every match its folding
-adds would show. The same reading gives what the run exercised, never from
-pbfhogg's output: a way parent of a requested node, a relation parent of a
-requested node, way and relation, and per kind a requested object only
-`--add-self` selects. The PASS line names each one the input did not offer.
-A pass establishes selection, element content and tags compared by ID; not
-metadata, the header, which blobs either tool skipped, or which of pbfhogg's
-scan arms ran (the full-scan arm is chosen only from 150000 estimated blobs
-up, so a regional dataset runs the header-walker arm).
-
-`verify check-ids` runs `pbfhogg check --ids` and `check --ids --full`, both
-`--json` with the report written to the check's directory. osmium has no ID
-check, so the expectation comes from two readings of each file: `osmium
-fileinfo -e -j --no-crc` (`verify_fileinfo`), whose `objects_ordered` and
-`multiple_versions` say whether the decoded objects strictly ascend by kind
-and then ID in canonical order (libosmium's `id_order` is pbfhogg's), and
-brokkr's header-only reading of the framing (`pbf_frames::framing`), since on
-an indexed file pbfhogg judges type order from the kind every data blob
-claims, an empty blob's included. A file passes when osmium reads it in
-strict order and, if indexed, its claims never step back a kind. An ordered
-report without `multiple_versions` is an error, never read as false. Each
-mode must exit as its report says (0 with a pass and no violation, 1 with a
-failure and at least one), answer as expected, count each kind as osmium
-does (what catches a reader that skips objects), and report `indexed`
-exactly when the framing carries indexdata. The violations themselves and
-`--full`'s duplicate detail are not compared, and the PASS line says so. The
-cases: the input; when osmium reads it in strict order, three copies the
-check derives, the input stripped of indexdata (when it has any), `degrade
---unsort --elements-per-blob 8000` (a step down across blobs, indexed) and
-`degrade --unsort-intra --strip-indexdata` (one inside a blob, unindexed),
-each required to keep the input's counts, its framing, and to be out of
-order exactly when its degradation fires on those counts (a kind above the
-cap, a kind with two objects), else the check is an error; and five fixed
-fixtures, written as OPL and converted by `osmium cat`, then rewritten by
-`pbfhogg cat` for an indexed form: a way before its nodes and an adjacent
-repeated ID in both forms, and an ordered file with an empty blob claiming
-nodes appended after its way blob, which osmium reads as ordered and pbfhogg
-must fail. Each fixture must show the property it exists for, read from
-osmium and the framing. The PASS line names each kind of case, indexed or
-not and in order or not, that neither the input nor a copy derived from it
-gave (an input osmium reads out of order derives nothing, and neither does
-one with no object); the fixtures do not count toward it. An input with
-a negative ID is refused (pbfhogg rejects negative input IDs project-wide,
-and `--full` reports each as untrackable), and one whose framing mixes blobs
-with and without indexdata too. Kind claims must be true: a blob whose
-decoded kind contradicts its claim stops pbfhogg's check without an answer,
-an error here.
-
-`verify repack` and `verify degrade` hold pbfhogg's two re-encoders to
-osmium's reading of the input and to their documented block layout
-(`verify_reencode`, shared). Elements: `osmium diff --suppress-common
---output-format opl,locations_on_ways=true --summary` of a reference against
-the output. osmium walks both files as a merge on object order and counts a
-pair same only when a checksum over visible, timestamp, tags, changeset, uid,
-user and the location, way node references with their coordinates or members
-agrees, so no left, right or different object means the two sequences are
-identical element by element, whatever their order (barring a checksum
-collision; tags are fed without lengths). An object it lists as moved or
-removed is printed, not checksummed, so its lines are compared byte for byte,
-way coordinates included. The reference is the input when its kinds are
-grouped in order (`inspect`'s `ordering.standard`), else a stable partition
-osmium builds (`osmium cat -t` per kind, then `osmium cat` of the three: each
-kind keeps its input order); for degrade it is written without way
-coordinates (plain `osmium cat`), since every re-encode drops them. Layout:
-each output's indexdata must be on every blob and true by `pbfhogg check
---index`, which decodes every blob independently of the writer's
-`BlockBuilder`; then the header-only claims walk (`pbf_frames::Claims`,
-pulling input and output blobs side by side in constant memory) holds the
-output's blobs, in order, to the documented rule run over the input's
-claims, which on an indexed input must pass `check --index` too (else an
-error: they feed the prediction). Every output must also claim
-`Sort.Type_then_ID` and `LocationsOnWays` as its command documents, hold no
-blob over the cap or empty, and keep kinds in order. Both arms read the input
-with `osmium fileinfo -e` and refuse a negative ID and a header requiring
-`HistoricalInformation` (one object per kind and ID is the domain); `--force`
-is passed only on an unindexed input, which also gets no layout prediction
-(the PASS line says so). A run pbfhogg refuses as too large for the format
-(exit 2 with its CLI's `; lower --elements-per-blob` advice, nothing
-published) is named in the PASS line as refused, its representability and
-correctness not established; an arm all of whose runs refuse is an error.
-
-`verify repack` runs the default cap (no `--elements-per-blob`, held to the
-documented 8000), 3000 (a cap that does not divide 8000-element blobs) and
-64000 (one that grows them), each of which must leave the element sequence
-identical, metadata and way coordinates included, and claim both header
-features as the input does; on an indexed input the layout must be repack's
-rule exactly: per kind, a blob of at least the cap flushes the builder and is
-written as full blocks of the cap and its remainder alone, a smaller one goes
-element by element into the builder, which flushes at the cap. A fourth case
-repacks the input stripped of indexdata (`degrade --strip-indexdata`,
-required to be unindexed and to hold the input's data payloads byte for byte,
-else an error) with `--force` at the default cap, its layout predicted from
-the original's claims. The PASS line names a shape no cap met: a shrink
-blob's remainder followed by a smaller blob of its kind (the remainder must
-not take it), or a blob smaller than the cap coalescing into a nonempty
-builder.
-
-`verify degrade` runs the decode path at the default cap. `--strip-locations`
-must leave the sequence identical and, on an indexed input, re-encode each
-input blob alone (full blocks, then the remainder). On an input osmium reads
-in strict order with at least four objects, three more run, else the PASS line
-says they did not. `--drop-ids N:SEED`, N the smaller of 10000 and a quarter
-of the objects, must remove exactly N objects and change nothing else (each a
-`-` line alone), its layout predicted from each input blob's survivors (the
-removed IDs counted into the blob whose claimed range holds them); it runs
-twice with one seed, the outputs identical, and once with another, held to
-the same checks. Which objects go is not compared with pbfhogg's selection,
-which is not documented, and whether the second seed chose another set is
-named, never a verdict. `--unsort` and `--unsort-intra` must move exactly one
-object per kind with more objects than the cap (two or more for intra), its
-two lines identical, and change nothing else. For `--unsort` each kind must
-be packed continuously (full blocks, then the rest), exactly the kind's first
-two blobs may overlap, and brokkr decodes three IDs itself
-(`pbf_frames::blob_ids`, raw or zlib, its count and kinds held to the claim):
-the moved object must open the kind's second blob and fall between the last
-two IDs of its first, which holds the cap's worth. With the rest of the
-sequence unchanged and ascending, that places the input's objects at the cap
-and one past it swapped, and nothing else. For `--unsort-intra` the moved
-object must be the kind's lowest ID by osmium and decode second in the kind's
-first blob, and no blob ranges may overlap. The unsort modes must not claim
-`Sort.Type_then_ID`; the other cases claim it as the input does; none claims
-`LocationsOnWays`.
-
-`verify add-locations-to-ways` runs osmium with `--keep-member-nodes`: pbfhogg
-keeps untagged relation-member nodes unconditionally (a documented pbfhogg
-deviation), osmium only with that flag.
-
-It verifies pbfhogg's node-index engines by name, each run with an explicit
-`--index-type`: `--mode sparse`, `--mode external`, or `--mode all` (the
-default, and what `verify all` runs) for both. `auto` is not verified on its
-own, since it routes to one of the two and its output is that engine's. Every
-engine runs before any check reads an output.
-
-The input header's `Sort.Type_then_ID` claim (among its optional features)
-picks each engine's route (`verify_input_order`). Sparse takes any order: on
-input without the claim osmium reads the osmium-sorted copy, and sparse's
-output must not claim the flag and is compared through an osmium-sorted copy,
-whose strict order proves it repeats no ID (the copy keeps no inline
-location, which the diff does not read). External's documented contract
-refuses such input, so there it is held to that refusal as `merge` is (exit
-2, the one `Unsorted` advice naming the input, nothing published) and never
-compared: under `--mode external` osmium does not run and the PASS line opens
-`on input without Sort.Type_then_ID among its optional features, refusal
-only`; under `all` the PASS line names sparse's comparison, external's
-refusal and that the engines are not compared with each other. A header that
-claims the flag over disordered content takes the ordinary route.
-
-On the ordinary route an engine that exits non-zero is a recorded failure
-with its stderr in the detail, never a skip, and brokkr does not re-derive
-why: the domain is the input both engines and the checks accept - indexed, no
-negative node IDs or references, no `HistoricalInformation` header - and an
-input outside it fails the check without that alleging an engine defect
-(verify an input external refuses with `--mode sparse`). Each output that was
-produced gets:
-
-- the comparison with osmium's output: strict order and the sort-declaration
-  comparison on sorted input, the header and repeated-ID checks above on
-  input without the claim, then the element diff;
-- `pbfhogg check --locations --agreement`. `pbfhogg diff` treats inline
-  coordinates as derived data, not content, so the diff never sees one; this
-  holds each coordinate to the node record the output keeps and, for a node
-  it dropped (most untagged nodes), to the other references to that node. It
-  runs on the output itself, never a sorted copy.
-
-Under `all`, when both engines produced an output, the two outputs' node, way and relation lines of `pbfhogg digest
---form full`, which cover metadata and exact way coordinates, must be
-identical; the overall line is ignored, since it also covers the header. A
-digest that fails or prints a malformed report, or two reports of different
-form versions, is an error. The PASS line carries the claim: inline locations
-are never compared with osmium's, so a wrong coordinate for a dropped node
-that every reference to it shares, written by both engines alike, passes.
-Under `--commit` nothing is negotiated: a build lacking what the selected
-mode runs - its engine, `check --agreement`, and under `all` both engines
-and `digest --form` - fails the check.
-
-`verify merge-changes` and `verify tags-filter-osc` read change files only,
-from `--osc-seq` (or a dataset's only OSC), `--osc PATH`, or, for
-merge-changes, `--osc-range LO..HI` (every sequence registered, merged in
-sequence order) or `--osc` repeated (merged in the given order); the OSC
-table follows the snapshot rule above. Neither takes `--direct-io`, which
-pbfhogg refuses for both commands, and `verify all` runs both, on its one
-OSC, without it. Every change file either reads, input or output, becomes a
-change listing (`verify_change_listing`): osmium's `osmium cat -f opl`
-(run id `osc-opl.1`) joined by position with brokkr's strict XML scan
-(`scan_osc_changes`), each position required to name the same kind and ID
-and the XML version to be osmium's (`v0` for none), with no change left over
-on either side. The XML side carries what osmium cannot: the container's
-action (libosmium's writer derives create or modify from the version) and
-the metadata attributes as written. Comparisons are record for record: the
-action, the metadata attributes, and osmium's decoding of the object. The
-expected side is read as pbfhogg writes a change, an empty attribute as
-none, and the actual side is held to that, so pbfhogg's output must carry no
-empty attribute. A delete keeps its body (tags, coordinates, refs and
-members), as pbfhogg and osmium write it, and is compared like any change;
-both sides being osmium's decoding, pbfhogg's normal form (attribute order,
-coordinate spelling, children before tags) is not compared, while tag,
-way-ref and member order are, and a deleted node with no location must come
-out with none, not 0 0. Each PASS line counts the bodied deletes checked.
-pbfhogg refuses a deleted node with half a location or an unusable
-coordinate; an input carrying one fails the arm on pbfhogg's exit, and no
-case asserts the refusal. Section boundaries are not
-compared. Each command also runs with `--jobs 1` to a plain `.osc`, whose
-decompressed content must equal the automatic run's `.osc.gz`, which
-pbfhogg promises for default `merge-changes` and an OSC `tags-filter`.
-
-`merge-changes` is not judged by `osmium merge-changes`, which sorts every
-change by type, ID, version and timestamp in both modes: its default mode
-discards the order pbfhogg keeps, and its `-s` keeps the highest version,
-then the later timestamp, then the later input, where pbfhogg keeps the last
-change by position. Default mode must equal its inputs' listings
-concatenated. `--simplify` must equal a model computed with an external sort
-of fixed-size change records (`verify_extsort`: bounded chunks and fan-in,
-one object's history scanned at a time): each object's last change by input
-position, in a create, a modify and a delete group, each in (kind, signed ID)
-order. The model also applies pbfhogg's version floor (DEVIATIONS.md, "Change
-stream: version precedence is enforced"): a change claiming a lower version
-than one claimed earlier for its object is a regression, an unversioned
-change claims nothing, and pbfhogg reports the one at the smallest position;
-where the model finds one, both `--simplify` runs must exit 2 naming that
-object and both versions, with no output published, and `--simplify
---allow-version-regression` must equal the positional model. The same scan
-predicts what `osmium merge-changes -s` keeps, and osmium's run (`-f opl`,
-run id `merge-changes-simplify.1`) must keep exactly that: a cross-check of
-the reading and the model, which counts the objects where the two rules pick
-different changes. libosmium compares timestamps only when both are valid,
-no consistent order when one object mixes changes with and without one, so
-the cross-check runs only when no object does, and the PASS line says when
-it did not. Cases: the inputs; the inputs twice over, several inputs and so
-the run that can spill (scratch declared by the same predicate as the typed
-command), whose replay is a regression wherever an object's version
-advances within the inputs; and fixtures brokkr writes: equal-version
-changes decided by position (modify then delete, delete then modify, two
-modifies whose bodies, metadata and timestamps oppose their order), a create
-at version 5 and surviving deletes with bodies, a relation's members among
-them, beside a deleted node with no location; a backward pair, refused and then
-allowed; a v9, unversioned, v8 history, refused on the v8; and two objects
-regressing in the opposite order to their IDs, refused on the earlier. Each
-fixture's model must show what the fixture exists for, or the check errors.
-
-`tags-filter-osc` uses `osmium tags-filter -R` as the reference: osmium takes
-no change file, but with `-R` it is a pure predicate on each object's own
-tags in input order, and its manual admits it under `-R` on a file of several
-versions per object, which osmium's OPL of the change file is (run id
-`tags-filter-osc.1`, `-F opl -f opl`). The expected output walks the input
-listing in lockstep with osmium's: a create or modify is kept exactly when it
-is osmium's next line, which is exact since identical records get identical
-decisions, every delete is kept, and osmium's output must be used up. pbfhogg
-must write those changes as one create, one modify and one delete section,
-each holding its node, way and relation changes in input order. It runs
-`highway=primary`, `amenity=restaurant`, `w/highway=primary` and the pair
-`n/amenity r/type=route`.
-
-## OSC parser (`src/osc.rs`)
-
-Minimal `.osc` / `.osc.gz` reader. `scan_osc_file` calls back once per
-element entry with its (`<create>` / `<modify>` / `<delete>`) action, kind
-and ID, in file order, and keeps nothing between entries; what is retained
-is the caller's choice. Used by `verify_merge` for the delete-set carve-out
-and the streamed classification of the element diff, and by `verify_diff`,
-strictly, for the identities its input OSC touches. `scan_osc_changes`, also
-strict, adds each entry's metadata attributes (`version` as an integer;
-`timestamp`, `changeset`, `uid`, `user` and `visible` decoded, references
-resolved and literal whitespace normalised as an XML parser does, an absent
-attribute apart from an empty one) for the change listings of `verify
-merge-changes` and `verify tags-filter-osc`; an entry whose attributes cannot
-be read is an error.
-
-Streaming hand-rolled tag scanner; gzip and plain XML are consumed in bounded
-chunks, and the scanner retains only its current tag rather than the entire
-decompressed file. It is tolerant of XML comments, processing
-instructions, self-closing elements, and single-quoted attributes, and a `>`
-inside a quoted attribute value does not end the tag (XML allows it raw). Element
-bodies (tags / refs / members / coords) are deliberately skipped, and so is
-metadata outside `scan_osc_changes`. The document itself is checked: the first element must
-be the `<osmChange>` root and the root must be closed, with nothing after it.
-An empty file, a non-OSC document or a truncated diff is an error, not an
-empty scan - `verify_merge` would otherwise report it as
-"element-identical PASS". Entries are delivered before the document is known
-to be whole, so a caller acts on them only once the scan returns `Ok`.
 
 ## Snapshots and variant selection
 
@@ -1434,22 +517,13 @@ schema-universal flags (`--variant`, `--osc-seq`, `--tiles`) see
   which command is dispatching, so wiring a new pbfhogg command into the
   snapshot graph is just a matter of adding the field to its CLI variant in
   `src/cli/schema.rs` and propagating it to `CommandParams.snapshot` in
-  `Command::into_route` (`src/command_input.rs`). The `read` throughput benchmark and the
-  `verify` cross-validation suite accept `--snapshot` too (they resolve
+  `Command::into_route` (`src/command_input.rs`). The `read` throughput benchmark accepts `--snapshot` too (it resolves
   outside `build_pbfhogg_context` but share `resolve_snapshot_pbf_path` via
   `SnapshotRef::from_opt`); the synthetic `write`/`merge-bench`/etc. benches
   do not.
-- `--as-snapshot <key>` / `--replace-snapshot` - (`repack`, `degrade` and
-  `cat` only) promote the final iteration's scratch artifact into the dataset
-  graph as a new snapshot. `cat --type way --as-snapshot ways-only` is how a
-  single-kind input (every way ref dangling) is made addressable as
-  `--snapshot ways-only`. `--replace-snapshot` allows overwriting an existing key;
-  without it, an existing key errors out. A `repack` promotion also records
-  the new file as `same` as its source for `diff-snapshots` (Declared
-  answers, above). Both flags are validated up-front
-  via `download::preflight_snapshot_collision` (called from the top of
-  `run_command_with_params`), so a forgotten `--replace-snapshot` errors
-  before the cargo build kicks off, not after the run.
+Promoting a command's output into the snapshot graph (`--as-snapshot`,
+`--replace-snapshot`) is no longer a brokkr flag: `brokkr run --with pbfhogg
+pbfhogg-datasets -- promote ...` does it from pbfhogg's own binary.
 
 ## I/O and compression flags
 
@@ -1476,7 +550,7 @@ revision built answers. The table lives in `PbfhoggCommand::axis_has_effect`
   `check-locations` and `tags-filter --input-kind osc`. `check-refs` keeps
   it: pbfhogg revisions from fb8dd3c0 until 053def6a read it. From 930ddfc9
   pbfhogg refuses it there with exit 64, so a run built from such a revision
-  fails with that refusal. `brokkr verify` differs (Verify subcommands).
+  fails with that refusal.
 - `--io-uring` - enable io_uring I/O. Adds `linux-io-uring` cargo feature,
   `--io-uring` binary flag. Runs io_uring preflight checks before building.
   Only `apply-changes`, `sort`, `cat --dedupe`, `repack` and `degrade`, the
@@ -1521,13 +595,7 @@ revision built answers. The table lives in `PbfhoggCommand::axis_has_effect`
   forwarding. The producer's four counters (`altw_member_ways`,
   `altw_pinned_refs`, `altw_field5_bytes`, `altw_field20_ways_emitted`) ride
   the existing sidecar FIFO counter channel and show up in
-  `brokkr sidecar --counters` unchanged. **`brokkr verify
-  add-locations-to-ways --inject-prepass` is refused** (nonzero exit, no diff
-  run): enriched output is osmium-incompatible by design (field-5 headers run
-  ~1-8 KB; libosmium 2.23 rejects any BlobHeader over 127 bytes, their issue
-  405), so there is no reference tool to cross-validate against. Run flag-off
-  verify for the element semantics; enriched correctness is covered by
-  pbfhogg's own oracle-roundtrip + backend-parity suite.
+  `brokkr sidecar --counters` unchanged.
 - `--force-altw` - (`add-locations-to-ways` only) appends `--force` to the
   pbfhogg child (`src/pbfhogg/commands.rs`, `AddLocationsToWays` arm), skipping
   its indexdata requirement so raw / non-indexed input reaches the decode-all
@@ -1557,7 +625,7 @@ revision built answers. The table lives in `PbfhoggCommand::axis_has_effect`
   that have it, and a row stored before the flag existed keeps the key it
   had, since its argv never carried it.
 - `--locations-on-ways` - (`apply-changes` only) passes through to the child
-  pbfhogg invocation. Like `verify merge --locations-on-ways`, it needs a
+  pbfhogg invocation. It needs a
   LocationsOnWays base that keeps its untagged nodes; a default altw variant
   drops them and pbfhogg refuses the run.
 
@@ -1576,38 +644,4 @@ brokkr passthrough add-locations-to-ways <input.osm.pbf> \
 ```
 
 then register the file manually in `brokkr.toml` under
-`pbf.locations` with a `brokkr env` xxhash. (There is no `--as-snapshot`
-promotion for `add-locations-to-ways`: that machinery routes into the
-`snapshot` graph under `pbf.indexed`, which is the wrong target for a
-top-level `locations` variant.)
-
-## download command
-
-`download <region> [--osc-seq N]` - download PBF + OSC from Geofabrik or the
-Planet replication service. Geofabrik accepts short aliases (`denmark`,
-`europe`) or full paths (`europe/france`, `asia/japan/kanto`). Dataset key is
-the last path component.
-Checks configured filenames in `brokkr.toml` before downloading. `--osc-seq N`
-downloads all missing diffs from `last_configured_seq + 1` through N. After
-downloading, computes xxh128 hashes and registers the new entries in
-`brokkr.toml`. PBFs are named `{key}-{YYYYMMDD}.osm.pbf` (the download day)
-or `{key}-{snapshot}.osm.pbf`. OSCs are named `{key}-seq{N}.osc.gz` in every
-flow: the only date at hand is the download day or the snapshot key, neither
-says what edits a diff holds, and a dated name invited applying a diff to the
-base of that date. Files registered under the older `{key}-{date}-seq{N}`
-names keep working - resolution reads the registered filename. The indexed variant is generated with plain
-`pbfhogg cat <raw> -o <indexed>` (`generate_indexed_pbf`, shared by the
-primary, `--as-snapshot` and `--refresh` flows).
-
-Every `brokkr.toml` change a download flow (or `--as-snapshot` promotion)
-makes goes through one `toml_edit` transaction (`DatasetToml` in
-`src/pbfhogg/download/registry.rs`): keys and values are escaped by the
-writer, comments and unrelated tables survive untouched, and the batch is
-committed once with an atomic replace, only after every file it names exists
-and is hashed. A failure before the commit leaves `brokkr.toml` unchanged -
-in particular `--refresh` never leaves a dataset with its primary rotated out
-and no replacement registered. `--replace-snapshot` unlinks the displaced
-snapshot's files only after the new registration is committed, and keeps any
-file the primary or another snapshot still names. `--refresh` refuses when
-today's dated filenames are already registered (a same-day refresh would
-overwrite the primary it is archiving).
+`pbf.locations` with a `brokkr env` xxhash.

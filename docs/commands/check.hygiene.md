@@ -215,12 +215,12 @@ the holder itself over its control socket, so it works from the host against a
 sandboxed holder and between sandboxes:
 
 ```
-[lock]    brokkr (holding 29m24s, own CPU 1.2s, own RSS 19 MB): pbfhogg verify merge ...
+[lock]    brokkr (holding 29m24s, own CPU 1.2s, own RSS 19 MB): nidhogg verify batch ...
 [lock]    root: ...
-[lock]    doing: verify merge (29m10s)
-[lock]      osmium apply-changes (3m02s)
+[lock]    doing: verify batch (29m10s)
+[lock]      query (3m02s)
 [lock]    processes: 1 observed (sampled 248ms ago over 254ms): 0.98 cores, summed RSS 4.1 GB
-[lock]      PID 4242 osmium apply-changes ... - 0.98 cores, CPU 2m55s, RSS 4.1 GB, up 3m02s, io r 2.1 GB w 800 MB [under verify merge]
+[lock]      PID 4242 nidhogg ... - 0.98 cores, CPU 2m55s, RSS 4.1 GB, up 3m02s, io r 2.1 GB w 800 MB [under verify batch]
 [lock]    cgroup brokkr-...: CPU 1h02m since entry 29m ago, now 1.01 cores, 3 member process(es)
 [lock]    last marker: STAGE2_START (12s ago)
 ```
@@ -229,8 +229,7 @@ sandboxed holder and between sandboxes:
   mostly a process waiting on its children. The work is in the lines below.
 - **`doing:`** lists the holder's open activities, nested: the `check` phase
   in flight (with the lane's status line beside it), a parallel lane with its
-  binaries done out of total and each binary in flight, a verify check and the
-  tool step it is running, measured runs with run N of total, a cargo build, a
+  binaries done out of total and each binary in flight, measured runs with run N of total, a cargo build, a
   download. A long non-verbose `verify` also keeps that step as a live status
   line on its own terminal.
 - **`processes:`** are the holder's processes, from two `/proc` scans about a
