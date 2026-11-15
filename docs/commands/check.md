@@ -436,8 +436,9 @@ describe a run the check would not make. `check plan: profile NAME
 
 Then `textlint: N rules (files selected by path)` and one count per rule: the
 files its `paths` select and its `exclude` leaves, out of the scanner's own
-list (tracked plus untracked files git does not ignore). A path count, not
-a scan count - `test_code`, `only_if_file_matches` and binary content can
+list (tracked plus untracked files git does not ignore) less the paths
+observed absent from disk, such as a deletion not yet staged. A path count,
+not a scan count - `test_code`, `only_if_file_matches` and binary content can
 still keep a selected file from being matched.
 
 The audit takes the flags that shape a run (`--profile`, `--gate`,
@@ -449,10 +450,15 @@ one: `--json`, `--fix-gremlins`, `--timings`, `--commands`, `--textlint` and
 **The findings**, each printed as a warning:
 
 - a `paths`, `exclude` or `exempt` glob in `[header]`, `[[textlint]]` or
-  `[manifest]` (including `shape_exclude`) that selects no tracked file;
+  `[manifest]` (including `shape_exclude`) that selects no present file (the
+  same list as the counts, so a path deleted but still listed by git keeps no
+  glob live);
 - an exclusion that excuses every file its selector picked, and a
-  `[manifest]` scope that leaves no manifest;
-- a `[gremlins].include` glob that matches no tracked file, and a
+  `[manifest]` scope that leaves no manifest. A `[[textlint]]` finding the
+  textlint phase also fails on, because the rule sets `require_live_paths`,
+  ends `(fails textlint when run: require_live_paths)`; whether the phase runs
+  is the plan's `phase textlint` line;
+- a `[gremlins].include` glob that matches no present file, and a
   `[gremlins].exclude` entry that matches no scannable file (built-in
   extension or `include`), or that removes every one (all skipped under
   `[gremlins].disable = true`);
@@ -486,8 +492,10 @@ sources parsed, and every textlint run already prints them).
 An ordinary check prints none of the findings. A user-wide rule legitimately
 names paths most trees lack, and an exclusion may reserve a path that is
 absent today, so a warning on every run would be noise. The audit is where a
-real typo gets found. It ends with `audit: N findings` and exits 0 whatever it
-finds.
+real typo gets found. The one exception is opt-in: a `[[textlint]]` rule with
+`require_live_paths` fails the textlint phase on its dead `paths` globs and on
+an `exclude` that excuses everything, judged by the same code as the audit. The
+audit ends with `audit: N findings` and exits 0 whatever it finds.
 
 ## The markdown-only shortcut
 
@@ -569,7 +577,7 @@ fails. Ported from `check_copyright_year`; see `src/header.rs`.
 
 Runs next, only when `[[textlint]]` rules exist. Each rule forbids a regex on
 lines of the files it selects; the keys (`allow_marker`, `except`, `region`,
-`skip_after`, `test_code`, `must_scan`, `join_wrapped_use`, ...) are in
+`skip_after`, `test_code`, `must_scan`, `require_live_paths`, `join_wrapped_use`, ...) are in
 `brokkr man conventions textlint`. When a rule with a `test_code` scope selects
 any tracked `.rs` file, the phase runs `cargo metadata --no-deps` once to
 classify the workspace's test code before scanning.
@@ -595,7 +603,11 @@ fragment. The file count
 is files at least one rule applied to, not the tracked-file total, so it is a
 statement about the corpus that was actually scanned. A rule whose `paths` glob
 has stopped matching anything still passes; a shrinking count gives it away,
-and a rule that names its sentinel files in `must_scan` fails outright.
+a rule that sets `require_live_paths` fails on the dead glob, and a rule that
+names its sentinel files in `must_scan` fails when one of them goes unscanned.
+A `require_live_paths` failure has no file or line: it prints as
+`[name] require_live_paths: ...` ahead of the file violations, and counts
+among them.
 
 ## `manifest` phase
 

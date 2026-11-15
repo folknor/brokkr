@@ -930,6 +930,16 @@ pub struct TextlintRule {
     /// default.
     #[serde(default)]
     pub must_scan: Vec<String>,
+    /// Make dead scope a violation of this rule in the textlint phase: every
+    /// `paths` glob must select a present file, and `exclude` must leave at
+    /// least one of the files `paths` selects. Judged by path over the
+    /// snapshot's file list less paths observed absent, never by content, so
+    /// it says the selectors are live, not that a file was scanned (that is
+    /// `must_scan`). A dead `exclude` glob stays legal: an exclusion may
+    /// reserve a path that is absent today. Off by default, which leaves dead
+    /// scope a `check --audit` finding only.
+    #[serde(default)]
+    pub require_live_paths: bool,
     /// Regexes and globs compiled by config parsing. This execution state is
     /// skipped by Serde and is not part of the user-facing rule schema.
     #[serde(skip)]

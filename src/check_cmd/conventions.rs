@@ -165,10 +165,10 @@ pub(super) fn run_textlint(tree: &LazyTree<'_>, rules: &[TextlintRule]) -> Resul
     let scan = crate::textlint::scan(tree, rules)?;
     let violations = scan.violations;
 
-    if violations.is_empty() {
+    if violations.is_empty() && scan.dead_scope.is_empty() {
         // Counts on the green line, matching `dependency rules`: "ok" alone
         // cannot distinguish a clean tree from a rule whose `paths` glob has
-        // stopped matching anything.
+        // stopped matching anything (unless it sets `require_live_paths`).
         phase_ok(
             Phase::Textlint.label(),
             Some(format!(
@@ -180,12 +180,18 @@ pub(super) fn run_textlint(tree: &LazyTree<'_>, rules: &[TextlintRule]) -> Resul
         return Ok(());
     }
 
-    report_findings(
-        "textlint",
-        "textlint failed",
-        &tree_order(violations, tree, |v| v.file.as_path()),
-        crate::textlint::format_one,
-    )
+    // Dead scope has no file to prioritize by, so it leads, in rule order.
+    let lines: Vec<String> = scan
+        .dead_scope
+        .iter()
+        .map(crate::textlint::format_dead_scope)
+        .chain(
+            tree_order(violations, tree, |v| v.file.as_path())
+                .iter()
+                .map(crate::textlint::format_one),
+        )
+        .collect();
+    report_findings("textlint", "textlint failed", &lines, Clone::clone)
 }
 
 /// The `[manifest]` phase: native structural `Cargo.toml` conventions. Inert
@@ -305,21 +311,25 @@ pub(super) fn run_bench(set: super::Benches<'_>) -> Result<(), DevError> {
 
 /// The selector-hygiene findings `brokkr check --audit` reports: configured
 /// paths that select nothing, and exclusions that excuse everything their
-/// selector picked. Resolved against the tracked file list alone; no content
-/// is scanned and no phase runs. An ordinary check reports none of this.
+/// selector picked. Resolved against `present`, the snapshot's file list less
+/// paths observed absent (`TreeSnapshot::present_files`: git keeps listing an
+/// unstaged deletion, which no scanner reads); no content is scanned and no
+/// phase runs. `textlint` is the rules' [`crate::textlint::Selection`]s over
+/// the same list. An ordinary check reports none of this, except that the
+/// textlint phase fails on the dead scope of a rule setting
+/// `require_live_paths`, through the same `Selection`.
 pub(super) fn selector_findings(
-    tree: &LazyTree<'_>,
+    present: &[PathBuf],
     gremlins_cfg: Option<&GremlinsConfig>,
     header_cfg: Option<&HeaderConfig>,
-    textlint_rules: &[TextlintRule],
+    textlint: &[crate::textlint::Selection],
     manifest_cfg: Option<&ManifestConfig>,
 ) -> Result<Vec<String>, DevError> {
-    let files = tree.get()?.files();
     let mut out = Vec::new();
-    gremlins_scope(files, gremlins_cfg, &mut out)?;
-    header_scope(files, header_cfg, &mut out)?;
-    textlint_scopes(files, textlint_rules, &mut out)?;
-    manifest_scope(files, manifest_cfg, &mut out)?;
+    gremlins_scope(present, gremlins_cfg, &mut out)?;
+    header_scope(present, header_cfg, &mut out)?;
+    textlint_scopes(textlint, &mut out);
+    manifest_scope(present, manifest_cfg, &mut out)?;
     Ok(out)
 }
 
@@ -385,43 +395,32 @@ fn header_scope(
     )
 }
 
-fn textlint_scopes(
-    files: &[PathBuf],
-    rules: &[TextlintRule],
-    out: &mut Vec<String>,
-) -> Result<(), DevError> {
-    for rule in rules {
-        let paths_field = format!("[[textlint]] {:?} paths", rule.name);
-        let selected = select_glob_paths(files, &rule.paths, &paths_field, out)?;
-        let exclude_field = format!("[[textlint]] {:?} exclude", rule.name);
-        let all_excluded = format!(
-            "[[textlint]] {:?}: exclude excuses every file paths selects",
-            rule.name
-        );
-        excluded_paths(&rule.exclude, &selected, &exclude_field, &all_excluded, out)?;
+/// Every rule's dead scope, worded as the other selectors' findings are. A
+/// finding the textlint phase also fails on, because the rule sets
+/// `require_live_paths`, says so; whether that phase runs is the plan's to
+/// say.
+fn textlint_scopes(selections: &[crate::textlint::Selection], out: &mut Vec<String>) {
+    const ENFORCED: &str = " (fails textlint when run: require_live_paths)";
+    for s in selections {
+        let enforced = if s.enforced { ENFORCED } else { "" };
+        let paths_field = format!("[[textlint]] {:?} paths", s.rule);
+        for glob in &s.dead_paths {
+            out.push(format!(
+                "{}{enforced}",
+                globs::unmatched_finding(&paths_field, glob)
+            ));
+        }
+        let exclude_field = format!("[[textlint]] {:?} exclude", s.rule);
+        for glob in &s.dead_excludes {
+            out.push(globs::unmatched_finding(&exclude_field, glob));
+        }
+        if s.excuses_everything() {
+            out.push(format!(
+                "[[textlint]] {:?}: exclude excuses every file paths selects{enforced}",
+                s.rule
+            ));
+        }
     }
-    Ok(())
-}
-
-/// Each `[[textlint]]` rule's name and the number of tracked files its `paths`
-/// select and its `exclude` leaves - the textlint scanner's own path test,
-/// before any content predicate.
-pub(super) fn textlint_path_counts(
-    tree: &LazyTree<'_>,
-    rules: &[TextlintRule],
-) -> Result<Vec<(String, usize)>, DevError> {
-    let files = tree.get()?.files();
-    let mut out = Vec::with_capacity(rules.len());
-    for rule in rules {
-        let paths = globs::build_set(&rule.paths, "[[textlint]] paths")?;
-        let exclude = globs::build_set(&rule.exclude, "[[textlint]] exclude")?;
-        let n = files
-            .iter()
-            .filter(|path| globs::matches(&paths, path) && !globs::matches(&exclude, path))
-            .count();
-        out.push((rule.name.clone(), n));
-    }
-    Ok(out)
 }
 
 fn manifest_scope(

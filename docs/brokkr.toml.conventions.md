@@ -76,7 +76,14 @@ selector picked, is neither a failure nor a warning in an ordinary check: an
 exclusion may reserve a path that is absent today, and user-wide rules often
 name paths most projects do not contain. `brokkr check --audit` reports them,
 for every selector below and `[gremlins].exclude`, without running anything
-else (see `brokkr man check audit`).
+else (see `brokkr man check audit`). A `[[textlint]]` rule can opt in to
+failing on its own dead scope with `require_live_paths`.
+
+Liveness is judged over the snapshot's file list less the paths observed
+absent from disk: git keeps listing a file deleted but not yet staged, and no
+scanner reads it, so it keeps no selector live. A dangling symlink is absent
+too; a path whose presence cannot be determined is an error. Presence is one
+observation, not a lock on the tree, and it says nothing about content.
 
 | Selector | Effect |
 | --- | --- |
@@ -198,6 +205,18 @@ predicates are rule-local:
   guard against a rule whose scope has silently stopped covering the files it
   was written for: a sentinel, not proof that every byte of the file was
   covered.
+- `require_live_paths = true` - the rule's dead scope fails the textlint
+  phase instead of being an audit finding only: every `paths` glob must select
+  a present file (each glob judged alone, so a live sibling cannot hide a dead
+  one), and `exclude`, all its globs together, must leave at least one of the
+  files `paths` selects. Each failure is a violation of the rule, printed as
+  `[name] require_live_paths: ...` with no file or line. A dead `exclude` glob
+  stays legal, since an exclusion may reserve a path that is absent today, and
+  the audit keeps reporting it. Judged by path, like the audit, so a rule
+  whose selected files are all binary, refused by `only_if_file_matches` or
+  emptied by `test_code` still passes; `must_scan` is the guard for files that
+  must actually be scanned. Off by default; a preset may set it and a rule may
+  set it back to `false`.
 
 No arbitrary multiline matching, except `join_wrapped_use` (bounded to `use`
 statements). See `src/textlint.rs` and `src/lex.rs`.

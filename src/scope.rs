@@ -116,6 +116,36 @@ impl TreeSnapshot {
         self.unstaged.as_ref()
     }
 
+    /// Whether `rel` exists on disk now, observed through its metadata
+    /// (following a symlink, so a dangling one is absent, as `read_file`
+    /// treats it). Git keeps listing an unstaged deletion, so the inventory
+    /// alone cannot say that a selector still selects something. Only
+    /// `NotFound` is absence; any other metadata failure is an error, since
+    /// an unknown presence is not evidence of a live selector. An observation,
+    /// not a lock: the file can still go before a scanner reads it. Uncached.
+    pub(crate) fn presence(&self, rel: &Path) -> Result<bool, crate::error::DevError> {
+        match std::fs::metadata(self.root.join(rel)) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(crate::error::DevError::Io(std::io::Error::new(
+                error.kind(),
+                format!("cannot tell whether {} exists: {error}", rel.display()),
+            ))),
+        }
+    }
+
+    /// The inventory less every path [`presence`](Self::presence) observes
+    /// absent: the universe `check --audit` judges selectors against.
+    pub(crate) fn present_files(&self) -> Result<Vec<PathBuf>, crate::error::DevError> {
+        let mut out = Vec::with_capacity(self.files.len());
+        for rel in &self.files {
+            if self.presence(rel)? {
+                out.push(rel.clone());
+            }
+        }
+        Ok(out)
+    }
+
     /// The cache key for `rel` (relative to the root, or absolute): the
     /// file's canonical identity, so `a/../b.rs`, a symlinked spelling and the
     /// git spelling of one file share one entry - every reader of this

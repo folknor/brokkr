@@ -263,6 +263,16 @@ placeholder where `index.html` is absent and sets the mtime to the pre-launch
 time), but the doc comment's premise that every reported unit wrote nothing
 is false for those units. Wanted: say so at the stamp, or skip host units.
 
+### A test_code refusal hides `require_live_paths` failures (2026-11-15)
+
+`textlint::scan` judges dead scope for `require_live_paths` rules before the
+test-code classification, but returns the classifier's refusal (an
+unresolved bare `#[test]` under `test_code = "only"`, a workspace outside
+the classifier's model) as an error, which drops the dead-scope list it had
+already built. The phase still fails, on the refusal alone; fixing that
+refusal then shows the dead scope on the next run. Wanted, if it bites:
+report both, by carrying the dead scope out beside the error.
+
 ### The rustdoc phase runs a test sweep's target preflight on lint lanes (2026-11-15)
 
 `docs/brokkr.toml.sweeps.md` says a `[[lint_sweep]]` has no separate

@@ -581,6 +581,39 @@ only_if_file_matches_above = false
     }
 
     #[test]
+    fn textlint_require_live_paths_rides_a_preset_and_a_rule_can_turn_it_off() {
+        let rules = textlint_of(
+            r#"
+[textlint_preset.strict]
+paths = ["src/**"]
+require_live_paths = true
+
+[[textlint]]
+name = "inherits"
+pattern = "p"
+message = "m"
+preset = "strict"
+
+[[textlint]]
+name = "declines"
+pattern = "p"
+message = "m"
+preset = "strict"
+require_live_paths = false
+
+[[textlint]]
+name = "plain"
+pattern = "p"
+paths = ["src/**"]
+message = "m"
+"#,
+        )
+        .unwrap();
+        let on: Vec<bool> = rules.iter().map(|r| r.require_live_paths).collect();
+        assert_eq!(on, vec![true, false, false]);
+    }
+
+    #[test]
     fn textlint_preset_lists_concatenate_preset_first() {
         let rules = textlint_of(
             r#"

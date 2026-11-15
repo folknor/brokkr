@@ -281,10 +281,13 @@ pub(crate) fn cmd_check_audit(plan_inputs: &PlanInputs<'_>, a: &AuditInputs<'_>)
     }
 
     let tree = LazyTree::new(root);
-    for line in textlint_count_lines(&tree, a.textlint_rules)? {
+    // One presence observation feeds every count and selector finding.
+    let present = tree.get()?.present_files()?;
+    let textlint = crate::textlint::selections(a.textlint_rules, &present)?;
+    for line in textlint_count_lines(&textlint) {
         output::run_msg(&line);
     }
-    findings.extend(conventions::selector_findings(&tree, a.gremlins_cfg, a.header_cfg, a.textlint_rules, a.manifest_cfg)?);
+    findings.extend(conventions::selector_findings(&present, a.gremlins_cfg, a.header_cfg, &textlint, a.manifest_cfg)?);
     findings.extend(unreferenced_check_entries(plan_inputs.check_entries, plan_inputs.test_cfg));
     findings.extend(workspace_selector_findings(root, a.dependency_rules, plan_inputs.quarantine)?);
     findings.extend(absent_allow_exact_paths(root, a.lints));
@@ -428,20 +431,19 @@ fn phase_disposition(phase: Phase, plan: &CheckPlan<'_>, i: &PlanInputs<'_>, a: 
     }
 }
 
-/// One line per `[[textlint]]` rule with the tracked files its `paths` and
+/// One line per `[[textlint]]` rule with the present files its `paths` and
 /// `exclude` select. A path count, not a scan count: `test_code`,
 /// `only_if_file_matches` and binary content can still keep a selected file
 /// from being matched, and judging those reads the files.
-fn textlint_count_lines(tree: &LazyTree<'_>, rules: &[TextlintRule]) -> Result<Vec<String>, DevError> {
-    if rules.is_empty() {
-        return Ok(Vec::new());
+fn textlint_count_lines(selections: &[crate::textlint::Selection]) -> Vec<String> {
+    if selections.is_empty() {
+        return Vec::new();
     }
-    let counts = conventions::textlint_path_counts(tree, rules)?;
-    let mut lines = vec![format!("textlint: {} (files selected by path)", output::count(rules.len(), "rule"))];
-    for (name, n) in counts {
-        lines.push(format!("  {name}: {}", output::count(n, "file")));
+    let mut lines = vec![format!("textlint: {} (files selected by path)", output::count(selections.len(), "rule"))];
+    for s in selections {
+        lines.push(format!("  {}: {}", s.rule, output::count(s.remaining, "file")));
     }
-    Ok(lines)
+    lines
 }
 
 /// `[[check]]` entries no `[test.profiles]` entry references, through `lanes`

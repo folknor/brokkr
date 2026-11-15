@@ -71,6 +71,11 @@ pub(crate) struct Compiled {
     pattern: Regex,
     paths: globset::GlobSet,
     exclude: globset::GlobSet,
+    /// The globs `paths` and `exclude` were built from, in insertion order,
+    /// so a `GlobSet::matches` index names its glob.
+    path_globs: Vec<String>,
+    exclude_globs: Vec<String>,
+    require_live_paths: bool,
     message: String,
     allow_marker: Option<String>,
     allow_marker_above: usize,
@@ -213,6 +218,9 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
             pattern,
             paths,
             exclude,
+            path_globs: rule.paths.clone(),
+            exclude_globs: rule.exclude.clone(),
+            require_live_paths: rule.require_live_paths,
             message: rule.message.clone(),
             allow_marker: rule.allow_marker.clone(),
             allow_marker_above: rule.allow_marker_above,
@@ -296,13 +304,155 @@ fn join_incompatible_predicate(rule: &TextlintRule) -> Option<&'static str> {
 ///
 /// A green phase reports the second half so "ok" is a statement about a known
 /// corpus rather than an unfalsifiable one - a rule whose `paths` glob stopped
-/// matching anything still passes, and `0 files` is the only thing that
-/// distinguishes that from a rule doing its job.
+/// matching anything still passes unless it sets `require_live_paths`, and
+/// `0 files` is the only thing that distinguishes that from a rule doing its
+/// job.
 pub struct TextlintScan {
     pub violations: Vec<TextlintViolation>,
+    /// Dead scope of the rules that set `require_live_paths`: a violation of
+    /// the rule with no file or line to point at.
+    pub dead_scope: Vec<DeadScope>,
     /// Files at least one rule applied to - not the tracked-file total, which
     /// would credit the phase with files no rule looks at.
     pub files: usize,
+}
+
+/// One `require_live_paths` failure: a rule's selectors, not a line, are
+/// what is wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadScope {
+    pub rule: String,
+    pub message: String,
+}
+
+/// `[rule] message`, the rule-level counterpart of [`format_one`].
+pub fn format_dead_scope(d: &DeadScope) -> String {
+    format!("[{}] {}", d.rule, d.message)
+}
+
+/// How one rule's `paths` and `exclude` select over a file list, by path
+/// alone. The one definition of dead scope: `check --audit` reports it for
+/// every rule and the textlint phase fails on it for a rule that sets
+/// `require_live_paths`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Selection {
+    pub(crate) rule: String,
+    /// Whether the rule sets `require_live_paths`.
+    pub(crate) enforced: bool,
+    /// `paths` globs that select no present file, each judged alone so a
+    /// live sibling cannot hide a dead one.
+    pub(crate) dead_paths: Vec<String>,
+    /// `exclude` globs that match none of the files `paths` selected.
+    pub(crate) dead_excludes: Vec<String>,
+    /// Files `paths` selects.
+    pub(crate) selected: usize,
+    /// Of those, the files `exclude` leaves: the scanner's own `applies`.
+    pub(crate) remaining: usize,
+}
+
+impl Selection {
+    /// `exclude`, all its globs together, excuses every file `paths` picked.
+    pub(crate) fn excuses_everything(&self) -> bool {
+        self.selected > 0 && self.remaining == 0
+    }
+
+    /// What `require_live_paths` fails on. A dead `exclude` glob is not
+    /// among it: an exclusion may reserve a path that is absent today.
+    fn dead_scope(&self) -> Vec<DeadScope> {
+        let mut out: Vec<DeadScope> = self
+            .dead_paths
+            .iter()
+            .map(|glob| DeadScope {
+                rule: self.rule.clone(),
+                message: format!("require_live_paths: paths glob {glob:?} selects no present file"),
+            })
+            .collect();
+        if self.excuses_everything() {
+            out.push(DeadScope {
+                rule: self.rule.clone(),
+                message: format!(
+                    "require_live_paths: exclude excuses all {} paths selects",
+                    crate::output::count(self.selected, "file")
+                ),
+            });
+        }
+        out
+    }
+}
+
+/// Judge one compiled rule's selectors over `files`, asking `present` only
+/// of the paths some `paths` glob matches. Liveness is credited before
+/// exclusion, so an excluded file still keeps its `paths` glob live.
+fn select(
+    c: &Compiled,
+    files: &[PathBuf],
+    present: &dyn Fn(&Path) -> Result<bool, DevError>,
+) -> Result<Selection, DevError> {
+    let mut path_live = vec![false; c.path_globs.len()];
+    let mut exclude_live = vec![false; c.exclude_globs.len()];
+    let mut hits = Vec::new();
+    let (mut selected, mut remaining) = (0usize, 0usize);
+    for rel in files {
+        hits.clear();
+        c.paths.matches_into(rel, &mut hits);
+        if hits.is_empty() || !present(rel)? {
+            continue;
+        }
+        selected += 1;
+        for &i in &hits {
+            path_live[i] = true;
+        }
+        hits.clear();
+        c.exclude.matches_into(rel, &mut hits);
+        for &i in &hits {
+            exclude_live[i] = true;
+        }
+        if applies(c, rel) {
+            remaining += 1;
+        }
+    }
+    let dead = |globs: &[String], live: &[bool]| -> Vec<String> {
+        globs
+            .iter()
+            .zip(live)
+            .filter(|(_, live)| !**live)
+            .map(|(glob, _)| glob.clone())
+            .collect()
+    };
+    Ok(Selection {
+        rule: c.name.clone(),
+        enforced: c.require_live_paths,
+        dead_paths: dead(&c.path_globs, &path_live),
+        dead_excludes: dead(&c.exclude_globs, &exclude_live),
+        selected,
+        remaining,
+    })
+}
+
+/// Every rule's [`Selection`] over `present`, a file list already reduced to
+/// present files (`TreeSnapshot::present_files`): what `check --audit` counts
+/// and reports.
+pub(crate) fn selections(
+    rules: &[TextlintRule],
+    present: &[PathBuf],
+) -> Result<Vec<Selection>, DevError> {
+    compiled_of(rules)?
+        .iter()
+        .map(|c| select(c, present, &|_| Ok(true)))
+        .collect()
+}
+
+/// The rules' compiled forms: the cache config parsing filled, or compiled
+/// on the spot for rules constructed directly by callers and tests.
+fn compiled_of(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
+    if rules.iter().all(|rule| rule.compiled.is_some()) {
+        Ok(rules
+            .iter()
+            .filter_map(|rule| rule.compiled.clone())
+            .collect())
+    } else {
+        compile(rules)
+    }
 }
 
 /// Scan one tree snapshot against every rule, one pass per file.
@@ -313,29 +463,27 @@ pub fn scan(
     if rules.is_empty() {
         return Ok(TextlintScan {
             violations: Vec::new(),
+            dead_scope: Vec::new(),
             files: 0,
         });
     }
     let files = tree.files();
-    let compiled = if rules.iter().all(|rule| rule.compiled.is_some()) {
-        rules
-            .iter()
-            .filter_map(|rule| rule.compiled.clone())
-            .collect()
-    } else {
-        // Keep the scanner usable with rules constructed directly by callers
-        // and tests; parsed config uses the cache compiled by compile_rules.
-        compile(rules)?
-    };
-    // Dead scope (a glob matching nothing, an exclude excusing everything) is
-    // a `brokkr check --audit` finding, never a refusal nor a warning here:
-    // user-wide rules reach every tree brokkr checks, and most trees lack most
-    // of the paths a personal rule names.
+    let compiled = compiled_of(rules)?;
     if let Some(rule) = rules.iter().find(|rule| rule.paths.is_empty()) {
         return Err(DevError::Config(format!(
             "[[textlint]] {:?} has no `paths` - list the files this rule scans",
             rule.name
         )));
+    }
+    // Dead scope (a glob matching nothing, an exclude excusing everything) is
+    // a `brokkr check --audit` finding, never a refusal nor a warning here,
+    // unless the rule opts in with `require_live_paths`: user-wide rules reach
+    // every tree brokkr checks, and most trees lack most of the paths a
+    // personal rule names.
+    let present = |rel: &Path| tree.presence(rel);
+    let mut dead_scope = Vec::new();
+    for c in compiled.iter().filter(|c| c.require_live_paths) {
+        dead_scope.extend(select(c, files, &present)?.dead_scope());
     }
     let classification = classify_tests(tree, &compiled, files)?;
     if let Some(c) = &classification {
@@ -378,6 +526,7 @@ pub fn scan(
     out.extend(must_scan_violations(&compiled, &admitted, files));
     Ok(TextlintScan {
         violations: out,
+        dead_scope,
         files: scanned,
     })
 }
@@ -1232,6 +1381,97 @@ mod tests {
         );
     }
 
+    fn selection_of(r: TextlintRule, files: &[&str], absent: &[&str]) -> Selection {
+        let compiled = compile(&[r]).unwrap();
+        let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+        let present = |rel: &Path| Ok(!absent.iter().any(|a| rel == Path::new(a)));
+        select(&compiled[0], &files, &present).unwrap()
+    }
+
+    #[test]
+    fn selection_judges_each_paths_glob_and_the_excludes_together() {
+        let mut r = rule("never");
+        r.paths = vec!["src/**".into(), "benches/**".into(), "src/lib.rs".into()];
+        r.exclude = vec!["src/a.rs".into(), "gen/**".into()];
+        let s = selection_of(r, &["src/a.rs", "src/lib.rs", "docs/x.md"], &[]);
+        // Overlapping globs each count as live; a live sibling hides no dead one.
+        assert_eq!(s.dead_paths, vec!["benches/**".to_owned()]);
+        assert_eq!(s.dead_excludes, vec!["gen/**".to_owned()]);
+        assert_eq!((s.selected, s.remaining), (2, 1));
+        assert!(!s.excuses_everything());
+
+        // Two excludes, neither excusing everything alone, excuse it together.
+        let mut r = rule("never");
+        r.paths = vec!["src/**".into()];
+        r.exclude = vec!["src/a.rs".into(), "src/b.rs".into()];
+        let s = selection_of(r, &["src/a.rs", "src/b.rs"], &[]);
+        assert!(s.dead_paths.is_empty());
+        assert!(s.excuses_everything());
+    }
+
+    #[test]
+    fn an_absent_listed_path_keeps_no_glob_live() {
+        // Git keeps listing an unstaged deletion; it selects nothing.
+        let mut r = rule("never");
+        r.paths = vec!["benches/**".into()];
+        let s = selection_of(r, &["benches/a.rs"], &["benches/a.rs"]);
+        assert_eq!(s.dead_paths, vec!["benches/**".to_owned()]);
+        assert_eq!(s.selected, 0);
+        // An empty selection is dead paths, not an exclude excusing all.
+        assert!(!s.excuses_everything());
+    }
+
+    #[test]
+    fn require_live_paths_fails_dead_paths_and_total_exclusion_but_not_a_dead_exclude() {
+        let mut r = rule("never");
+        r.require_live_paths = true;
+        r.exclude = vec!["reserved/**".into()];
+        let live = selection_of(r.clone(), &["src/a.rs"], &[]);
+        assert_eq!(live.dead_excludes, vec!["reserved/**".to_owned()]);
+        assert!(live.dead_scope().is_empty());
+
+        r.paths = vec!["src/**".into(), "benches/**".into()];
+        r.exclude = vec!["src/**".into()];
+        let messages: Vec<String> = selection_of(r, &["src/a.rs"], &[])
+            .dead_scope()
+            .into_iter()
+            .map(|d| d.message)
+            .collect();
+        assert_eq!(
+            messages,
+            vec![
+                "require_live_paths: paths glob \"benches/**\" selects no present file".to_owned(),
+                "require_live_paths: exclude excuses all 1 file paths selects".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_reports_dead_scope_only_for_rules_that_opt_in() {
+        let root = crate::scope::test_git_tree("textlint", "dead_scope");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn f() {}\n").unwrap();
+        let tree = crate::scope::TreeSnapshot::load(&root).unwrap();
+        let mut quiet = rule("never");
+        quiet.name = "quiet".into();
+        quiet.paths = vec!["benches/**".into()];
+        let mut strict = quiet.clone();
+        strict.name = "strict".into();
+        strict.require_live_paths = true;
+        let result = scan(&tree, &[quiet, strict]).unwrap();
+        assert!(result.violations.is_empty());
+        assert_eq!(
+            result.dead_scope,
+            vec![DeadScope {
+                rule: "strict".into(),
+                message: "require_live_paths: paths glob \"benches/**\" selects no present file"
+                    .into(),
+            }]
+        );
+        assert!(!tree.presence(Path::new("benches/gone.rs")).unwrap());
+        assert!(tree.presence(Path::new("src/lib.rs")).unwrap());
+    }
+
     /// Compile one rule and scan a source string; return (line, rule) hits.
     fn run(rule: TextlintRule, src: &str) -> Vec<(usize, String)> {
         let compiled = compile(&[rule]).unwrap();
@@ -1270,6 +1510,7 @@ mod tests {
             require_below: None,
             test_code: TestCode::Include,
             must_scan: Vec::new(),
+            require_live_paths: false,
             compiled: None,
         }
     }

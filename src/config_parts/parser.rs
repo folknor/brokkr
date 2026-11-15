@@ -594,7 +594,7 @@ const TEXTLINT_LIST_FIELDS: [&str; 3] = ["paths", "exclude", "except"];
 /// Fields a `[textlint_preset.<name>]` block may carry: everything a
 /// `[[textlint]]` rule accepts except the three that identify one rule
 /// (`name`, `pattern`, `message`), which are never shareable.
-const TEXTLINT_PRESET_FIELDS: [&str; 19] = [
+const TEXTLINT_PRESET_FIELDS: [&str; 20] = [
     "paths",
     "exclude",
     "except",
@@ -614,6 +614,7 @@ const TEXTLINT_PRESET_FIELDS: [&str; 19] = [
     "skip_test",
     "test_code",
     "must_scan",
+    "require_live_paths",
 ];
 
 /// `skip_test` is the legacy spelling of `test_code`: the two keys are one

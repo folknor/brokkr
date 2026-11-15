@@ -101,7 +101,10 @@ pub fn build_set(patterns: &[String], field: &str) -> Result<GlobSet, DevError> 
 /// that is absent today and may come back, and a user-wide rule (which applies
 /// to every tree brokkr checks) legitimately names paths most trees do not
 /// have. Failing the check, or warning on every run, would punish a correct
-/// config; the audit is where a real typo gets found.
+/// config; the audit is where a real typo gets found. The one opt-in
+/// exception is a `[[textlint]]` rule's `require_live_paths`, judged by
+/// `textlint::Selection`, which words its audit findings through
+/// [`unmatched_finding`] too.
 pub fn unmatched(
     patterns: &[String],
     paths: &[PathBuf],
@@ -111,12 +114,15 @@ pub fn unmatched(
     for pattern in patterns {
         let one = build_set(std::slice::from_ref(pattern), field)?;
         if !paths.iter().any(|path| matches(&one, path)) {
-            out.push(format!(
-                "{field}: glob {pattern:?} matches no in-scope tracked path"
-            ));
+            out.push(unmatched_finding(field, pattern));
         }
     }
     Ok(out)
+}
+
+/// The audit's wording of one dead glob in `field`.
+pub fn unmatched_finding(field: &str, pattern: &str) -> String {
+    format!("{field}: glob {pattern:?} matches no in-scope present path")
 }
 
 /// Whether `rel` (a project-root-relative path) matches any glob in the set.
