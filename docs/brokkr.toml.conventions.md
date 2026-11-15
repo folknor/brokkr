@@ -306,8 +306,15 @@ generated source are outside it, for module edges and for skipped spans alike:
 
 Literal `include!`s are followed, including ones inside macro input.
 
-The classifier refuses the whole rule set, naming each site, rather than
-guess. It refuses when a production context holds:
+The classifier refuses rather than guess, naming each site, and the textlint
+phase fails with that refusal. A refusal withholds every `test_code` rule
+from every `.rs` file, since none of them can be judged without the
+classification; every other pair is still scanned, so the phase reports the
+rest of its findings (violations, `require_live_paths` dead scope, and
+`must_scan` paths that are untracked or unselected) ahead of the refusal. The
+same holds when the classification cannot run at all (`cargo metadata`
+failing, say): that error, not a generic failure, is what the phase fails
+with. It refuses when a production context holds:
 
 - any other computed `include!`;
 - a node `syn` keeps verbatim;
@@ -344,8 +351,11 @@ is scanned as production by `"skip"`, which errs toward scanning. For `"only"`
 the same doubt would drop it silently, so the classifier also classifies as if
 every bare `#[test]` were the builtin, and an `"only"` rule that selects a file
 whose selection differs between the two readings refuses, naming the files and
-the shadowing sites. A file an independent proof settles either way, such as
-production code also reached through a bare test function, is not refused.
+the shadowing sites. Only those (rule, file) pairs are withheld: the
+classification stands for every other rule and file, which are scanned and
+reported ahead of the refusal. A file an independent proof settles either way,
+such as production code also reached through a bare test function, is not
+refused.
 
 ## `[textlint_preset]` blocks
 

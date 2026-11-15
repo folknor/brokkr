@@ -607,7 +607,12 @@ a rule that sets `require_live_paths` fails on the dead glob, and a rule that
 names its sentinel files in `must_scan` fails when one of them goes unscanned.
 A `require_live_paths` failure has no file or line: it prints as
 `[name] require_live_paths: ...` ahead of the file violations, and counts
-among them.
+among them. When the test-code classifier refuses or cannot run, the phase
+fails with its error, after printing every finding it could make without it:
+only the pairs the classifier had to decide are withheld (see `brokkr man
+conventions textlint`). An interruption, or a file the scan itself fails to
+read, still ends the phase at once, dropping what was found; a file the
+classifier fails to read is one of its refusals, so it follows the rule above.
 
 ## `manifest` phase
 

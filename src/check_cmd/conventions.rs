@@ -164,8 +164,12 @@ pub(super) fn run_textlint(tree: &LazyTree<'_>, rules: &[TextlintRule]) -> Resul
     let tree = tree.get()?;
     let scan = crate::textlint::scan(tree, rules)?;
     let violations = scan.violations;
+    let classifier_error = scan.classifier_error;
 
     if violations.is_empty() && scan.dead_scope.is_empty() {
+        if let Some(error) = classifier_error {
+            return Err(error);
+        }
         // Counts on the green line, matching `dependency rules`: "ok" alone
         // cannot distinguish a clean tree from a rule whose `paths` glob has
         // stopped matching anything (unless it sets `require_live_paths`).
@@ -191,7 +195,13 @@ pub(super) fn run_textlint(tree: &LazyTree<'_>, rules: &[TextlintRule]) -> Resul
                 .map(crate::textlint::format_one),
         )
         .collect();
-    report_findings("textlint", "textlint failed", &lines, Clone::clone)
+    let reported = report_findings("textlint", "textlint failed", &lines, Clone::clone);
+    // The findings are printed; the classifier's error, not the synthetic
+    // `Reported`, is the failure, so its kind and its own message survive.
+    match classifier_error {
+        Some(error) => Err(error),
+        None => reported,
+    }
 }
 
 /// The `[manifest]` phase: native structural `Cargo.toml` conventions. Inert

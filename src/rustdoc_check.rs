@@ -78,6 +78,21 @@ fn help_lists_check(help: &str) -> bool {
 /// for real docs: a plain `cargo doc` carries different rustdocflags, so its
 /// fingerprint differs and it renders over it.
 ///
+/// Not every reported unit ran under `--check`, and that is accepted, not a
+/// gap. Under `--target` cargo hands a host unit (a proc-macro crate's doc
+/// unit) no rustdocflags from any source - they have no host counterpart,
+/// and `target-applies-to-host` reaches host units only when no target is
+/// requested - so it renders, as it would under a plain `cargo doc --target`;
+/// the same holds for any unit when the injection was inert. The
+/// fingerprint argument above does not cover such a unit, since a plain
+/// `cargo doc` can share its flags; what covers it is that it rendered. Its
+/// real `index.html` lives where cargo put it, so either this path is that
+/// page, present and so never replaced, with only its mtime rewound (at worst
+/// a redundant re-documentation next run), or this path misses it (cargo
+/// documents a host unit into the host doc dir, not `<triple>/doc`) and the
+/// placeholder is a stray file that unit never uses as its output. Skipping
+/// such units would change nothing cargo judges, so they are stamped too.
+///
 /// Cargo's artifact message for a doc unit carries `"filenames": []`, so the
 /// path is rebuilt the way cargo names it: `<doc_dir>/<crate>/index.html`,
 /// the crate being the target name with `-` as `_`. The caller passes

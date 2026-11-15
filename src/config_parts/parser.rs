@@ -2286,7 +2286,9 @@ fn validate_check_against_test(
 /// output stream. Preparation refuses such a lane too, but only after clippy
 /// and every build - and then nothing runs. Decided here from the config
 /// alone, naming the profile and entry to change. Parallel-binaries, nextest
-/// and doc-only entries carry their own concurrency and are not affected.
+/// and doc-only entries carry their own concurrency and are not affected
+/// (a count over a parallel entry is refused for every profile, in
+/// `LaneExec::resolve`, before this runs).
 fn validate_complete_test_threads(
     t: &TestConfig,
     resolved_profiles: &BTreeMap<String, Vec<crate::profile::SweepDecl>>,
@@ -2315,15 +2317,18 @@ fn validate_complete_test_threads(
                 "[test.profiles.{run}] sets `test_threads = {}` and runs the libtest \
                  [[check]] entr{} {}, which [test.profiles.{claim}] certifies \"complete\". \
                  Cargo-mediated parallelism shares one output stream across tests and \
-                 harnesses, so those executions cannot be attributed. Set `parallel = {{ \
-                 budget = N }}` on {}, or move {} to a profile without `test_threads`. \
-                 Either way the claim still runs the entry's doctests, in the doctest \
-                 carrier it derives for a tested build no `doc_only` entry carries.",
+                 harnesses, so those executions cannot be attributed. Either drop \
+                 `test_threads` from [test.profiles.{run}] or move {} to a profile without \
+                 it; then `parallel = {{ budget = N }}` on {} is the concurrency the claim \
+                 can attribute (a profile carrying `test_threads` may not reference a \
+                 parallel entry). Either way the claim still runs the entry's doctests, in \
+                 the doctest carrier it derives for a tested build no `doc_only` entry \
+                 carries.",
                 configured_threads.unwrap_or_default(),
                 if serial.len() == 1 { "y" } else { "ies" },
                 serial.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(", "),
-                if serial.len() == 1 { "that entry" } else { "each entry" },
                 if serial.len() == 1 { "it" } else { "them" },
+                if serial.len() == 1 { "the entry" } else { "each entry" },
             )));
         }
     }
@@ -3070,10 +3075,11 @@ sweeps = ["default"]
         validate_check_against_test(&check, Some(&cfg)).unwrap();
     }
 
-    /// The broadarrow shape: a lane profile with `test_threads = 8` over a
-    /// parallel entry and a plain libtest entry, composed into the gate. The
-    /// libtest entry cannot be attributed, so the config is refused at load,
-    /// naming the lane and the entry - not minutes later in preparation.
+    /// A lane profile with `test_threads = 8` over plain libtest entries,
+    /// composed into the gate beside a parallel lane that carries no count.
+    /// The libtest entries cannot be attributed, so the config is refused at
+    /// load, naming the lane and the entries - not minutes later in
+    /// preparation - and the parallel entry is not among them.
     #[test]
     fn complete_claim_refuses_cargo_threaded_libtest_entry() {
         let cfg: TestConfig = toml::from_str(
@@ -3081,43 +3087,67 @@ sweeps = ["default"]
 doctests = true
 [profiles.gate]
 certifies = "complete"
-lanes = ["threaded", "serial"]
+lanes = ["fanned", "threaded", "serial"]
+[profiles.fanned]
+sweeps = ["default"]
 [profiles.threaded]
-sweeps = ["default", "telemetry"]
+sweeps = ["telemetry", "replay"]
 test_threads = 8
 [profiles.serial]
 sweeps = ["doc-carrier"]
 "#,
         )
         .unwrap();
-        let mut check = check_entries(&["default", "telemetry", "doc-carrier"]);
+        let mut check = check_entries(&["default", "telemetry", "replay", "doc-carrier"]);
         check[0].parallel = Some(ParallelBinaries { budget: Some(8) });
         let err = validate_check_against_test(&check, Some(&cfg))
             .unwrap_err()
             .to_string();
         assert!(err.contains("[test.profiles.threaded]"), "got: {err}");
-        assert!(err.contains("'telemetry'"), "got: {err}");
+        assert!(err.contains("'replay', 'telemetry'"), "got: {err}");
         assert!(!err.contains("'default'"), "got: {err}");
+        assert!(err.contains("drop `test_threads`"), "got: {err}");
 
-        // Every entry parallel: nothing to attribute through cargo.
-        check[1].parallel = Some(ParallelBinaries { budget: None });
+        // Without the count, the libtest entries run serial: attributable.
+        let cfg: TestConfig = toml::from_str(
+            r#"
+doctests = true
+[profiles.gate]
+certifies = "complete"
+lanes = ["fanned", "threaded", "serial"]
+[profiles.fanned]
+sweeps = ["default"]
+[profiles.threaded]
+sweeps = ["telemetry", "replay"]
+[profiles.serial]
+sweeps = ["doc-carrier"]
+"#,
+        )
+        .unwrap();
         validate_check_against_test(&check, Some(&cfg)).unwrap();
     }
 
     /// Load-time, not only at invocation, and with no claim in play: a
-    /// profile whose `test_threads = 1` meets a `parallel` entry - set on it
-    /// or inherited through `extends` - fails the config load.
+    /// profile whose `test_threads` meets a `parallel` entry - set on it or
+    /// inherited through `extends`, any value - fails the config load.
     #[test]
-    fn serial_test_threads_over_parallel_entry_fails_load() {
-        for (fixture, named) in [
+    fn test_threads_over_parallel_entry_fails_load() {
+        for (fixture, named, remedy) in [
             (
                 "[profiles.serial]\nsweeps = [\"all\"]\ntest_threads = 1\n",
                 "[test.profiles.serial]:",
+                "non-parallel twin of 'all'",
             ),
             (
                 "[profiles.base]\ntest_threads = 1\n\
                  [profiles.child]\nextends = \"base\"\nsweeps = [\"all\"]\n",
                 "[test.profiles.child]:",
+                "non-parallel twin of 'all'",
+            ),
+            (
+                "[profiles.fast]\nsweeps = [\"all\"]\ntest_threads = 16\n",
+                "[test.profiles.fast]:",
+                "Drop the key",
             ),
         ] {
             let cfg: TestConfig = toml::from_str(fixture).unwrap();
@@ -3128,7 +3158,7 @@ sweeps = ["doc-carrier"]
                 .unwrap_err()
                 .to_string();
             assert!(err.contains(named), "got: {err}");
-            assert!(err.contains("non-parallel twin of 'all'"), "got: {err}");
+            assert!(err.contains(remedy), "got: {err}");
         }
     }
 

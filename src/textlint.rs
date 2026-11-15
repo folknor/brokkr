@@ -20,7 +20,7 @@
 //! Patterns are compiled with the linear-time `regex` crate (no backtracking),
 //! so an author-supplied pattern cannot hang the phase.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
@@ -315,6 +315,32 @@ pub struct TextlintScan {
     /// Files at least one rule applied to - not the tracked-file total, which
     /// would credit the phase with files no rule looks at.
     pub files: usize,
+    /// The test-code classifier's failure or refusal, its kind kept. The
+    /// (rule, file) pairs it left undecidable were withheld - unknown, never
+    /// clean - and every other pair was judged, so the findings above stand
+    /// beside it. A scan carrying one must fail the phase with it.
+    pub classifier_error: Option<DevError>,
+}
+
+/// The (rule, file) pairs a classifier failure kept from being judged.
+enum Withheld {
+    Nothing,
+    /// The classification failed outright: every `test_code` rule's Rust
+    /// files. Other files never reach the classifier, so they are judged.
+    TestCode,
+    /// The classification stands, but these `only` rules (by index) cannot
+    /// honestly select test code in these files.
+    Pairs(HashMap<usize, HashSet<PathBuf>>),
+}
+
+impl Withheld {
+    fn covers(&self, index: usize, c: &Compiled, rel: &Path) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::TestCode => c.test_code != TestCode::Include && is_rust(rel),
+            Self::Pairs(pairs) => pairs.get(&index).is_some_and(|files| files.contains(rel)),
+        }
+    }
 }
 
 /// One `require_live_paths` failure: a rule's selectors, not a line, are
@@ -455,16 +481,39 @@ fn compiled_of(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
     }
 }
 
+/// The test-code classification step, a parameter so tests can make it fail.
+type Classify = dyn Fn(
+    &crate::scope::TreeSnapshot,
+    &[Compiled],
+    &[PathBuf],
+) -> Result<Option<crate::test_code::Classification>, DevError>;
+
 /// Scan one tree snapshot against every rule, one pass per file.
+///
+/// A classifier failure or refusal does not end the scan: it withholds the
+/// pairs it left undecidable and travels out in
+/// [`TextlintScan::classifier_error`], so every finding the scan could make
+/// without it is reported beside it. An interruption, a config error and a
+/// file the scan itself cannot read stay hard errors and drop what was found
+/// so far; a read failure inside the classifier is the classifier's.
 pub fn scan(
     tree: &crate::scope::TreeSnapshot,
     rules: &[TextlintRule],
+) -> Result<TextlintScan, DevError> {
+    scan_with(tree, rules, &classify_tests)
+}
+
+fn scan_with(
+    tree: &crate::scope::TreeSnapshot,
+    rules: &[TextlintRule],
+    classify: &Classify,
 ) -> Result<TextlintScan, DevError> {
     if rules.is_empty() {
         return Ok(TextlintScan {
             violations: Vec::new(),
             dead_scope: Vec::new(),
             files: 0,
+            classifier_error: None,
         });
     }
     let files = tree.files();
@@ -485,13 +534,20 @@ pub fn scan(
     for c in compiled.iter().filter(|c| c.require_live_paths) {
         dead_scope.extend(select(c, files, &present)?.dead_scope());
     }
-    let classification = classify_tests(tree, &compiled, files)?;
-    if let Some(c) = &classification {
-        for note in &c.notes {
-            crate::output::warn(&format!("[[textlint]] test_code: {note}"));
+    let (classification, withheld, classifier_error) = match classify(tree, &compiled, files) {
+        // A stop request is not a verdict to report beside findings: the
+        // phase must see it now, not after scanning the rest of the tree.
+        Err(DevError::Interrupted) => return Err(DevError::Interrupted),
+        Err(error) => (None, Withheld::TestCode, Some(error)),
+        Ok(None) => (None, Withheld::Nothing, None),
+        Ok(Some(c)) => {
+            for note in &c.notes {
+                crate::output::warn(&format!("[[textlint]] test_code: {note}"));
+            }
+            let (pairs, refusal) = refuse_unresolved(&c, &compiled, files);
+            (Some(c), Withheld::Pairs(pairs), refusal)
         }
-        refuse_unresolved(c, &compiled, files)?;
-    }
+    };
     let mut out = Vec::new();
     let mut scanned = 0usize;
     let mut admitted: Vec<HashSet<PathBuf>> = vec![HashSet::new(); compiled.len()];
@@ -499,7 +555,7 @@ pub fn scan(
         let (indices, applicable): (Vec<usize>, Vec<&Compiled>) = compiled
             .iter()
             .enumerate()
-            .filter(|(_, c)| applies(c, rel))
+            .filter(|(i, c)| applies(c, rel) && !withheld.covers(*i, c, rel))
             .unzip();
         if applicable.is_empty() {
             continue;
@@ -523,11 +579,12 @@ pub fn scan(
             admitted[indices[k]].insert(rel.clone());
         }
     }
-    out.extend(must_scan_violations(&compiled, &admitted, files));
+    out.extend(must_scan_violations(&compiled, &admitted, files, &withheld));
     Ok(TextlintScan {
         violations: out,
         dead_scope,
         files: scanned,
+        classifier_error,
     })
 }
 
@@ -583,38 +640,51 @@ fn classify_tests(
 /// Refuse when a `test_code = "only"` rule applies to a file whose test
 /// selection depends on what a shadowable bare `#[test]` names: scanning it
 /// either way would be a guess, and treating the function as production
-/// would silently drop it from a rule written to police it.
+/// would silently drop it from a rule written to police it. Returns those
+/// (rule index, file) pairs, to be withheld, and the one refusal naming them
+/// all; every other pair stays judgeable under the classification.
 fn refuse_unresolved(
     c: &crate::test_code::Classification,
     compiled: &[Compiled],
     files: &[PathBuf],
-) -> Result<(), DevError> {
+) -> (HashMap<usize, HashSet<PathBuf>>, Option<DevError>) {
     let mut sites = Vec::new();
-    for rule in compiled.iter().filter(|r| r.test_code == TestCode::Only) {
+    let mut pairs: HashMap<usize, HashSet<PathBuf>> = HashMap::new();
+    for (index, rule) in compiled
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.test_code == TestCode::Only)
+    {
         for rel in files {
             if is_rust(rel) && applies(rule, rel) && c.is_unresolved(rel) {
                 sites.push(format!("{} (rule {:?})", rel.display(), rule.name));
+                pairs.entry(index).or_default().insert(rel.clone());
             }
         }
     }
     if sites.is_empty() {
-        return Ok(());
+        return (pairs, None);
     }
-    Err(DevError::Refused(format!(
+    let refusal = DevError::Refused(format!(
         "[[textlint]] test_code = \"only\" cannot tell whether bare #[test] functions are test code in:\n  {}\nbecause something could shadow the builtin attribute:\n  {}",
         sites.join("\n  "),
         c.shadows.join("\n  ")
-    )))
+    ));
+    (pairs, Some(refusal))
 }
 
-/// One violation per `must_scan` path its rule did not actually scan.
+/// One violation per `must_scan` path its rule did not actually scan. A path
+/// the classifier's failure withheld from its rule is unknown, not unscanned,
+/// so it is judged only on what holds without the classifier: tracked, and
+/// selected.
 fn must_scan_violations(
     compiled: &[Compiled],
     admitted: &[HashSet<PathBuf>],
     files: &[PathBuf],
+    withheld: &Withheld,
 ) -> Vec<TextlintViolation> {
     let mut out = Vec::new();
-    for (rule, seen) in compiled.iter().zip(admitted) {
+    for (index, (rule, seen)) in compiled.iter().zip(admitted).enumerate() {
         for path in &rule.must_scan {
             if seen.contains(path) {
                 continue;
@@ -623,6 +693,8 @@ fn must_scan_violations(
                 "is not a tracked file of this tree"
             } else if !applies(rule, path) {
                 "is not selected by this rule's paths/exclude"
+            } else if withheld.covers(index, rule, path) {
+                continue;
             } else if rule.test_code != TestCode::Include {
                 "was not scanned: deleted, binary, refused by only_if_file_matches, or no code left under test_code"
             } else {
@@ -1371,10 +1443,11 @@ mod tests {
             PathBuf::from("docs/c.md"),
         ];
         let admitted = vec![HashSet::from([PathBuf::from("src/a.rs")])];
-        let missing: Vec<PathBuf> = must_scan_violations(&compiled, &admitted, &files)
-            .into_iter()
-            .map(|v| v.file)
-            .collect();
+        let missing: Vec<PathBuf> =
+            must_scan_violations(&compiled, &admitted, &files, &Withheld::Nothing)
+                .into_iter()
+                .map(|v| v.file)
+                .collect();
         assert_eq!(
             missing,
             vec![PathBuf::from("src/b.rs"), PathBuf::from("docs/c.md")]
@@ -1470,6 +1543,143 @@ mod tests {
         );
         assert!(!tree.presence(Path::new("benches/gone.rs")).unwrap());
         assert!(tree.presence(Path::new("src/lib.rs")).unwrap());
+    }
+
+    /// `src/b.rs`: `forbidden` in production on line 1 and in a test module
+    /// on line 3.
+    const MIXED: &str =
+        "fn p() { forbidden(); }\n#[cfg(test)]\nmod t { fn x() { forbidden(); } }\n";
+
+    /// The rules a scan over `src/lib.rs`, `src/b.rs` ([`MIXED`]) and
+    /// `notes.md`, each holding `forbidden`, is judged by: one per `test_code`
+    /// scope, each naming `src/lib.rs` in `must_scan`, plus a
+    /// `require_live_paths` rule over an absent directory.
+    fn classifier_fixture(name: &str) -> (crate::scope::TreeSnapshot, Vec<TextlintRule>) {
+        let root = crate::scope::test_git_tree("textlint", name);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn f() { forbidden(); }\n").unwrap();
+        std::fs::write(root.join("src/b.rs"), MIXED).unwrap();
+        std::fs::write(root.join("notes.md"), "forbidden\n").unwrap();
+        let tree = crate::scope::TreeSnapshot::load(&root).unwrap();
+        let mut rules = Vec::new();
+        for (name, test_code) in [
+            ("plain", TestCode::Include),
+            ("skip", TestCode::Skip),
+            ("only", TestCode::Only),
+        ] {
+            let mut r = rule("forbidden");
+            r.name = name.into();
+            r.test_code = test_code;
+            r.must_scan = vec!["src/lib.rs".into(), "src/gone.rs".into()];
+            rules.push(r);
+        }
+        let mut strict = rule("never");
+        strict.name = "strict".into();
+        strict.paths = vec!["benches/**".into()];
+        strict.require_live_paths = true;
+        rules.push(strict);
+        (tree, rules)
+    }
+
+    /// (rule, file, line) of every violation, sorted; a `must_scan` failure
+    /// is line 0.
+    fn hits(scan: &TextlintScan) -> Vec<(String, String, usize)> {
+        let mut out: Vec<(String, String, usize)> = scan
+            .violations
+            .iter()
+            .map(|v| (v.rule.clone(), v.file.display().to_string(), v.line))
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn hit(rule: &str, file: &str, line: usize) -> (String, String, usize) {
+        (rule.into(), file.into(), line)
+    }
+
+    /// A classifier that fails outright withholds every `test_code` rule's
+    /// Rust files and nothing else: the plain rule, the `skip` rule's
+    /// non-Rust file, dead scope and the selector-only `must_scan` failures
+    /// are all still reported, beside the classifier's own error, kind kept
+    /// (a metadata failure is not turned into a refusal).
+    #[test]
+    fn a_failed_classification_withholds_only_what_needs_it() {
+        let (tree, rules) = classifier_fixture("classifier_failed");
+        let failing: &Classify = &|_, _, _| Err(DevError::Config("metadata failed".into()));
+        let scan = scan_with(&tree, &rules, failing).unwrap();
+        assert!(matches!(
+            scan.classifier_error,
+            Some(DevError::Config(ref m)) if m == "metadata failed"
+        ));
+        assert_eq!(scan.dead_scope.len(), 1);
+        assert_eq!(scan.dead_scope[0].rule, "strict");
+        assert_eq!(
+            hits(&scan),
+            vec![
+                hit("only", "src/gone.rs", 0),
+                hit("plain", "notes.md", 1),
+                hit("plain", "src/b.rs", 1),
+                hit("plain", "src/b.rs", 3),
+                hit("plain", "src/gone.rs", 0),
+                hit("plain", "src/lib.rs", 1),
+                hit("skip", "notes.md", 1),
+                hit("skip", "src/gone.rs", 0),
+            ]
+        );
+
+        // An interruption is not deferred behind the rest of the scan.
+        let interrupted: &Classify = &|_, _, _| Err(DevError::Interrupted);
+        assert!(matches!(
+            scan_with(&tree, &rules, interrupted),
+            Err(DevError::Interrupted)
+        ));
+    }
+
+    /// An unresolved bare `#[test]` withholds exactly the `only` rule's pair
+    /// with the unresolved file: the same rule still selects the test module
+    /// of a resolved file, the `skip` rule still masks it, and the withheld
+    /// `must_scan` path is not reported as unscanned.
+    #[test]
+    fn an_unresolved_refusal_withholds_only_its_pairs() {
+        let (tree, rules) = classifier_fixture("classifier_unresolved");
+        let unresolved: &Classify = &|_, _, _| {
+            let start = MIXED.find("#[cfg(test)]").unwrap();
+            let span = start..MIXED.len();
+            Ok(Some(crate::test_code::Classification::for_tests(
+                vec![(
+                    "src/b.rs",
+                    crate::test_code::FileMask::Production(vec![span.clone()]),
+                    vec![span],
+                )],
+                &["src/lib.rs"],
+                &["src/lib.rs: use x as test"],
+            )))
+        };
+        let scan = scan_with(&tree, &rules, unresolved).unwrap();
+        let Some(DevError::Refused(message)) = &scan.classifier_error else {
+            panic!(
+                "expected a refusal, got {:?}",
+                scan.classifier_error.is_some()
+            );
+        };
+        assert!(message.contains("src/lib.rs (rule \"only\")"), "{message}");
+        assert_eq!(scan.dead_scope.len(), 1);
+        assert_eq!(
+            hits(&scan),
+            vec![
+                hit("only", "src/b.rs", 3),
+                hit("only", "src/gone.rs", 0),
+                hit("plain", "notes.md", 1),
+                hit("plain", "src/b.rs", 1),
+                hit("plain", "src/b.rs", 3),
+                hit("plain", "src/gone.rs", 0),
+                hit("plain", "src/lib.rs", 1),
+                hit("skip", "notes.md", 1),
+                hit("skip", "src/b.rs", 1),
+                hit("skip", "src/gone.rs", 0),
+                hit("skip", "src/lib.rs", 1),
+            ]
+        );
     }
 
     /// Compile one rule and scan a source string; return (line, rule) hits.

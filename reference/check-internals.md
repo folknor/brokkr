@@ -844,11 +844,17 @@ member, changed or not. After each run the phase creates a placeholder there
 (only if absent) for each unit cargo ran and sets its mtime to the moment
 before cargo was launched, so an unchanged member stays fresh and a source
 edited mid-run is still newer. A fresh unit's diagnostics are replayed from
-cargo's cache, so a warning keeps failing the phase on an unchanged rerun. A
-plain `cargo doc` carries different rustdocflags, so its fingerprint differs
-and it renders over the placeholder. A wrong path guess (a `build.target` triple
-moves docs under `<target>/<triple>/doc`) leaves the unit dirty - slow, never
-wrong.
+cargo's cache, so a warning keeps failing the phase on an unchanged rerun. For
+a unit that ran under `--check`, a plain `cargo doc` carries different
+rustdocflags, so its fingerprint differs and it renders over the placeholder.
+Not every stamped unit ran under `--check`: under a target sweep cargo hands a
+host unit (a proc-macro crate's doc unit) no rustdocflags at all, and an inert
+injection reaches no unit, so those render. That is accepted: a rendered unit
+has its real page, so the stamp either finds it present and only rewinds its
+mtime, or, for a host unit documented into the host doc dir rather than
+`<target>/<triple>/doc`, misses it and leaves a placeholder that unit never
+uses as its output. A wrong path guess (a `build.target` triple moves docs
+under `<target>/<triple>/doc`) leaves the unit dirty - slow, never wrong.
 
 Sweep tags follow coverage, for clippy and rustdoc alike. A diagnostic is
 tagged with the sweeps that reported it only when some run that selected its

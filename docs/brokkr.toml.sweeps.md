@@ -855,21 +855,27 @@ include_ignored = true
   error for any plain libtest `[[check]]` entry the profile runs (directly or
   through a lane): cargo-mediated parallelism shares one output stream, so
   its executions cannot be attributed. The error names the profile and the
-  entries; give them `parallel = { budget = N }`, or move them to a profile
-  without `test_threads`. Parallel, nextest and doc-only entries are exempt.
+  entries; drop `test_threads` from that profile or move them to a profile
+  without it, where `parallel = { budget = N }` gives them concurrency the
+  claim can attribute. Parallel, nextest and doc-only entries are exempt from
+  this rule; a count over a parallel entry falls under the next one.
   Either fix keeps the entries' doctests in the claim, which runs them in a
   doctest carrier of each tested build (see [Doctests](#doctests)).
-- **`test_threads = 1` over a `parallel` entry** is a load-time error for
-  every profile, claimed or not, whether it sets the key or inherits it
-  through `extends` (the error then names the parent). On a parallel entry
-  the budget alone decides concurrency and the profile's count is never
-  consulted, so a profile asking for serial execution there would get the
-  budget's instead. Refused whatever the budget, including one, because an
-  unset budget resolves from the host and whether a config loads must not.
-  The error names the profile and the entry; reference a non-parallel twin
-  instead, a `[[check]]` entry with the same build shape and no `parallel`
-  key. Other `test_threads` values over a parallel entry load and are inert.
-  Breaking change for configs that carried the pairing.
+- **`test_threads` over a `parallel` entry**, any value, is a load-time
+  error for every profile, claimed or not, whether it sets the key or
+  inherits it through `extends` (the error then names the parent, and since a
+  child cannot unset an inherited value, the key has to leave the parent or
+  the child has to stop extending it). On a parallel entry the budget alone
+  decides concurrency and the profile's count is never consulted: `1` would
+  ask for a serial run it does not get, any other value for a tuning that does
+  nothing. Refused whatever the budget, including one, because an unset
+  budget resolves from the host and whether a config loads must not. The
+  error names the profile and the entry. For `1`, reference a non-parallel
+  twin instead, a `[[check]]` entry with the same build shape and no
+  `parallel` key. For any other value, drop the key, or, where the profile
+  also runs plain libtest entries the count does drive, keep it on a profile
+  of its own over those entries and compose the two with `lanes`. Breaking
+  change for configs that carried the pairing.
 - `lanes = ["tier1", "serial"]` composes profiles as a *list of runs*:
   each lane resolves independently and the test
   phase runs every lane's sweeps in order (labels lane-qualified,

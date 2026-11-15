@@ -1818,9 +1818,10 @@ pub struct ProfileDef {
     /// 1 is serial under the per-test watchdog, 0 is libtest's default, N is
     /// `--test-threads=N`. A nextest sweep maps it onto the engine's in-flight
     /// count. A `parallel` entry never consults it - its budget decides - so
-    /// `1` over a parallel entry is a load-time error (it would promise a
-    /// serial run the key does not control) and other values there are
-    /// inert. Merges through `extends`.
+    /// any value over a parallel entry is a load-time error: `1` would
+    /// promise a serial run the key does not control, any other value a
+    /// tuning that does nothing. Merges through `extends`, and a child cannot
+    /// unset an inherited value.
     pub test_threads: Option<u32>,
     /// Extra environment variables exported to the test process.
     pub env: Option<BTreeMap<String, String>>,

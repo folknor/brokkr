@@ -239,40 +239,6 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
-### A profile's `test_threads` over a `parallel` entry is silently inert (2026-11-15)
-
-brokkr#166 refused only `test_threads = 1` over a `parallel` entry (the value
-that claims serialness). Every other value there is dropped by
-`LaneExec::resolve` without a word, and consumer configs carry it as if it
-were live: mogwai's `dev` and `gate` profiles set 16 over two `parallel`
-entries (its gate comment records measuring 8 and 16), piners' `standard` sets
-8 over four parallel entries and one plain one, nautilus' `tier1` and `edit`
-set 0 over its parallel `default`. Refusing them is a config-contract break
-the maintainer has not approved; a load warning would fire on every command
-for piners, where the key is live on one sweep and inert on the rest. Open:
-whether brokkr says so anywhere (a `brokkr check` shape line, a one-shot
-warning naming the inert sweeps), or the consumers just drop the key.
-
-### The rustdoc stamp assumes every doc unit ran under `--check` (2026-11-15)
-
-Under a `[[check]] target` sweep, cargo hands a host unit (a proc-macro
-crate's doc unit) no rustdocflags at all, from any source, so `--check` does
-not reach it and it renders normally. `rustdoc_check::stamp_outputs` still
-stamps it as if lint-only. Harmless today (the stamp only creates a
-placeholder where `index.html` is absent and sets the mtime to the pre-launch
-time), but the doc comment's premise that every reported unit wrote nothing
-is false for those units. Wanted: say so at the stamp, or skip host units.
-
-### A test_code refusal hides `require_live_paths` failures (2026-11-15)
-
-`textlint::scan` judges dead scope for `require_live_paths` rules before the
-test-code classification, but returns the classifier's refusal (an
-unresolved bare `#[test]` under `test_code = "only"`, a workspace outside
-the classifier's model) as an error, which drops the dead-scope list it had
-already built. The phase still fails, on the refusal alone; fixing that
-refusal then shows the dead scope on the next run. Wanted, if it bites:
-report both, by carrying the dead scope out beside the error.
-
 ### A results param filter cannot tell collections apart by comma (2026-11-09)
 
 `src/bench/store/list.rs` matches a param filter against the run's keys

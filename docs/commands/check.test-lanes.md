@@ -83,12 +83,13 @@ process isolation, which takes only unset or 1) into parallel execution with
 
 On an entry carrying `parallel = { budget = N }` (below) the budget alone
 decides concurrency, and the profile's `test_threads` is not consulted. A
-profile with `test_threads = 1` that references such an entry is a load-time
-error, whatever the budget: the key reads as a promise of serial execution
-that it does not control there. The remedy is a non-parallel twin, a second
-`[[check]]` entry with the same build shape and no `parallel` key, for the
-serial profile to reference. Other counts on a parallel entry load and are
-inert.
+profile with any `test_threads` that references such an entry is a load-time
+error, whatever the budget: `1` reads as a promise of serial execution and
+any other count as a tuning, and the key controls neither there. For `1` the
+remedy is a non-parallel twin, a second `[[check]]` entry with the same build
+shape and no `parallel` key, for the serial profile to reference. For another
+count, drop it, or keep it on a profile of its own over the plain libtest
+entries it drives and compose the two with `lanes`.
 
 A parallel sweep enforces the same 20s per-test cap as the serial path, by the
 same means: **every lane drives libtest's JSON event stream**

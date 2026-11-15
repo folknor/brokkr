@@ -48,6 +48,28 @@ impl Classification {
     pub(crate) fn is_unresolved(&self, rel: &Path) -> bool {
         self.unresolved.contains(rel)
     }
+
+    /// A classification stated outright, for callers testing how its masks,
+    /// selections and refusals are consumed: `files` gives each listed file
+    /// its skip mask and its test selection, `unresolved` the files left
+    /// unresolved by `shadows`.
+    #[cfg(test)]
+    pub(crate) fn for_tests(
+        files: Vec<(&str, FileMask, Vec<Range<usize>>)>,
+        unresolved: &[&str],
+        shadows: &[&str],
+    ) -> Self {
+        let mut out = Self {
+            unresolved: unresolved.iter().map(PathBuf::from).collect(),
+            shadows: shadows.iter().map(|s| (*s).to_owned()).collect(),
+            ..Self::default()
+        };
+        for (rel, mask, tests) in files {
+            out.files.insert(PathBuf::from(rel), mask);
+            out.tests.insert(PathBuf::from(rel), tests);
+        }
+        out
+    }
 }
 
 /// One crate target's root file, from `cargo metadata`.
