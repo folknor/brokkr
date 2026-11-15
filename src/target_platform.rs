@@ -8,7 +8,8 @@
 //! libraries live (for the loader path), and that cargo runs its doctests at
 //! all. Every probe goes through the compiler cargo itself would pick, under
 //! the sweep's environment, so preflight never inspects one toolchain while
-//! cargo builds with another.
+//! cargo builds with another. The same compiler's host triple is what a
+//! `{host_arch}` [`TargetSpec`] resolves against.
 //!
 //! The cfg facts are deliberately partial. Only names the triple alone fixes
 //! are decided ([`DECIDED_KEYS`], `unix`, `windows`); anything flags can move
@@ -86,6 +87,126 @@ impl TargetCfg {
             .contains(&name)
             .then(|| self.flags.contains(name))
     }
+}
+
+/// The placeholder a configured `target` may open with: the architecture
+/// component of the compiler host triple (`rustc -vV`'s `host:` line), so one
+/// entry names the host's own member of a target family
+/// (`"{host_arch}-unknown-linux-musl"`).
+pub(crate) const HOST_ARCH: &str = "{host_arch}";
+
+/// A sweep's `target` as configured: a literal triple, or one opening with
+/// [`HOST_ARCH`]. Config load validates the spelling only, since what a
+/// template names depends on the host; planning turns it into the concrete
+/// triple ([`TargetSpec::resolve`]), and nothing past planning sees a
+/// template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetSpec(String);
+
+impl TargetSpec {
+    /// Parse a configured `target`: a bare triple (ASCII alphanumerics, `-`,
+    /// `_`, `.`; not a `.json` spec), optionally with its architecture
+    /// component replaced by [`HOST_ARCH`].
+    pub(crate) fn parse(spelling: &str) -> Option<Self> {
+        let bare = |s: &str| {
+            !s.is_empty()
+                && !s.ends_with(".json")
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        };
+        let valid = match spelling.strip_prefix(HOST_ARCH) {
+            Some(rest) => rest.strip_prefix('-').is_some_and(bare),
+            None => bare(spelling),
+        };
+        valid.then(|| Self(spelling.to_owned()))
+    }
+
+    /// A spelling config load already validated with [`TargetSpec::parse`],
+    /// kept verbatim: re-judging it here could only turn a load-time refusal
+    /// into a silent host build.
+    pub(crate) fn validated(spelling: &str) -> Self {
+        Self(spelling.to_owned())
+    }
+
+    /// The spelling as configured.
+    pub(crate) fn configured(&self) -> &str {
+        &self.0
+    }
+
+    /// The concrete triple: a literal is itself; a template takes the
+    /// architecture of the host triple of the compiler cargo would run in
+    /// `root` under `env` (so a sweep's `RUSTC` decides it, as it decides the
+    /// build).
+    pub(crate) fn resolve(
+        &self,
+        root: &Path,
+        env: EffectiveEnv<'_>,
+        files: &[(PathBuf, toml::Table)],
+    ) -> Result<String, DevError> {
+        let Some(rest) = self.0.strip_prefix(HOST_ARCH) else {
+            return Ok(self.0.clone());
+        };
+        let host = host_triple(root, env, files)?;
+        let arch = host.split('-').next().unwrap_or_default();
+        Ok(format!("{arch}{rest}"))
+    }
+
+    /// Whether resolving this spelling asks the host.
+    pub(crate) fn is_template(&self) -> bool {
+        self.0.starts_with(HOST_ARCH)
+    }
+}
+
+/// The host triple of the compiler cargo would run in `root` under `env`.
+fn host_triple(
+    root: &Path,
+    env: EffectiveEnv<'_>,
+    files: &[(PathBuf, toml::Table)],
+) -> Result<String, DevError> {
+    let rustc = compiler(root, env, files);
+    Ok(
+        crate::cargo::rustc::load_selected(root, &rustc, env.pairs())?
+            .host
+            .clone(),
+    )
+}
+
+/// The cfg keys on which a target's binaries and the compiler host's are
+/// compared for [`differing_host`].
+const EXECUTION_KEYS: [&str; 4] = [
+    "target_os",
+    "target_arch",
+    "target_pointer_width",
+    "target_endian",
+];
+
+/// The compiler host triple, when `triple`'s cfg facts differ from the
+/// compiler host's on any of [`EXECUTION_KEYS`]; `None` when they agree or a
+/// query failed.
+///
+/// A statement of difference, never a verdict on executability. Agreement
+/// does not prove a binary of the triple runs here, and difference does not
+/// prove it cannot: the compiler may itself run under emulation, and the
+/// kernel's binfmt_misc handlers can accept or reject individual files of one
+/// triple. Only executing the lane's own binaries decides, so brokkr refuses
+/// nothing on this answer and does not probe before building.
+pub(crate) fn differing_host(
+    root: &Path,
+    triple: &str,
+    env: EffectiveEnv<'_>,
+    files: &[(PathBuf, toml::Table)],
+) -> Option<String> {
+    let rustc = compiler(root, env, files);
+    let host = TargetCfg::parse(&probe(root, env, &rustc, &["--print", "cfg"]).ok()?);
+    let target =
+        TargetCfg::parse(&probe(root, env, &rustc, &["--print", "cfg", "--target", triple]).ok()?);
+    let differs = EXECUTION_KEYS
+        .iter()
+        .any(|key| host.values.get(*key) != target.values.get(*key));
+    if !differs {
+        return None;
+    }
+    host_triple(root, env, files).ok()
 }
 
 /// A target sweep's triple, with the toolchain facts every lane needs.
@@ -264,6 +385,96 @@ mod tests {
         assert_eq!(cfg.flag("windows"), Some(false));
         assert_eq!(cfg.flag("debug_assertions"), None);
         assert_eq!(cfg.flag("madsim"), None);
+    }
+
+    #[test]
+    fn target_spec_is_a_bare_triple_or_one_opening_with_host_arch() {
+        for ok in [
+            "x86_64-unknown-linux-musl",
+            "riscv64gc-unknown-linux-gnu",
+            "{host_arch}-unknown-linux-musl",
+        ] {
+            assert_eq!(TargetSpec::parse(ok).unwrap().configured(), ok);
+        }
+        assert!(
+            !TargetSpec::parse("x86_64-unknown-linux-musl")
+                .unwrap()
+                .is_template()
+        );
+        assert!(
+            TargetSpec::parse("{host_arch}-unknown-linux-musl")
+                .unwrap()
+                .is_template()
+        );
+        for bad in [
+            "",
+            "x86_64 linux",
+            "my-target.json",
+            "{host_arch}",
+            "{host_arch}-",
+            "{host_arch}unknown-linux-musl",
+            "x86_64-{host_arch}",
+            "{arch}-unknown-linux-musl",
+            "{host_arch}-{host_arch}",
+        ] {
+            assert!(TargetSpec::parse(bad).is_none(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_literal_target_resolves_to_itself_without_asking_the_host() {
+        // No compiler exists at this root; a literal never runs one.
+        let spec = TargetSpec::parse("x86_64-unknown-linux-musl").unwrap();
+        let env = EffectiveEnv::new(&[("RUSTC", "/nonexistent/rustc")]);
+        assert_eq!(
+            spec.resolve(Path::new("/nonexistent"), env, &[]).unwrap(),
+            "x86_64-unknown-linux-musl"
+        );
+    }
+
+    // The difference is judged on the four execution keys only, and a
+    // compiler that cannot answer leaves it unsaid rather than failing.
+    #[cfg(unix)]
+    #[test]
+    fn differing_host_compares_the_execution_keys_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::test_scratch::scratch("target_platform", "differing_host");
+        let rustc = root.join("fake-rustc");
+        std::fs::write(
+            &rustc,
+            "#!/bin/sh\n\
+             case \"$*\" in\n\
+             -v*) printf 'release: 1.99.0\\nhost: x86_64-unknown-linux-gnu\\n' ;;\n\
+             '--print cfg') printf 'target_arch=\"x86_64\"\\ntarget_os=\"linux\"\\ntarget_env=\"gnu\"\\ntarget_pointer_width=\"64\"\\ntarget_endian=\"little\"\\n' ;;\n\
+             *aarch64*) printf 'target_arch=\"aarch64\"\\ntarget_os=\"linux\"\\ntarget_env=\"musl\"\\ntarget_pointer_width=\"64\"\\ntarget_endian=\"little\"\\n' ;;\n\
+             *) printf 'target_arch=\"x86_64\"\\ntarget_os=\"linux\"\\ntarget_env=\"musl\"\\ntarget_pointer_width=\"64\"\\ntarget_endian=\"little\"\\n' ;;\n\
+             esac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let rustc = rustc.display().to_string();
+        let env = [("RUSTC", rustc.as_str())];
+        let env = EffectiveEnv::new(&env);
+        // Only target_env differs: no line.
+        assert_eq!(
+            differing_host(&root, "x86_64-unknown-linux-musl", env, &[]),
+            None
+        );
+        assert_eq!(
+            differing_host(&root, "aarch64-unknown-linux-musl", env, &[]).as_deref(),
+            Some("x86_64-unknown-linux-gnu")
+        );
+        let missing = root.join("missing-rustc").display().to_string();
+        let missing = [("RUSTC", missing.as_str())];
+        assert_eq!(
+            differing_host(
+                &root,
+                "aarch64-unknown-linux-musl",
+                EffectiveEnv::new(&missing),
+                &[]
+            ),
+            None
+        );
     }
 
     #[test]

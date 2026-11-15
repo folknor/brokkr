@@ -205,6 +205,9 @@ pub(crate) fn plan_check<'a>(i: &PlanInputs<'a>, narrate: &Narrator) -> Result<C
     let selections =
         CheckSelections::build(&sweeps, i.packages, &skip, i.rustdoc_configured, i.gated, certifies, &oracle)?;
     announce_package_rules(sweeps.linted(), &selections, narrate);
+    announce_target_hosts(i.project_root, sweeps.tested(), selections.test.entries().iter(), |line| {
+        narrate.run_msg(line);
+    });
     narrate_feature_drops(
         &[
             (sweeps.linted(), &selections.clippy),
@@ -341,7 +344,7 @@ fn lane_shape(sweep: &PlannedSweep) -> String {
     });
     let features = sweep.features.configured_key();
     parts.push(if features.is_empty() { "default features".to_owned() } else { features.join(" ") });
-    if let Some(target) = &sweep.target {
+    if let Some(target) = sweep.target() {
         parts.push(format!("target {target}"));
     }
     if let Some(mode) = sweep.effective_unification().describe() {

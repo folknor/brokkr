@@ -813,7 +813,7 @@ mod tests {
     fn decide_sweeps_no_config_returns_legacy_default() {
         // No `[test]`, no `[[check]]` - the project hasn't migrated.
         // Single `--all-features` sweep, matching pre-redesign behaviour.
-        let sweeps = decide_sweeps(None, &[]).unwrap();
+        let sweeps = decide_sweeps(None, &[], std::path::Path::new(".")).unwrap();
         assert_eq!(sweeps.len(), 1);
         assert_eq!(sweeps[0].label, "all-features");
         assert_eq!(sweeps[0].features.configured_key(), vec!["--all-features"]);
@@ -840,7 +840,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let sweeps = decide_sweeps(None, &entries).unwrap();
+        let sweeps = decide_sweeps(None, &entries, std::path::Path::new(".")).unwrap();
         assert_eq!(sweeps.len(), 2);
         assert_eq!(sweeps[0].label, "all");
         assert_eq!(
@@ -880,7 +880,7 @@ sweeps = ["all", "consumer"]
                 ..Default::default()
             },
         ];
-        let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
+        let sweeps = decide_sweeps(Some(&test_cfg), &entries, std::path::Path::new(".")).unwrap();
         assert_eq!(sweeps.len(), 2);
         assert_eq!(sweeps[0].label, "all");
         assert_eq!(sweeps[0].build_packages, vec!["pbfhogg-cli"]);
@@ -925,12 +925,12 @@ lanes = ["tier1", "serial"]
         // `--sweep` can see both lane-qualified labels. The collapse is the
         // run's selection's job, after `--sweep`.
         let (test_cfg, entries) = lanes_cfg();
-        let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
+        let sweeps = decide_sweeps(Some(&test_cfg), &entries, std::path::Path::new(".")).unwrap();
         assert_eq!(sweeps.len(), 2);
         assert_eq!(sweeps[0].label, "tier1/all");
         assert_eq!(sweeps[1].label, "serial/all");
         assert_eq!(
-            resolve_sweeps(Some(&test_cfg), &entries, None)
+            resolve_sweeps(Some(&test_cfg), &entries, None, std::path::Path::new("."))
                 .unwrap()
                 .len(),
             2
@@ -943,7 +943,7 @@ lanes = ["tier1", "serial"]
         // identical, so the selection attempts the first and dedupes the
         // second onto it.
         let (test_cfg, entries) = lanes_cfg();
-        let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
+        let sweeps = decide_sweeps(Some(&test_cfg), &entries, std::path::Path::new(".")).unwrap();
         assert_eq!(attempted(&sweeps, "pkg"), vec!["tier1/all"]);
         let sel = selection_for(&sweeps, "pkg");
         assert!(
@@ -962,7 +962,13 @@ lanes = ["tier1", "serial"]
         // before deduping is what makes the documented lane-qualified label
         // reachable.
         let (test_cfg, entries) = lanes_cfg();
-        let sweeps = resolve_sweeps(Some(&test_cfg), &entries, Some("serial/all")).unwrap();
+        let sweeps = resolve_sweeps(
+            Some(&test_cfg),
+            &entries,
+            Some("serial/all"),
+            std::path::Path::new("."),
+        )
+        .unwrap();
         assert_eq!(attempted(&sweeps, "pkg"), vec!["serial/all"]);
     }
 
@@ -1041,7 +1047,7 @@ env = { BROKKR_TEST_PLATFORM = "1", FOO = "bar" }
             build_packages: Vec::new(),
             ..Default::default()
         }];
-        let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
+        let sweeps = decide_sweeps(Some(&test_cfg), &entries, std::path::Path::new(".")).unwrap();
         assert_eq!(sweeps.len(), 1);
         assert_eq!(
             sweeps[0]
@@ -1081,7 +1087,7 @@ include_ignored = false
             build_packages: Vec::new(),
             ..Default::default()
         }];
-        let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
+        let sweeps = decide_sweeps(Some(&test_cfg), &entries, std::path::Path::new(".")).unwrap();
         assert_eq!(sweeps.len(), 1);
         assert_eq!(sweeps[0].label, "all");
         let filters = sweeps[0].lane_filters();

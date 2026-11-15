@@ -945,7 +945,12 @@ preset = ["a", "b"]
             Some("x86_64-unknown-linux-musl")
         );
         assert!(parse("").unwrap()[0].target.is_none());
-        for bad in ["", "custom.json", "../x", "a b"] {
+        // A host-arch template loads as spelled; planning resolves it.
+        assert_eq!(
+            parse("target = \"{host_arch}-unknown-linux-musl\"\n").unwrap()[0].target.as_deref(),
+            Some("{host_arch}-unknown-linux-musl")
+        );
+        for bad in ["", "custom.json", "../x", "a b", "{host_arch}", "{arch}-unknown-linux-musl"] {
             let err = parse(&format!("target = \"{bad}\"\n")).unwrap_err().to_string();
             assert!(err.contains("bare target triple"), "{bad}: {err}");
         }

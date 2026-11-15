@@ -1191,9 +1191,24 @@ contract makes it compile-time (`env!`) only.
 
 #### Target sweeps
 
-A `[[check]]` entry's `target` is build shape (`EffectiveBuild` and
+A `[[check]]` entry's `target` is a `TargetSpec` (`src/target_platform.rs`)
+in the declaration: a literal triple or a `{host_arch}` template, validated
+for spelling only at config load, since what a template names depends on the
+host. Planning turns it into the concrete triple the `PlannedSweep` carries
+(`plan_sweep`, `src/check_cmd/selection.rs`, the one production path from a
+declaration to a planned sweep: `resolve_invocation_sweeps` for `check`, its
+lint lanes after cadence and `brokkr clippy`, and `brokkr test`'s sweep
+decision). A template takes the architecture of the host triple reported by
+the compiler cargo would run under the sweep's composed env, read through
+`cargo::rustc::load_selected`; a literal is itself and probes nothing. Every
+consumer reads the concrete triple through `PlannedSweep::target`; the
+spelling stays on the declaration (`SweepDecl::target_spec`, still reachable
+through the planned sweep's deref), which nothing past planning reads.
+
+That triple is build shape (`EffectiveBuild` and
 `DeclaredShape` encode it; the shape id encoding appends it only when set, so
-every host shape id is unchanged) and `build_purpose::sweep_args` puts
+every host shape id is unchanged, and a template and a literal naming the
+same triple share an id) and `build_purpose::sweep_args` puts
 `--target <triple>` on every cargo run of the sweep. Each lane resolves it
 once, when its environment is decided (`resolve_sweep_target`,
 `src/target_platform.rs`): the compiler cargo would run is found by cargo's
@@ -1209,8 +1224,9 @@ Those facts feed three consumers. Runner discovery (`CargoLaunchConfig::
 discover_for`) adds the triple's runner - its table, its env spelling, or a
 `cfg(...)` table not proven false for it - and the lane refuses it in every
 lane kind: brokkr executes the sweep's binaries itself (the serial lane lists
-them too), so a runner would be bypassed, and emulated targets are therefore
-unsupported. The same discovery drops an ambient `build.target`, which the
+them too), so a runner would be bypassed, and emulation through a runner is
+therefore unsupported (kernel binfmt_misc emulation is invisible here and
+runs like native execution). The same discovery drops an ambient `build.target`, which the
 explicit `--target` overrides. The rustflags sink matches the triple's
 `target.*` tables against those facts. And the direct runtime picks each
 binary's toolchain libdir by its exact output root: `<base>/<triple>/<profile>`
@@ -1220,6 +1236,24 @@ matching neither, or both with different libdirs, refuses the envelope.
 Forwarded `--target`, `--config`, `--manifest-path` and `--target-dir` are
 refused on a target sweep in every lane, since each moves something the
 resolution fixed.
+
+Whether the machine can execute a target lane's binaries is not checked
+before building, and nothing refuses a triple on that ground. A probe binary
+built ahead of the lane proves nothing about the lane's own files - a
+binfmt_misc registration can match header bytes such as the ELF type, and the
+ELF loader rejects files for reasons beyond the architecture - and a refusal
+on the triple's cfg facts would refuse emulated hosts that run such lanes
+today. Executing the lane's binaries decides, and the spawn error names the
+file and the OS error. What is said instead is a fact: `announce_target_hosts`
+(`src/check_cmd/prepare.rs`) compares `rustc --print cfg` with and without
+`--target` from the selected compiler on `target_os`, `target_arch`,
+`target_pointer_width` and `target_endian`
+(`target_platform::differing_host`) and, for each lane the test selection
+attempts whose facts differ, narrates one line naming the sweep, the triple
+and the compiler host. `plan_check` says it after selection, so the audit
+shows it and a disabled test phase, an excluded lane or a lint lane says
+nothing; `brokkr test` says it once its selection is settled. A failed query
+leaves the line out; it never fails planning.
 
 Feature unification is unchanged on the prebuild side: on a sweep whose
 selection is exactly the whole workspace (no `packages`, no

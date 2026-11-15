@@ -263,6 +263,17 @@ placeholder where `index.html` is absent and sets the mtime to the pre-launch
 time), but the doc comment's premise that every reported unit wrote nothing
 is false for those units. Wanted: say so at the stamp, or skip host units.
 
+### The rustdoc phase runs a test sweep's target preflight on lint lanes (2026-11-15)
+
+`docs/brokkr.toml.sweeps.md` says a `[[lint_sweep]]` has no separate
+preflight, and clippy indeed resolves nothing. But the rustdoc phase calls
+`resolve_sweep_target` for every linted lane with a target, lint lanes
+included, to get the triple's cfg facts for rustdocflags placement, and that
+is the full `SweepTarget::resolve`: it refuses a cargo older than 1.89 (a
+doctest concern; rustdoc's phase runs no doctests) and a triple with no
+installed standard library. Wanted: the rustdoc phase reads the cfg facts
+without the test-only refusals, or the doc says the phase refuses them.
+
 ### A results param filter cannot tell collections apart by comma (2026-11-09)
 
 `src/bench/store/list.rs` matches a param filter against the run's keys

@@ -184,7 +184,7 @@ fn run_one_diagnostic_cargo(
         };
         if let Some(dir) = target_dir {
             // Under `--target` cargo documents into `<target>/<triple>/doc`.
-            let doc_dir = match &sweep.target {
+            let doc_dir = match sweep.target() {
                 Some(triple) => dir.join(triple).join("doc"),
                 None => dir.join("doc"),
             };

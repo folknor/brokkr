@@ -117,7 +117,8 @@ pub(super) fn run_sweeps(
 ) -> Result<(), DevError> {
     let repeat = repeat.get();
     let ceiling = test_ceiling(timeout)?;
-    let sweeps = resolve_sweeps(dev_config.test.as_ref(), &dev_config.check, sweep_filter)?;
+    let test_cfg = dev_config.test.as_ref();
+    let sweeps = resolve_sweeps(test_cfg, &dev_config.check, sweep_filter, project_root)?;
 
     let (pkg, source) = resolve_package(package, dev_config, &project)?;
     let (sweeps, selection) = select_for_package(
@@ -152,7 +153,7 @@ pub(super) fn run_sweeps(
         project,
         project_root,
         state_root,
-        test_cfg: dev_config.test.as_ref(),
+        test_cfg,
         target_dir: &target_dir,
         allow_flags: &allow_flags,
         name,
@@ -265,7 +266,9 @@ pub(super) fn run_sweeps(
 /// that would execute exactly what an earlier one does are deduped. After `--sweep`, so a lane-qualified label
 /// reaches a sweep the dedupe would otherwise fold away. Each sweep's features
 /// are projected onto the one package: a token only another of the sweep's
-/// packages routes is dropped, and said so.
+/// packages routes is dropped, and said so. A sweep the selection attempts
+/// whose target differs from the compiler host is said so here, as `check`
+/// says it at planning.
 fn select_for_package(
     sweeps: Vec<PlannedSweep>,
     pkg: &str,
@@ -286,6 +289,12 @@ fn select_for_package(
         &profile_of,
         &oracle,
     )?;
+    check_cmd::announce_target_hosts(
+        project_root,
+        &sweeps,
+        selection.entries().iter(),
+        output::run_msg,
+    );
     Ok((sweeps, selection))
 }
 

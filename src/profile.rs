@@ -73,10 +73,13 @@ pub struct SweepDecl {
     /// and is read through [`SweepDecl::profile`]; whether it is required
     /// only decides which `brokkr test` invocations run the sweep.
     pub profile_pin: crate::config::ProfilePin,
-    /// The `[[check]]` entry's `target`: the triple every cargo run of the
-    /// sweep passes as `--target`, or `None` for the host. Part of the build
-    /// shape.
-    pub target: Option<String>,
+    /// The `[[check]]` entry's `target` as configured: a literal triple or a
+    /// `{host_arch}` template, or `None` for the host. Host-independent, so
+    /// declarations built at config load stay so; planning resolves it into
+    /// [`PlannedSweep::target`], the triple every cargo run passes as
+    /// `--target` and the one the build shape encodes. Read nowhere past
+    /// planning, though a planned sweep's deref still reaches it.
+    pub target_spec: Option<crate::target_platform::TargetSpec>,
     /// The `[[check]]` entry's `feature_unification`, as configured. Policy,
     /// not yet an answer: `auto` resolves differently depending on CLI scope
     /// and parallel eligibility, which are invocation facts.
@@ -137,6 +140,9 @@ impl SweepOrigin {
 pub struct PlannedSweep {
     declaration: SweepDecl,
     effective_unification: EffectiveUnification,
+    /// The declaration's `target_spec` resolved on this host: the concrete
+    /// triple, never a template.
+    target: Option<String>,
 }
 
 impl std::ops::Deref for PlannedSweep {
@@ -148,24 +154,42 @@ impl std::ops::Deref for PlannedSweep {
 }
 
 impl PlannedSweep {
+    /// Test fixtures: plan a declaration whose target, if any, is a literal
+    /// triple. Production planning goes through
+    /// [`crate::check_cmd::resolve_invocation_sweeps`] or
+    /// [`crate::check_cmd::plan_sweep`], which resolve a `{host_arch}`
+    /// template against the host.
+    #[cfg(test)]
     pub fn resolve(declaration: SweepDecl, promotion_eligible: bool) -> Self {
-        crate::check_cmd::resolve_planned_sweep(declaration, promotion_eligible)
+        let target = declaration.target_spec.as_ref().map(|spec| {
+            assert!(!spec.is_template(), "fixtures plan literal targets only");
+            spec.configured().to_owned()
+        });
+        crate::check_cmd::resolve_planned_sweep(declaration, promotion_eligible, target)
     }
 
     /// Construct a planned sweep after invocation selection has resolved its
-    /// effective feature-unification answer.
+    /// effective feature-unification answer and its concrete target.
     pub(crate) fn with_effective_unification(
         declaration: SweepDecl,
         effective_unification: EffectiveUnification,
+        target: Option<String>,
     ) -> Self {
         Self {
             declaration,
             effective_unification,
+            target,
         }
     }
 
     pub fn effective_unification(&self) -> EffectiveUnification {
         self.effective_unification
+    }
+
+    /// The concrete triple every cargo run of this sweep passes as
+    /// `--target`, or `None` for the host. Part of the build shape.
+    pub(crate) fn target(&self) -> Option<&str> {
+        self.target.as_deref()
     }
 
     /// This sweep with its target selection replaced and everything else as
@@ -177,6 +201,7 @@ impl PlannedSweep {
         Self {
             declaration,
             effective_unification: self.effective_unification,
+            target: self.target.clone(),
         }
     }
 
@@ -201,6 +226,7 @@ impl PlannedSweep {
         Self {
             declaration,
             effective_unification: self.effective_unification,
+            target: self.target.clone(),
         }
     }
 
@@ -950,7 +976,10 @@ fn sweep_decl_from_entry(
         lane_exec,
         curated: entry.curated,
         profile_pin: entry.profile_pin(),
-        target: entry.target.clone(),
+        target_spec: entry
+            .target
+            .as_deref()
+            .map(crate::target_platform::TargetSpec::validated),
         feature_unification: entry.feature_unification,
         entry_name: entry.name.clone(),
         // A gate sweep always lints every target; only the investigative

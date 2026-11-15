@@ -288,14 +288,51 @@ env = { HIGH_PRECISION = "1" }
   sweep of the same features never dedupe in clippy and keep separate coverage
   universes. `BROKKR_TEST_BIN_DIR` points at `<target>/<triple>/<profile>`.
 
+  A triple may open with `{host_arch}` in place of its architecture, naming
+  the host's own member of a target family:
+
+  ```toml
+  [[check]]
+  name = "musl"
+  target = "{host_arch}-unknown-linux-musl"
+  ```
+
+  `{host_arch}` is the architecture component of the host triple
+  (`rustc -vV`'s `host:` line) of the compiler cargo would use under the
+  sweep's env, the same compiler the preflight below resolves against: on an
+  x86_64 host the sweep above is `x86_64-unknown-linux-musl`, on an aarch64
+  host `aarch64-unknown-linux-musl`. It is the triple's first component as
+  spelled, so an armv7 host yields `armv7-unknown-linux-musl`, which is no
+  target; spell such a family literally. Config load checks the spelling only;
+  each run resolves it before anything runs, and from there on the sweep is
+  the concrete triple: the build shape, the cargo argv, `check --audit` and
+  every phase see that triple, so it dedupes with a literal entry naming the
+  same one. A compiler that cannot report its host fails the run, naming the
+  sweep. It works the same in a `[[lint_sweep]]`.
+
   brokkr executes the sweep's test binaries itself in every lane, so the host
   must be able to run them. x86_64 musl runs natively on an x86_64 glibc host,
-  so the whole suite runs, parallel lane included. There is no guess about
-  which triples the host can run: a binary it cannot execute fails when it is
-  listed. A runner that may apply to the triple
+  so the whole suite runs, parallel lane included. Whether this machine can
+  execute them is decided by executing them, never in advance: a binary it
+  cannot execute fails when it is first run, with the OS error (`Exec format
+  error`) and the file. No pre-build check refuses a triple, because nothing
+  built ahead of the lane's own binaries proves what the kernel does with them
+  (a binfmt_misc handler, or the ELF loader, accepts or rejects individual
+  files of one triple), and the triple's facts alone would refuse an
+  emulated host that runs such a sweep today. What a run does say, before
+  anything builds: for each tested target lane it attempts, when the
+  triple's `target_os`, `target_arch`, `target_pointer_width` or
+  `target_endian` differ from the compiler host's, one line naming the
+  sweep, the triple and the compiler host (`sweep 'musl': target
+  aarch64-unknown-linux-musl differs from compiler host
+  x86_64-unknown-linux-gnu; ...`). It is a statement of difference, not a
+  verdict, and none is said when the facts agree or cannot be read. `brokkr
+  test` says it too. A runner that may apply to the triple
   (`[target.<triple>].runner`, its `CARGO_TARGET_<TRIPLE>_RUNNER` spelling, or
   a `[target.'cfg(...)']` runner brokkr cannot prove false for the triple) is
-  refused rather than bypassed, so emulated targets (qemu) are not supported.
+  refused rather than bypassed, so emulation through a cargo runner (qemu as
+  `runner`) is not supported; emulation the kernel applies itself
+  (binfmt_misc) is invisible to brokkr and runs like native execution.
   A host runner keeps its usual treatment.
 
   Before anything builds, each lane resolves the triple against the compiler
@@ -373,7 +410,7 @@ Optional. Each entry is a build shape `brokkr check` lints with clippy and, with
 `[rustdoc]`, documents with rustdoc, and never tests. It is for a shape whose
 test phase cannot run on this host or is not wanted: a `[[check]]` entry always
 runs its tests, and a cross-target binary the host cannot execute fails when it
-is listed. The motivating case is linting code behind a
+is first run. The motivating case is linting code behind a
 `cfg(not(target_arch = "x86_64"))` fallback from an x86_64 host:
 
 ```toml

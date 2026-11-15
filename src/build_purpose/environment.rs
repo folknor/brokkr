@@ -149,7 +149,7 @@ fn resolve_sweep_env(
     // `BROKKR_TEST_BIN_DIR` names that directory. Host units cargo builds
     // alongside (build scripts, proc-macro test harnesses) stay outside it,
     // and a host harness that spawns a binary from it gets the target's.
-    let profile_dir = match &sweep.target {
+    let profile_dir = match sweep.target() {
         Some(triple) => format!("{triple}/{profile_dir}"),
         None => profile_dir.to_owned(),
     };

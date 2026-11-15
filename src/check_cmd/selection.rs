@@ -378,11 +378,56 @@ pub(crate) fn resolve_invocation_sweeps(
                 && packages.is_empty()
                 && whole_workspace
                 && !forwarded.narrows_package_selection();
-            let planned = resolve_planned_sweep(sweep, promotion_eligible);
+            let planned = plan_sweep(sweep, project_root, promotion_eligible)?;
             reject_forwarded_package_selectors(&planned, forwarded)?;
             Ok(planned)
         })
         .collect()
+}
+
+/// Plan one declaration: its unification answer and its concrete target.
+/// Every production path from a declaration to a [`PlannedSweep`] comes
+/// through here, so a `{host_arch}` template never reaches a consumer.
+pub(crate) fn plan_sweep(
+    declaration: SweepDecl,
+    project_root: &Path,
+    promotion_eligible: bool,
+) -> Result<PlannedSweep, DevError> {
+    let target = resolve_target(project_root, &declaration)?;
+    Ok(resolve_planned_sweep(
+        declaration,
+        promotion_eligible,
+        target,
+    ))
+}
+
+/// The concrete triple a declaration's `target` names here. A literal is
+/// itself, with nothing probed; a `{host_arch}` template asks the compiler
+/// cargo would run under the sweep's own env (profile env and `--env`
+/// overrides already composed into it) for its host triple.
+fn resolve_target(
+    project_root: &Path,
+    declaration: &SweepDecl,
+) -> Result<Option<String>, DevError> {
+    let Some(spec) = &declaration.target_spec else {
+        return Ok(None);
+    };
+    if !spec.is_template() {
+        return Ok(Some(spec.configured().to_owned()));
+    }
+    let env = super::merged_env(&declaration.env, &[]);
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let effective = crate::rustflags::EffectiveEnv::new(&env_refs);
+    let files = crate::rustflags::read_config_files_under(project_root, effective)?;
+    spec.resolve(project_root, effective, &files)
+        .map(Some)
+        .map_err(|e| {
+            DevError::Config(format!(
+                "sweep '{}': cannot resolve `target = {:?}`: {e}",
+                declaration.label,
+                spec.configured()
+            ))
+        })
 }
 
 /// Resolve the configured unification policy using the invocation's one
@@ -394,9 +439,10 @@ pub(crate) fn resolve_invocation_sweeps(
 pub(crate) fn resolve_planned_sweep(
     declaration: SweepDecl,
     promotion_eligible: bool,
+    target: Option<String>,
 ) -> PlannedSweep {
     let effective = resolve_unification(&declaration, promotion_eligible);
-    PlannedSweep::with_effective_unification(declaration, effective)
+    PlannedSweep::with_effective_unification(declaration, effective, target)
 }
 
 pub(crate) fn resolve_unification(
@@ -617,7 +663,7 @@ impl DeclaredShape {
                 .collect(),
             profile: sweep.profile(),
             unification: sweep.effective_unification(),
-            target: sweep.target.clone(),
+            target: sweep.target().map(str::to_owned),
         }
     }
 
@@ -1123,7 +1169,7 @@ impl Attempt {
     ) -> EffectiveBuild {
         EffectiveBuild {
             profile,
-            target: sweep.target.clone(),
+            target: sweep.target().map(str::to_owned),
             rustflags: sweep.rustflags.clone(),
             env: sweep
                 .env
@@ -2151,7 +2197,9 @@ mod tests {
     fn a_target_is_build_shape_and_leaves_host_shapes_unchanged() {
         let host = sweep("host");
         let musl = with_sweep(sweep("musl"), |d| {
-            d.target = Some("x86_64-unknown-linux-musl".into());
+            d.target_spec = Some(crate::target_platform::TargetSpec::validated(
+                "x86_64-unknown-linux-musl",
+            ));
         });
         let host_shape = DeclaredShape::of(&host);
         let musl_shape = DeclaredShape::of(&musl);
@@ -2174,6 +2222,56 @@ mod tests {
             s(&["--target", "x86_64-unknown-linux-musl"])
         );
         assert!(crate::build_purpose::triple_args(&host).is_empty());
+    }
+
+    // A `{host_arch}` template is planned into the concrete triple, taking
+    // the architecture of the host triple reported by the compiler the
+    // sweep's own env selects, so the shape, the cargo argv and every other
+    // consumer see that triple and never the template. A literal and the
+    // template naming the same triple plan to the same shape.
+    #[cfg(unix)]
+    #[test]
+    fn a_host_arch_target_plans_to_the_compiler_hosts_triple() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::test_scratch::scratch("selection", "host_arch_target");
+        let rustc = root.join("fake-rustc");
+        std::fs::write(
+            &rustc,
+            "#!/bin/sh\necho 'release: 1.99.0'\necho 'host: aarch64-unknown-linux-gnu'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let decl = |spelling: &str| crate::profile::SweepDecl {
+            label: "musl".into(),
+            target_spec: Some(crate::target_platform::TargetSpec::validated(spelling)),
+            env: [("RUSTC".to_owned(), rustc.display().to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let template = plan_sweep(decl("{host_arch}-unknown-linux-musl"), &root, false).unwrap();
+        assert_eq!(template.target(), Some("aarch64-unknown-linux-musl"));
+        assert_eq!(
+            crate::build_purpose::triple_args(&template),
+            s(&["--target", "aarch64-unknown-linux-musl"])
+        );
+        let literal = plan_sweep(decl("aarch64-unknown-linux-musl"), &root, false).unwrap();
+        assert_eq!(
+            DeclaredShape::of(&template).id(),
+            DeclaredShape::of(&literal).id()
+        );
+
+        // A compiler that cannot answer fails planning, naming the sweep.
+        let mut broken = decl("{host_arch}-unknown-linux-musl");
+        broken.env.insert(
+            "RUSTC".into(),
+            root.join("missing-rustc").display().to_string(),
+        );
+        let err = plan_sweep(broken, &root, false).unwrap_err().to_string();
+        assert!(
+            err.contains("sweep 'musl'") && err.contains("{host_arch}"),
+            "{err}"
+        );
     }
 
     fn listed(label: &str, packages: &[&str]) -> PlannedSweep {

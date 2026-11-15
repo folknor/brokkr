@@ -1126,8 +1126,9 @@ pub(super) fn resolve_sweeps(
     test_cfg: Option<&crate::config::TestConfig>,
     check_entries: &[crate::config::CheckEntry],
     sweep_filter: Option<&str>,
+    project_root: &Path,
 ) -> Result<Vec<PlannedSweep>, DevError> {
-    let sweeps = decide_sweeps(test_cfg, check_entries)?;
+    let sweeps = decide_sweeps(test_cfg, check_entries, project_root)?;
     select_sweep(sweeps, sweep_filter)
 }
 
@@ -1142,9 +1143,10 @@ pub(super) fn resolve_sweeps(
 pub(super) fn decide_sweeps(
     test_cfg: Option<&crate::config::TestConfig>,
     check_entries: &[crate::config::CheckEntry],
+    project_root: &Path,
 ) -> Result<Vec<PlannedSweep>, DevError> {
     let sweeps = check_cmd::decide_active_sweeps(check_entries, test_cfg, None, &[], false)?;
-    Ok(sweeps
+    sweeps
         .into_iter()
         .map(|mut s| {
             // The user's `<name>` is the libtest filter, so the declared
@@ -1166,10 +1168,10 @@ pub(super) fn decide_sweeps(
             // is what stops the key being silently ignored by this command
             // while `check` honours it - the two must agree on what a lane
             // means, or a green `brokkr test` would be evidence about a build
-            // `check` never runs.
-            PlannedSweep::resolve(s, false)
+            // `check` never runs. The same goes for a `{host_arch}` target.
+            check_cmd::plan_sweep(s, project_root, false)
         })
-        .collect())
+        .collect()
 }
 
 /// Project each sweep's target selection onto the one package the run tests.

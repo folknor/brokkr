@@ -174,7 +174,7 @@ pub(crate) fn resolve_sweep_target(
     project_root: &Path,
     sweep: &PlannedSweep,
 ) -> Result<Option<crate::target_platform::SweepTarget>, DevError> {
-    let Some(triple) = &sweep.target else {
+    let Some(triple) = sweep.target() else {
         return Ok(None);
     };
     let env = merged_env(&sweep.env, &[]);
@@ -184,6 +184,51 @@ pub(crate) fn resolve_sweep_target(
     crate::target_platform::SweepTarget::resolve(project_root, triple, effective, &files)
         .map(Some)
         .map_err(|e| DevError::Config(format!("sweep '{}': {e}", sweep.label)))
+}
+
+/// The planning line for a tested lane whose target differs from the compiler
+/// host ([`crate::target_platform::differing_host`]), or `None` for a host
+/// lane, an agreeing target, or facts that could not be read.
+///
+/// Said for the attempted lanes only ([`announce_target_hosts`]), and never
+/// enforced. brokkr does not check before building whether this
+/// machine can execute the lane's binaries: no artifact built ahead of the
+/// lane's own proves it (a binfmt_misc handler or the ELF loader can accept
+/// or reject individual files of one triple), and refusing on the facts alone
+/// would refuse emulated hosts that run such sweeps today. Executing the
+/// lane's binaries is what decides, and a failure there names the file and
+/// the OS error.
+fn target_host_note(project_root: &Path, sweep: &PlannedSweep) -> Option<String> {
+    let triple = sweep.target()?;
+    let env = merged_env(&sweep.env, &[]);
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let effective = rustflags::EffectiveEnv::new(&env_refs);
+    let files = rustflags::read_config_files_under(project_root, effective).ok()?;
+    let host = crate::target_platform::differing_host(project_root, triple, effective, &files)?;
+    Some(format!(
+        "sweep '{}': target `{triple}` differs from compiler host `{host}`; its tests run only if \
+         this machine executes the binaries built for it, which brokkr does not check before \
+         building",
+        sweep.label
+    ))
+}
+
+/// Say [`target_host_note`] for each lane its test selection attempts: an
+/// excluded lane, a disabled test phase or a lint lane owes no execution.
+/// `check` says it at planning, `brokkr test` once its selection is settled.
+pub(crate) fn announce_target_hosts<'a>(
+    project_root: &Path,
+    sweeps: &[PlannedSweep],
+    entries: impl Iterator<Item = &'a LaneEntry>,
+    say: impl Fn(&str),
+) {
+    for (sweep, entry) in sweeps.iter().zip(entries) {
+        if matches!(entry, LaneEntry::Attempt(_))
+            && let Some(note) = target_host_note(project_root, sweep)
+        {
+            say(&note);
+        }
+    }
 }
 
 /// A target sweep's binaries are executed by brokkr itself in every lane, so
@@ -203,10 +248,10 @@ pub(crate) fn refuse_target_runner(
     };
     Err(DevError::Config(format!(
         "sweep '{}' targets `{}`, and {at}: brokkr runs a target sweep's binaries itself, so a \
-         runner that may apply to them is refused rather than bypassed. A target the host cannot \
-         execute directly is not supported.",
+         runner that may apply to them is refused rather than bypassed: emulation through a \
+         runner is not supported.",
         sweep.label,
-        sweep.target.as_deref().unwrap_or_default()
+        sweep.target().unwrap_or_default()
     )))
 }
 
@@ -218,7 +263,7 @@ pub(crate) fn refuse_target_sweep_args(
     forwarded: &ForwardedArgs,
 ) -> Result<(), DevError> {
     let offending = forwarded.platform_overrides();
-    if sweep.target.is_none() || offending.is_empty() {
+    if sweep.target().is_none() || offending.is_empty() {
         return Ok(());
     }
     Err(DevError::Config(format!(

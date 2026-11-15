@@ -1902,15 +1902,16 @@ fn validate_check_entry_target(entry: &CheckEntry, at: &str) -> Result<(), DevEr
     let Some(target) = &entry.target else {
         return Ok(());
     };
-    let bare = !target.is_empty()
-        && !target.ends_with(".json")
-        && target
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    if !bare {
+    // Spelling only: what a `{host_arch}` template names depends on the host,
+    // and config load must not.
+    if crate::target_platform::TargetSpec::parse(target).is_none() {
         return Err(DevError::Config(format!(
             "{at} sets `target = {target:?}`; it must be a bare target triple \
-             such as \"x86_64-unknown-linux-musl\" (custom .json target specs are not supported)."
+             such as \"x86_64-unknown-linux-musl\", or one opening with `{}` for the \
+             host's architecture (\"{}-unknown-linux-musl\"). Custom .json target specs \
+             are not supported.",
+            crate::target_platform::HOST_ARCH,
+            crate::target_platform::HOST_ARCH,
         )));
     }
     if entry.env.contains_key("CARGO_BUILD_TARGET") {

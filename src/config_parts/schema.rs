@@ -1389,16 +1389,20 @@ pub struct CheckEntry {
     /// The target triple this sweep compiles and runs for, passed as
     /// `--target` to every cargo run of the sweep. Unset builds for the host,
     /// which is what every sweep did before this key existed. A bare triple
-    /// name (`x86_64-unknown-linux-musl`); custom `.json` target specs are
-    /// not accepted, because brokkr derives the artifact directory from the
-    /// name.
+    /// name (`x86_64-unknown-linux-musl`), or one opening with `{host_arch}`
+    /// (`{host_arch}-unknown-linux-musl`), which planning resolves from the
+    /// compiler host triple; load checks the spelling only. Custom `.json`
+    /// target specs are not accepted, because brokkr derives the artifact
+    /// directory from the name.
     ///
     /// Part of the build shape: `cfg(target_env)` and friends decide which
     /// code exists, so a host and a musl sweep of the same features are two
     /// compiles and two lint surfaces. The sweep's binaries are executed
     /// directly, so the host must be able to run them: a triple with a
     /// configured runner is refused, and one the host cannot execute fails
-    /// when its binaries are listed.
+    /// when its binaries are first run. Nothing is refused before building on
+    /// that ground; a triple whose facts differ from the compiler host's is
+    /// only said so.
     #[serde(default)]
     pub target: Option<String>,
     /// Run this sweep's test binaries concurrently under a budget of

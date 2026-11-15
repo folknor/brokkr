@@ -411,9 +411,9 @@ pub(crate) fn sweep_args(
 /// cargo runs, or nothing for a host sweep.
 pub(crate) fn triple_args(sweep: &PlannedSweep) -> Vec<String> {
     sweep
-        .target
+        .target()
         .iter()
-        .flat_map(|t| ["--target".to_owned(), t.clone()])
+        .flat_map(|t| ["--target".to_owned(), (*t).to_owned()])
         .collect()
 }
 

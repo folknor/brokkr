@@ -476,11 +476,16 @@ mod clippy_sweep_tests {
         .unwrap();
         let lint = [lint];
         let s = build_clippy_sweep(&[], &lint, &[], false, &[], false, Some("arm"), &[]).unwrap();
-        assert_eq!(s.target.as_deref(), Some("aarch64-unknown-linux-gnu"));
+        assert_eq!(
+            s.target_spec
+                .as_ref()
+                .map(crate::target_platform::TargetSpec::configured),
+            Some("aarch64-unknown-linux-gnu")
+        );
         assert_eq!(s.env.get("CC").map(String::as_str), Some("arm-cc"));
         // A probe that did not name it compiles none of its shape.
         let adhoc = build_clippy_sweep(&[], &lint, &[], false, &[], false, None, &[]).unwrap();
-        assert!(adhoc.env.is_empty() && adhoc.target.is_none());
+        assert!(adhoc.env.is_empty() && adhoc.target_spec.is_none());
         let err =
             build_clippy_sweep(&[], &lint, &[], false, &[], false, Some("x"), &[]).unwrap_err();
         assert!(err.to_string().contains("[[lint_sweep]]"), "{err}");

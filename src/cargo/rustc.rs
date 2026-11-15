@@ -42,6 +42,48 @@ pub(crate) fn load(root: &Path) -> Result<Arc<RustcInfo>, DevError> {
     result
 }
 
+/// What a compiler selection is keyed by: the directory it runs in, the
+/// program, and the env it runs under.
+type SelectedKey = (PathBuf, String, Vec<(String, String)>);
+
+static SELECTED: OnceLock<Mutex<HashMap<SelectedKey, CachedLoad>>> = OnceLock::new();
+
+/// As [`load`], for a compiler chosen by cargo's own precedence rather than
+/// the `rustc` on `PATH` (a sweep's `RUSTC`, `build.rustc`): `program` run in
+/// `root` under `env`, once per distinct triple of the three.
+pub(crate) fn load_selected(
+    root: &Path,
+    program: &str,
+    env: &[(&str, &str)],
+) -> Result<Arc<RustcInfo>, DevError> {
+    let key: SelectedKey = (
+        root.to_owned(),
+        program.to_owned(),
+        env.iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect(),
+    );
+    let cache = SELECTED.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(cached) = cache.get(&key) {
+        return match cached {
+            Ok(info) => Ok(Arc::clone(info)),
+            Err(error) => Err(clone_error(error)),
+        };
+    }
+    let result = output::run_captured_with_env(program, &["-vV"], root, env)
+        .and_then(|captured| parse_captured(program, &captured))
+        .map(Arc::new);
+    let cached_result = match &result {
+        Ok(info) => Ok(Arc::clone(info)),
+        Err(error) => Err(Arc::new(clone_error(error))),
+    };
+    cache.insert(key, cached_result);
+    result
+}
+
 fn clone_error(error: &DevError) -> DevError {
     match error {
         DevError::Build(message) => DevError::Build(message.clone()),
@@ -57,9 +99,13 @@ fn clone_error(error: &DevError) -> DevError {
 
 fn load_uncached(root: &Path) -> Result<RustcInfo, DevError> {
     let captured = output::run_captured("rustc", &["-vV"], root)?;
+    parse_captured("rustc", &captured)
+}
+
+fn parse_captured(program: &str, captured: &output::CapturedOutput) -> Result<RustcInfo, DevError> {
     if !captured.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!("rustc -vV failed: {stderr}")));
+        return Err(DevError::Build(format!("{program} -vV failed: {stderr}")));
     }
 
     let text = String::from_utf8_lossy(&captured.stdout);
@@ -77,10 +123,11 @@ fn load_uncached(root: &Path) -> Result<RustcInfo, DevError> {
     }
 
     Ok(RustcInfo {
-        host: host
-            .ok_or_else(|| DevError::Build("rustc -vV did not report a host triple".to_owned()))?,
+        host: host.ok_or_else(|| {
+            DevError::Build(format!("{program} -vV did not report a host triple"))
+        })?,
         release: release
-            .ok_or_else(|| DevError::Build("rustc -vV did not report a release".to_owned()))?,
+            .ok_or_else(|| DevError::Build(format!("{program} -vV did not report a release")))?,
         commit_hash,
     })
 }

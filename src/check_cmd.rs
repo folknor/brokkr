@@ -64,12 +64,11 @@ pub(crate) use selection::{
     AdmissionNote, AdmissionRule, Attempt, CheckSelections, DeclaredShape, Excluded,
     ExclusionCause, ForwardedArgs, GatedPhases, LaneEntry, MemberSelection, PackageSource,
     PhaseSelection, ReachLedger, ReproLine, Resolution, ResolutionRun, RunSweeps, Selection,
-    SelectionPhase, ShapeId, derive_doctest_carriers, feature_drop_lines, join_notes,
+    SelectionPhase, ShapeId, derive_doctest_carriers, feature_drop_lines, join_notes, plan_sweep,
     reject_direct_execution_args, reject_forwarded_package_selectors, resolve_invocation_sweeps,
-    resolve_planned_sweep,
 };
 #[cfg(test)]
-pub(crate) use selection::{package_args, resolve_unification};
+pub(crate) use selection::{package_args, resolve_planned_sweep, resolve_unification};
 include!("check_cmd/test_execution.rs");
 include!("check_cmd/test_execution_tests.rs");
 include!("check_cmd/isolate.rs");

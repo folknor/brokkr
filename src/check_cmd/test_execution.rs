@@ -104,7 +104,7 @@ pub(crate) fn describe_sweep(
     }
     // Same reason: a target sweep compiles everything again under
     // `target/<triple>/`.
-    if let Some(triple) = &sweep.target {
+    if let Some(triple) = sweep.target() {
         parts.push(format!("target {triple}"));
     }
 
@@ -334,7 +334,7 @@ impl SerialShim {
             &ForwardedArgs::parse(extra_args),
             env,
             &sweep.env,
-            sweep.target.is_some(),
+            sweep.target().is_some(),
         ) {
             Some(reason) => Self::Unavailable(reason),
             None => Self::Attach,
