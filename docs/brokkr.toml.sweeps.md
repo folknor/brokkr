@@ -529,7 +529,12 @@ available in one last-level cache domain** - a full CCX/CCD on AMD, the die on
 Intel when the process can use that whole domain. The detected cache CPUs are
 intersected with the calling thread's affinity (`Cpus_allowed_list` in procfs),
 so a cpuset or affinity restriction does not count CPUs the process cannot
-run on. `brokkr env` prints the resulting number on its `l3 domain:` line.
+run on. `brokkr env` prints this topology count on its `l3 domain:` line.
+The default budget is additionally capped by cgroup v2 `cpu.max` quotas in the
+calling thread's group and its visible ancestors: quota divided by period,
+rounded down, with a minimum of one. Unlimited, unreadable or malformed quota
+files add no cap. Ancestors hidden by a cgroup mount or namespace cannot be
+probed. An explicit `budget = N` bypasses this default and its quota cap.
 
 Deliberately not logical CPUs. Two tests on the SMT siblings of one core
 contend for that core's execution resources, and on a chiplet part two tests on

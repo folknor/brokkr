@@ -43,6 +43,8 @@
 //! with a trimmed sysfs) falls back to physical cores in the allowed set, and
 //! no usable topology or affinity list falls back to `available_parallelism()`.
 
+mod quota;
+
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -192,12 +194,13 @@ pub(crate) fn cache_domain_cores_at(status_path: &Path, cpu_root: &Path) -> Opti
 /// part - accepted because a default that is too high is a slow test run,
 /// while a default of zero is no test run at all.
 pub(crate) fn cache_domain_cores_or_default() -> u32 {
-    cache_domain_cores_or_default_at(
+    let cores = cache_domain_cores_or_default_at(
         Path::new(PROC_STATUS),
         Path::new(CPU_ROOT),
         &DEFAULT_CPU_TOPOLOGY_TUNABLES,
         std::thread::available_parallelism,
-    )
+    );
+    quota::cpu_budget().map_or(cores, |quota| cores.min(quota))
 }
 
 pub(crate) fn cache_domain_cores_or_default_at(

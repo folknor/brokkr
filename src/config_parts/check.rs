@@ -256,13 +256,8 @@ pub fn rustflags_target_key(rustflags: &[String]) -> Option<String> {
 }
 
 impl ParallelBinaries {
-    /// The budget to run under, resolving the unset case against this
-    /// machine's cache domain.
-    ///
-    /// Resolved at config load rather than at run time so the number is
-    /// visible to everything downstream - `brokkr env` reports the same
-    /// figure this returns, which is what makes a machine-dependent default
-    /// auditable rather than mysterious.
+    /// The budget to run under: an explicit value, or this machine's cache
+    /// domain capped by the calling thread's visible cgroup v2 CPU quotas.
     pub fn resolved_budget(self) -> u32 {
         self.budget
             .unwrap_or_else(crate::cpu_topology::cache_domain_cores_or_default)

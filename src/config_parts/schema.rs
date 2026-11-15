@@ -2359,6 +2359,7 @@ pub struct ParallelBinaries {
     ///
     /// Unset means **the physical cores sharing one last-level cache** - a
     /// full CCX/CCD on AMD, the die on Intel (see `crate::cpu_topology`).
+    /// Capped by visible cgroup v2 CPU quotas when present.
     /// Not logical CPUs: two tests on the SMT siblings of one core contend
     /// for that core, and on a chiplet part two tests on separate dies pay
     /// fabric latency on every shared line. Both look like parallelism
