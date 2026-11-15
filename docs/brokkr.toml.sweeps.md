@@ -90,7 +90,26 @@ env = { HIGH_PRECISION = "1" }
   carrying *identical* flags share one dir (so several madsim legs compile the
   simulator once). There is no key to set - isolation is automatic and derived
   from the flags. Setting `RUSTFLAGS` or `CARGO_TARGET_DIR` in `env` alongside
-  `rustflags` is a parse error (one unambiguous source each).
+  `rustflags` is a parse error (one unambiguous source each). An argument
+  holding a space (`--check-cfg=cfg(mode, values("a"))`) is kept whole: the
+  value moves to `CARGO_ENCODED_RUSTFLAGS`, the inherited `RUSTFLAGS` decoded
+  into it.
+
+  Cargo never hands `RUSTFLAGS` to rustdoc, so the `--cfg` and `--check-cfg`
+  entries (only those) are also placed in rustdocflags, wherever the sweep's
+  rustdoc runs: the rustdoc phase's `cargo doc`, and every `cargo test` of the
+  sweep's test lanes, so its doctests (inline, `doc_only`, or a derived
+  carrier) are collected and compiled under the cfg their library was built
+  with. They go where cargo will read them without displacing the project's
+  own rustdocflags: appended to a set `CARGO_ENCODED_RUSTDOCFLAGS` or
+  `RUSTDOCFLAGS` (the sweep's `env` included), else `--config` at the live
+  `target."cfg(all())".rustdocflags` or `build.rustdocflags` layer. A unit
+  cargo gives no rustflags gets none of these either (a proc-macro crate under
+  a `target` sweep). One case is unsupported: when a `target.*.rustdocflags`
+  table in the cargo config has a selector brokkr cannot evaluate, the flags
+  ride `build.rustdocflags` on a guess and the run warns once per sweep; if the
+  table applies, rustdoc runs without the cfg. Setting `RUSTDOCFLAGS` in the
+  sweep's `env` makes the placement exact.
 - `feature_unification` (optional, default `"auto"`) - which feature graph this
   sweep's cargo invocations resolve against: `"auto"`, `"selected"`,
   `"workspace"` or `"package"`. The three explicit values mirror cargo's own
@@ -292,7 +311,8 @@ env = { HIGH_PRECISION = "1" }
 
   Cargo semantics worth knowing: under `--target`, `RUSTFLAGS` and the
   `rustflags` tables reach the target's units only, not build scripts or
-  proc-macros, so a sweep's `rustflags` and the `[lints] allow` flags do too.
+  proc-macros, so a sweep's `rustflags` and the `[lints] allow` flags do too,
+  and so do the cfg entries carried into rustdocflags.
   `[target.'cfg(...)']` tables are matched against the triple's facts from
   `rustc --print cfg --target`, for the names the triple alone fixes
   (`target_arch`, `target_os`, `target_family`, `target_env`, `target_vendor`,

@@ -126,7 +126,9 @@ deliver live output. Rustdoc captures each doctest subprocess itself, through
 its own separate `--no-capture` option; passing `--nocapture` via cargo's `--`
 split disables only the outer libtest capture. So a doc-only sweep's doctest
 output is still buffered until the doctest completes. Fixing that means passing
-rustdoc its own flag through `RUSTDOCFLAGS`, which brokkr does not do yet.
+rustdoc its own flag through its rustdocflags. Brokkr places rustdocflags only
+for a sweep's `--cfg` rustflags (see `rustflags` in `brokkr man sweeps`), not
+this flag.
 
 Sweep selection: if `[test].default_profile` is set, the test runs against
 every `[[check]]` entry the profile references; else if `[[check]]` is

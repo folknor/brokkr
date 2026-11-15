@@ -13,15 +13,15 @@
 //! lists it in its `-Z unstable-options --help`; a stable toolchain rejects
 //! `-Z` and the phase renders as before. The probe runs once per process.
 //!
-//! The flags reach rustdoc through cargo's rustdocflags, which follow the same
-//! one-source-wins rule as rustflags (see `rustflags.rs`):
-//! `CARGO_ENCODED_RUSTDOCFLAGS`, then `RUSTDOCFLAGS`, then the config tables.
-//! A set env source is appended to, never replaced, so a project's own
-//! rustdoc flags survive. Otherwise the flags go in as
-//! `--config build.rustdocflags`, which cargo merges after the project's
-//! entries. If a matching `target.*.rustdocflags` table outranks that layer,
-//! the injection is inert and the phase renders as before - slower, never
-//! wrong.
+//! The flags reach rustdoc through cargo's rustdocflags, placed by the same
+//! decision that places brokkr's rustflags (`rustflags::place` with
+//! `FlagKind::Rustdoc`), beside the sweep's own `--cfg` flags: a set env
+//! source is appended to, never replaced, so a project's own rustdoc flags
+//! survive; otherwise the flags go in as `--config` at whichever of
+//! `target."cfg(all())".rustdocflags` and `build.rustdocflags` is live,
+//! merged after the project's entries. When the layer is a guess and a target
+//! table does outrank it, the injection is inert and the phase renders as
+//! before - slower, never wrong.
 //!
 //! Known gap: a `build.rustdoc` config entry naming another rustdoc is not
 //! followed by the probe (`RUSTDOC` in the environment is). Should that
@@ -31,17 +31,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 /// The flags that turn rustdoc's rendering off.
-const FLAGS: [&str; 2] = ["-Zunstable-options", "--check"];
-
-/// Where the flags go for one cargo invocation.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Placement {
-    /// An env source is live: set this key to this value (the old value with
-    /// the flags appended).
-    Env { key: &'static str, value: String },
-    /// No env source: these extra cargo arguments.
-    Config(Vec<String>),
-}
+pub(crate) const FLAGS: [&str; 2] = ["-Zunstable-options", "--check"];
 
 /// Whether the rustdoc cargo will invoke supports `--check`. `env` is the
 /// cargo invocation's extra env, consulted for `RUSTDOC` ahead of the
@@ -71,44 +61,6 @@ fn help_lists_check(help: &str) -> bool {
         let line = line.trim_start();
         line == "--check" || line.starts_with("--check ")
     })
-}
-
-/// Decide where the flags go, given the invocation's extra env.
-pub fn place(env: &[(String, String)]) -> Placement {
-    place_with(env, |key| std::env::var(key).ok())
-}
-
-/// [`place`] with the process environment injected, for tests. Presence
-/// decides, as cargo's own rule does: a set-but-empty source still shadows
-/// every config table.
-fn place_with(env: &[(String, String)], process: impl Fn(&str) -> Option<String>) -> Placement {
-    let lookup = |key: &str| {
-        env.iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.clone())
-            .or_else(|| process(key))
-    };
-    if let Some(old) = lookup("CARGO_ENCODED_RUSTDOCFLAGS") {
-        return Placement::Env {
-            key: "CARGO_ENCODED_RUSTDOCFLAGS",
-            value: append(&old, '\u{1f}'),
-        };
-    }
-    if let Some(old) = lookup("RUSTDOCFLAGS") {
-        return Placement::Env {
-            key: "RUSTDOCFLAGS",
-            value: append(&old, ' '),
-        };
-    }
-    let list = FLAGS
-        .iter()
-        .map(|f| format!("\"{f}\""))
-        .collect::<Vec<_>>()
-        .join(",");
-    Placement::Config(vec![
-        "--config".into(),
-        format!("build.rustdocflags=[{list}]"),
-    ])
 }
 
 /// Make each doc unit the run just documented look up to date to cargo.
@@ -191,24 +143,9 @@ fn documented_targets(stdout: &str) -> Vec<String> {
     out
 }
 
-fn append(old: &str, sep: char) -> String {
-    let mut out = old.to_owned();
-    for flag in FLAGS {
-        if !out.is_empty() {
-            out.push(sep);
-        }
-        out.push_str(flag);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn none(_: &str) -> Option<String> {
-        None
-    }
 
     #[test]
     fn help_matches_check_but_not_its_prefixed_siblings() {
@@ -241,55 +178,6 @@ mod tests {
         assert_eq!(
             documented_targets(stdout),
             vec!["brokkr-rustc-guard".to_owned()]
-        );
-    }
-
-    #[test]
-    fn no_env_source_uses_config() {
-        assert_eq!(
-            place_with(&[], none),
-            Placement::Config(vec![
-                "--config".into(),
-                "build.rustdocflags=[\"-Zunstable-options\",\"--check\"]".into()
-            ])
-        );
-    }
-
-    #[test]
-    fn plain_env_is_appended_to() {
-        let env = vec![("RUSTDOCFLAGS".to_owned(), "--cfg docsrs".to_owned())];
-        assert_eq!(
-            place_with(&env, none),
-            Placement::Env {
-                key: "RUSTDOCFLAGS",
-                value: "--cfg docsrs -Zunstable-options --check".into()
-            }
-        );
-    }
-
-    #[test]
-    fn empty_env_still_wins() {
-        let env = vec![("RUSTDOCFLAGS".to_owned(), String::new())];
-        assert_eq!(
-            place_with(&env, none),
-            Placement::Env {
-                key: "RUSTDOCFLAGS",
-                value: "-Zunstable-options --check".into()
-            }
-        );
-    }
-
-    #[test]
-    fn encoded_outranks_plain_across_sources() {
-        let env = vec![("RUSTDOCFLAGS".to_owned(), "-Dwarnings".to_owned())];
-        let process =
-            |k: &str| (k == "CARGO_ENCODED_RUSTDOCFLAGS").then(|| "--cfg\u{1f}x".to_owned());
-        assert_eq!(
-            place_with(&env, process),
-            Placement::Env {
-                key: "CARGO_ENCODED_RUSTDOCFLAGS",
-                value: "--cfg\u{1f}x\u{1f}-Zunstable-options\u{1f}--check".into()
-            }
         );
     }
 }

@@ -362,7 +362,7 @@ mod tests {
         let run = one_package(&sweep, "pkg");
         let shape = BuildShape {
             sweep: &sweep,
-            allow_args: &[],
+            config_args: &[],
             run: &run,
             jobs: None,
             profile: crate::config::SweepProfile::Dev,
@@ -402,7 +402,7 @@ mod tests {
         let run = one_package(&sweep, "pkg");
         let shape = BuildShape {
             sweep: &sweep,
-            allow_args: &[],
+            config_args: &[],
             run: &run,
             jobs: None,
             profile: crate::config::SweepProfile::Dev,
@@ -575,7 +575,7 @@ mod tests {
         let one = one_package(&sweep, "pkg");
         let shape = BuildShape {
             sweep: &sweep,
-            allow_args: &[],
+            config_args: &[],
             run: &one,
             jobs: None,
             profile: crate::config::SweepProfile::Dev,
@@ -1240,7 +1240,7 @@ include_ignored = false
         let run = single_run(&sweep, attempt).unwrap();
         let shape = BuildShape {
             sweep: &sweep,
-            allow_args: &[],
+            config_args: &[],
             run,
             jobs: None,
             profile: crate::config::SweepProfile::Dev,
@@ -1287,7 +1287,7 @@ include_ignored = false
             attempt,
             profile: crate::config::SweepProfile::Dev,
             env: Vec::new(),
-            allow_args: Vec::new(),
+            config_args: Vec::new(),
             focused: Some(FocusedPlan {
                 runs: Vec::new(),
                 searched: 1,

@@ -239,6 +239,16 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
+### The rustdoc stamp assumes every doc unit ran under `--check` (2026-11-15)
+
+Under a `[[check]] target` sweep, cargo hands a host unit (a proc-macro
+crate's doc unit) no rustdocflags at all, from any source, so `--check` does
+not reach it and it renders normally. `rustdoc_check::stamp_outputs` still
+stamps it as if lint-only. Harmless today (the stamp only creates a
+placeholder where `index.html` is absent and sets the mtime to the pre-launch
+time), but the doc comment's premise that every reported unit wrote nothing
+is false for those units. Wanted: say so at the stamp, or skip host units.
+
 ### A results param filter cannot tell collections apart by comma (2026-11-09)
 
 `src/bench/store/list.rs` matches a param filter against the run's keys

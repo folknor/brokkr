@@ -248,7 +248,7 @@ struct PlannedRun<'a> {
 struct DirectExtras<'a> {
     attempt: &'a Attempt,
     libtest_extra: &'a [String],
-    allow_args: &'a [String],
+    config_args: &'a [String],
     /// The forwarded cargo args the prebuild carried (target selectors
     /// already applied to the plan), for each binary's reproduction line.
     forwarded: ForwardedArgs,
@@ -321,7 +321,7 @@ fn run_one_binary(
             sweep,
             binary,
             extras.attempt.run_for(run.resolution.as_deref()),
-            extras.allow_args,
+            extras.config_args,
             &extras.forwarded,
         )
         .as_str()
@@ -461,7 +461,7 @@ fn run_parallel_sweep(
     let extras = DirectExtras {
         attempt,
         libtest_extra: &prepared.libtest_extra,
-        allow_args: &prepared.env.allow_args,
+        config_args: &prepared.env.config_args,
         forwarded: ForwardedArgs::parse(&prepared.cargo_extra),
     };
 

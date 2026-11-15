@@ -1464,6 +1464,54 @@ warning: `b` (manifest) generated 1 warning
             .contains("-Aclippy::assert_is_empty"));
     }
 
+    #[test]
+    fn a_sweeps_cfg_rustflags_reach_its_own_rustdocflags() {
+        // brokkr#172: the sweep's own RUSTDOCFLAGS is the live source, so the
+        // cfg is appended to it and the composed pair replaces the key - the
+        // rustdoc phase and every test-lane cargo run take this env as is.
+        let sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
+            label: "hooks".into(),
+            rustflags: vec!["--cfg".into(), "hooks".into(), "-Dwarnings".into()],
+            ..crate::profile::SweepDecl::default()
+        });
+        let mut env = vec![
+            ("RUSTDOCFLAGS".to_owned(), "--cfg docsrs".to_owned()),
+            ("OTHER".to_owned(), "1".to_owned()),
+        ];
+        let mut args = vec!["--config".to_owned(), "build.rustflags=[\"-Ax\"]".to_owned()];
+        let placed = crate::build_purpose::environment::place_sweep_rustdocflags(
+            Path::new("."),
+            &sweep,
+            None,
+            &["--check"],
+            &mut env,
+            &mut args,
+        )
+        .unwrap();
+        let want = ("RUSTDOCFLAGS".to_owned(), "--cfg docsrs --cfg hooks --check".to_owned());
+        assert_eq!(placed, Some(want.clone()));
+        assert_eq!(env.iter().filter(|(k, _)| k == "RUSTDOCFLAGS").count(), 1);
+        assert!(env.contains(&want));
+        assert_eq!(args.len(), 2, "an env placement adds no --config: {args:?}");
+
+        // A sweep with no cfg rustflags and no extras places nothing.
+        let plain = crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default());
+        let before = env.clone();
+        assert_eq!(
+            crate::build_purpose::environment::place_sweep_rustdocflags(
+                Path::new("."),
+                &plain,
+                None,
+                &[],
+                &mut env,
+                &mut args,
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(env, before);
+    }
+
     /// The one request a sweep's own selection runs as in `phase`.
     fn only_run(sweep: &PlannedSweep, phase: SelectionPhase) -> ResolutionRun {
         let sel = PhaseSelection::for_check(phase, std::slice::from_ref(sweep), &[], &FeatureOracle::unavailable())

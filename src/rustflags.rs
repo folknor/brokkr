@@ -34,27 +34,88 @@
 //! root upwards, plus `$CARGO_HOME/config{.toml}`. A user-level
 //! `[target.<host-triple>] rustflags` is common (linker choice, `target-cpu`),
 //! and it decides the winning layer for every project on that machine.
+//!
+//! Rustdoc's flags follow the identical rule with the key spelled
+//! `rustdocflags` (`CARGO_ENCODED_RUSTDOCFLAGS`, `RUSTDOCFLAGS`, the target
+//! tables, `build.rustdocflags`) - cargo resolves both through one function
+//! parametrised by the kind - so every decision here takes a [`FlagKind`].
+//! Brokkr adds to rustdocflags twice: the rustdoc phase's lint-only `--check`
+//! (`rustdoc_check.rs`), and the `--cfg` / `--check-cfg` entries of a sweep's
+//! `rustflags` ([`cfg_args`]), which cargo never hands to rustdoc on its own.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-/// Cargo's two environment rustflags sources and their precedence. Keep the
-/// raw values so presence, including a set-but-empty or non-Unicode value,
-/// cannot be confused with absence by a caller.
+/// Which of cargo's two extra-flag families a decision is about. Cargo reads
+/// both by the same four-source rule; only the names differ.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum FlagKind {
+    /// `rustflags`, handed to rustc.
+    #[default]
+    Rustc,
+    /// `rustdocflags`, handed to rustdoc: `cargo doc` and the doctests of
+    /// `cargo test`.
+    Rustdoc,
+}
+
+impl FlagKind {
+    /// The config key, in `build.<key>` and `target.<selector>.<key>`.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Rustc => "rustflags",
+            Self::Rustdoc => "rustdocflags",
+        }
+    }
+
+    fn plain_env(self) -> &'static str {
+        match self {
+            Self::Rustc => "RUSTFLAGS",
+            Self::Rustdoc => "RUSTDOCFLAGS",
+        }
+    }
+
+    fn encoded_env(self) -> &'static str {
+        match self {
+            Self::Rustc => "CARGO_ENCODED_RUSTFLAGS",
+            Self::Rustdoc => "CARGO_ENCODED_RUSTDOCFLAGS",
+        }
+    }
+
+    /// `CARGO_TARGET_<TRIPLE>_<KIND>`, the environment spelling of
+    /// `target.<triple>.<key>`.
+    fn target_env_var(self, triple: &str) -> String {
+        format!(
+            "CARGO_TARGET_{}_{}",
+            triple.to_uppercase().replace('-', "_"),
+            self.plain_env()
+        )
+    }
+}
+
+/// Cargo's two environment sources of one flag kind and their precedence.
+/// Keep the raw values so presence, including a set-but-empty or non-Unicode
+/// value, cannot be confused with absence by a caller.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RustflagsEnv {
+    kind: FlagKind,
     encoded: Option<std::ffi::OsString>,
     plain: Option<std::ffi::OsString>,
 }
 
 impl RustflagsEnv {
-    /// Resolve the values one cargo process will inherit. Explicit overrides
-    /// take precedence over brokkr's environment, just as they do for the
-    /// other cargo launch settings.
+    /// Resolve the rustflags values one cargo process will inherit. Explicit
+    /// overrides take precedence over brokkr's environment, just as they do
+    /// for the other cargo launch settings.
     pub(crate) fn from(env: EffectiveEnv<'_>) -> Self {
+        Self::for_kind(FlagKind::Rustc, env)
+    }
+
+    /// [`Self::from`] for either flag kind.
+    pub(crate) fn for_kind(kind: FlagKind, env: EffectiveEnv<'_>) -> Self {
         Self {
-            encoded: env.get_os("CARGO_ENCODED_RUSTFLAGS"),
-            plain: env.get_os("RUSTFLAGS"),
+            kind,
+            encoded: env.get_os(kind.encoded_env()),
+            plain: env.get_os(kind.plain_env()),
         }
     }
 
@@ -66,14 +127,25 @@ impl RustflagsEnv {
     fn active(&self) -> Option<(&'static str, &std::ffi::OsString)> {
         self.encoded
             .as_ref()
-            .map(|value| ("CARGO_ENCODED_RUSTFLAGS", value))
-            .or_else(|| self.plain.as_ref().map(|value| ("RUSTFLAGS", value)))
+            .map(|value| (self.kind.encoded_env(), value))
+            .or_else(|| {
+                self.plain
+                    .as_ref()
+                    .map(|value| (self.kind.plain_env(), value))
+            })
     }
 
     /// Append UTF-8 brokkr flags to the one source cargo reads. A non-Unicode
     /// inherited value cannot be safely copied through the string-based env
     /// interface used by cargo launchers, so refuse instead of falling back
     /// to the lower-priority source or silently replacing project flags.
+    ///
+    /// The plain form is split on spaces by cargo, so an addition that would
+    /// not survive that split - one holding a space, an empty one, one with
+    /// surrounding whitespace (`--check-cfg=cfg(mode, values("a"))`) - moves
+    /// the value to the encoded form instead: the plain value decoded as cargo
+    /// decodes it, then the additions, each argument kept whole. The plain
+    /// variable is left set; cargo ignores it once the encoded one is.
     pub(crate) fn compose(
         &self,
         additions: &[String],
@@ -82,30 +154,40 @@ impl RustflagsEnv {
             return Ok(None);
         }
         let empty = std::ffi::OsString::new();
-        let (key, existing) = self.active().unwrap_or(("RUSTFLAGS", &empty));
+        let (key, existing) = self.active().unwrap_or((self.kind.plain_env(), &empty));
         let existing = existing.to_str().ok_or_else(|| {
             crate::error::DevError::Config(format!(
-                "{key} is set to a non-UTF-8 value; brokkr cannot append rustflags without changing it"
+                "{key} is set to a non-UTF-8 value; brokkr cannot append {} without changing it",
+                self.kind.key()
             ))
         })?;
-        let value = if key == "CARGO_ENCODED_RUSTFLAGS" {
+        let encoded = self.kind.encoded_env();
+        if key == encoded {
             let mut parts: Vec<String> = if existing.is_empty() {
                 Vec::new()
             } else {
                 existing.split('\u{1f}').map(str::to_owned).collect()
             };
             parts.extend(additions.iter().cloned());
-            parts.join("\u{1f}")
-        } else {
-            let mut value = existing.to_owned();
-            for flag in additions {
-                if !value.trim().is_empty() {
-                    value.push(' ');
-                }
-                value.push_str(flag);
+            return Ok(Some((key.to_owned(), parts.join("\u{1f}"))));
+        }
+        if !additions.iter().all(|a| survives_plain_split(a)) {
+            let mut parts: Vec<String> = existing
+                .split(' ')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect();
+            parts.extend(additions.iter().cloned());
+            return Ok(Some((encoded.to_owned(), parts.join("\u{1f}"))));
+        }
+        let mut value = existing.to_owned();
+        for flag in additions {
+            if !value.trim().is_empty() {
+                value.push(' ');
             }
-            value
-        };
+            value.push_str(flag);
+        }
         Ok(Some((key.to_owned(), value)))
     }
 
@@ -151,6 +233,74 @@ impl RustflagsEnv {
         }
         notes
     }
+}
+
+/// Whether one argument comes back unchanged from cargo's decoding of a plain
+/// `RUSTFLAGS` / `RUSTDOCFLAGS` value: split on spaces, each piece trimmed,
+/// empty pieces dropped.
+fn survives_plain_split(arg: &str) -> bool {
+    !arg.is_empty() && !arg.contains(' ') && arg.trim() == arg
+}
+
+/// The `--cfg` and `--check-cfg` arguments of a rustflags list, in order and
+/// verbatim, both spellings (`--cfg x`, `--cfg=x`). These are what rustdoc must
+/// see to resolve `cfg` as the sweep's rustc build does; every other rustc flag
+/// stays rustc's. The list is walked as options and their operands, so the
+/// operand of another option (`-C`, `--cap-lints`, ...) is never read as an
+/// option of its own. A trailing `--cfg` with no operand is carried as it is,
+/// for rustdoc to reject as rustc does, never quietly repaired.
+pub(crate) fn cfg_args(rustflags: &[String]) -> Vec<String> {
+    /// rustc options that take their operand as the next argument.
+    const TAKES_OPERAND: &[&str] = &[
+        "-A",
+        "-W",
+        "-D",
+        "-F",
+        "-C",
+        "-Z",
+        "-L",
+        "-l",
+        "-o",
+        "--allow",
+        "--warn",
+        "--deny",
+        "--forbid",
+        "--force-warn",
+        "--cap-lints",
+        "--codegen",
+        "--crate-type",
+        "--crate-name",
+        "--edition",
+        "--emit",
+        "--print",
+        "--target",
+        "--extern",
+        "--sysroot",
+        "--error-format",
+        "--json",
+        "--color",
+        "--remap-path-prefix",
+        "--explain",
+        "--out-dir",
+        "--diagnostic-width",
+    ];
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rustflags.len() {
+        let arg = rustflags[i].as_str();
+        if arg == "--cfg" || arg == "--check-cfg" {
+            out.extend(rustflags[i..].iter().take(2).cloned());
+            i += 2;
+        } else if arg.starts_with("--cfg=") || arg.starts_with("--check-cfg=") {
+            out.push(arg.to_owned());
+            i += 1;
+        } else if TAKES_OPERAND.contains(&arg) {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 /// The environment Cargo receives, with the caller's explicit pairs taking
@@ -642,20 +792,53 @@ impl Sink {
     }
 }
 
-/// Decide the sink for a cargo invocation rooted at `build_root`.
+/// Decide the rustflags sink for a cargo invocation rooted at `build_root`:
+/// [`decide`] for [`FlagKind::Rustc`], keeping only the layer.
+pub(crate) fn sink(
+    build_root: &Path,
+    sweep_sets_rustflags: bool,
+    target: Option<&crate::target_platform::SweepTarget>,
+    cargo_env: EffectiveEnv<'_>,
+) -> Sink {
+    decide(
+        FlagKind::Rustc,
+        build_root,
+        sweep_sets_rustflags,
+        target,
+        cargo_env,
+    )
+    .sink
+}
+
+/// Where brokkr's flags of one kind go, and whether that answer is proven.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SinkDecision {
+    pub(crate) sink: Sink,
+    /// False when the layer was chosen on a guess: some flagged target table
+    /// could not be judged (an unmodelled `cfg(...)`, a bare triple with no
+    /// host triple, a value of an unexpected shape), the configured triples
+    /// disagree about the live layer, or the config chain could not be read.
+    /// The guess is always [`Sink::BuildConfig`], the direction that can be
+    /// inert but never demotes the project's own flags.
+    pub(crate) certain: bool,
+}
+
+/// Decide the sink for flags of `kind` on a cargo invocation rooted at
+/// `build_root`.
 ///
-/// `sweep_sets_rustflags` is brokkr's own doing: a `[[check]]` entry carrying
+/// `sweep_sets_env` is brokkr's own doing: a `[[check]]` entry carrying
 /// `rustflags` is exported as an env var by `sweep_runtime_env`, which makes
 /// source 1/2 live for that sweep regardless of what the config chain says.
+/// Brokkr never exports rustdocflags on its own, so rustdoc callers pass
+/// `false`.
 ///
-/// For sources 1 and 2 only the process environment is inspected, not a
-/// sweep's `env` table, and that is sufficient rather than an oversight:
+/// Sources 1 and 2 are read under `cargo_env`, the environment cargo will
+/// actually see. For rustflags that is the process environment in practice:
 /// `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS` are reserved keys that config
 /// loading refuses in both a `[[check]]` entry's `env` and a profile's `env`,
-/// unconditionally (`reject_reserved_sweep_env`). No sweep can reach a
-/// compiling phase carrying either, so the process env plus
-/// `sweep_sets_rustflags` is the whole set of ways source 1/2 can be live.
-/// Sources 3 and 4 are read under `cargo_env`, which a sweep's `env` can move.
+/// unconditionally (`reject_reserved_sweep_env`). The rustdoc keys are not
+/// reserved, so a sweep's `env` can make them live, and reading `cargo_env`
+/// is what sees it.
 ///
 /// Presence, not content, decides both env sources, because that is cargo's
 /// rule: it reads `RUSTFLAGS` whenever the variable is set, and a set-but-empty
@@ -664,67 +847,106 @@ impl Sink {
 /// `--config` sink cargo never reads, and every allow injected there would be
 /// silently inert.
 ///
-/// `target` is a `[[check]]` sweep's `target`: cargo then builds for that
-/// triple whatever `build.target` says, so its tables are the ones matched.
-/// `cargo_env` is the environment the build runs under (a sweep's `env` over
-/// brokkr's): it selects the config chain (`CARGO_HOME`) and carries the
+/// Source 3 is judged per platform the invocation builds for. `target` is a
+/// `[[check]]` sweep's `target`: cargo then builds for that triple whatever
+/// `build.target` says, judged with rustc's facts for it. Without one, the
+/// triples are `build.target` / `CARGO_BUILD_TARGET`, else the host; a
+/// `cfg(...)` selector is judged with the host's values only for the host
+/// triple, and for any other triple only where it needs no platform fact
+/// (`cfg(all())`). Cargo picks the source per platform but brokkr's
+/// `--config` is one key for the whole invocation, so `TargetConfig` is chosen
+/// only when the target source is live for every triple; live for none is
+/// `BuildConfig`; anything else is an uncertain `BuildConfig`, inert for the
+/// triples whose target source is live rather than destructive for the rest.
+/// `cargo_env` also selects the config chain (`CARGO_HOME`) and carries the
 /// target-table env spellings.
-pub(crate) fn sink(
+pub(crate) fn decide(
+    kind: FlagKind,
     build_root: &Path,
-    sweep_sets_rustflags: bool,
+    sweep_sets_env: bool,
     target: Option<&crate::target_platform::SweepTarget>,
     cargo_env: EffectiveEnv<'_>,
-) -> Sink {
-    let env = RustflagsEnv::process();
-    if let Some(sink) = env_sink(sweep_sets_rustflags, &env) {
-        return sink;
+) -> SinkDecision {
+    let env = RustflagsEnv::for_kind(kind, cargo_env);
+    if let Some(sink) = env_sink(sweep_sets_env, &env) {
+        return SinkDecision {
+            sink,
+            certain: true,
+        };
     }
     let files = match read_config_files_under(build_root, cargo_env) {
         Ok(files) => files,
         // BuildConfig is the non-destructive fallback: an unseen target table
-        // may leave brokkr's allows inert, while a speculative TargetConfig
+        // may leave brokkr's flags inert, while a speculative TargetConfig
         // could demote the project's build flags. Cargo itself rejects a
         // selected unreadable or malformed config before compiling.
-        Err(_) => return Sink::BuildConfig,
+        Err(_) => {
+            return SinkDecision {
+                sink: Sink::BuildConfig,
+                certain: false,
+            };
+        }
     };
+    let host = host_triple_for(build_root);
     let triples = match target {
         Some(t) => vec![t.triple.clone()],
         None => target_triples_for_sink(build_root, &files, cargo_env),
     };
-    // Cargo treats the target-triple environment spelling as a matching
-    // `target.<triple>.rustflags` entry. Add brokkr's flags to the target
-    // source when it is live, so the higher-priority source-3 rule does not
-    // make an injected `build.rustflags` inert.
-    if triples
-        .iter()
-        .any(|triple| cargo_env.contains(&target_rustflags_env_var(triple)))
-    {
-        return Sink::TargetConfig;
-    }
-    let host = host_triple_for(build_root);
-    let platform = match target {
-        Some(t) => Platform::Target(t),
-        None => Platform::Host(host.as_deref()),
-    };
-    if target_source_live(&files, &triples, platform) {
-        Sink::TargetConfig
+    let answers: Vec<Option<bool>> = if triples.is_empty() {
+        // No host triple could be read: the host's cfg values still decide
+        // `cfg(...)` tables, but no bare triple table can be confirmed.
+        vec![triple_source_live(
+            kind,
+            &files,
+            None,
+            Platform::Host(None),
+            cargo_env,
+        )]
     } else {
-        Sink::BuildConfig
+        triples
+            .iter()
+            .map(|triple| {
+                let platform = match target {
+                    Some(t) => Platform::Target(t),
+                    None if host.as_deref() == Some(triple.as_str()) => {
+                        Platform::Host(host.as_deref())
+                    }
+                    None => Platform::Unknown(triple),
+                };
+                triple_source_live(kind, &files, Some(triple), platform, cargo_env)
+            })
+            .collect()
+    };
+    if answers.iter().all(|a| *a == Some(true)) {
+        SinkDecision {
+            sink: Sink::TargetConfig,
+            certain: true,
+        }
+    } else {
+        SinkDecision {
+            sink: Sink::BuildConfig,
+            certain: answers.iter().all(|a| *a == Some(false)),
+        }
     }
 }
 
-/// Whether source 3 is provably live: some selector known to match - the
-/// triple key, or a `cfg(...)` that evaluates true - has non-empty flags once
-/// merged across the chain as cargo merges them (a string replaces lower
-/// layers, an array appends). A selector whose `cfg` cannot be evaluated
-/// proves nothing either way and is passed over - the inert direction - so
-/// an undecided table cannot cancel a proven one, and a lower layer's flags
-/// a higher layer replaced cannot prove anything.
-fn target_source_live(
+/// Whether source 3 is live for one platform, three-valued: `Some(true)` when
+/// some contribution is proven - the triple key or a `cfg(...)` that evaluates
+/// true having non-empty flags once merged across the chain as cargo merges
+/// them (a string replaces lower layers, an array appends), or a non-empty
+/// `CARGO_TARGET_<triple>_<KIND>` - `Some(false)` when none can contribute,
+/// `None` when nothing is proven but something could not be judged. An
+/// undecided table cannot cancel a proven one, and a lower layer's flags a
+/// higher layer replaced cannot prove anything. A set-but-empty target env
+/// variable proves nothing: unlike the two top-level env sources, an empty
+/// target source falls through to `build.<key>`.
+fn triple_source_live(
+    kind: FlagKind,
     files: &[(PathBuf, toml::Table)],
-    triples: &[String],
+    triple: Option<&str>,
     platform: Platform<'_>,
-) -> bool {
+    cargo_env: EffectiveEnv<'_>,
+) -> Option<bool> {
     let flags_of = |selector: &str| {
         let selector = selector.to_owned();
         merged_config_flags(files, move |doc: &toml::Table| {
@@ -732,37 +954,99 @@ fn target_source_live(
                 .as_table()?
                 .get(&selector)?
                 .as_table()?
-                .get("rustflags")
+                .get(kind.key())
                 .cloned()
         })
     };
-    let non_empty = |merged: Option<Option<Vec<String>>>| matches!(merged, Some(Some(flags)) if !flags.is_empty());
-    let cfg_selectors: BTreeSet<&str> = files
+    // `Some(true)` non-empty, `Some(false)` absent or empty, `None` unreadable.
+    let non_empty = |merged: Option<Option<Vec<String>>>| match merged {
+        Some(Some(flags)) => Some(!flags.is_empty()),
+        Some(None) => Some(false),
+        None => None,
+    };
+    let mut undecided = false;
+    let selectors: BTreeSet<&str> = files
         .iter()
         .filter_map(|(_, doc)| doc.get("target")?.as_table())
         .flat_map(|targets| targets.keys().map(String::as_str))
-        .filter(|selector| selector.starts_with("cfg("))
         .collect();
-    let cfg_live = cfg_selectors.into_iter().any(|selector| {
-        let matches = selector
+    for selector in selectors {
+        let flagged = non_empty(flags_of(selector));
+        if flagged == Some(false) {
+            continue;
+        }
+        let matches = match selector
             .strip_prefix("cfg(")
             .and_then(|s| s.strip_suffix(')'))
-            .and_then(|expr| eval_cfg_on(expr, platform));
-        matches == Some(true) && non_empty(flags_of(selector))
-    });
-    cfg_live || triples.iter().any(|triple| non_empty(flags_of(triple)))
+        {
+            Some(expr) => eval_cfg_on(expr, platform),
+            None => triple.map(|t| t == selector),
+        };
+        match (matches, flagged) {
+            (Some(true), Some(true)) => return Some(true),
+            (Some(false), _) => {}
+            _ => undecided = true,
+        }
+    }
+    if let Some(t) = triple {
+        match cargo_env
+            .get_os(&kind.target_env_var(t))
+            .map(std::ffi::OsString::into_string)
+        {
+            Some(Ok(v)) if v.split_whitespace().next().is_some() => return Some(true),
+            Some(Err(_)) => undecided = true,
+            _ => {}
+        }
+    }
+    if undecided { None } else { Some(false) }
 }
 
 /// Resolve the environment-backed sink independently from process and config
 /// discovery so precedence and empty-value behavior can be tested directly.
-fn env_sink(sweep_sets_rustflags: bool, env: &RustflagsEnv) -> Option<Sink> {
+fn env_sink(sweep_sets_env: bool, env: &RustflagsEnv) -> Option<Sink> {
     match env.active().map(|(key, _)| key) {
-        Some("CARGO_ENCODED_RUSTFLAGS") => Some(Sink::EncodedEnv),
-        Some("RUSTFLAGS") => Some(Sink::Env),
-        None if sweep_sets_rustflags => Some(Sink::Env),
+        Some(key) if key == env.kind.encoded_env() => Some(Sink::EncodedEnv),
+        Some(_) => Some(Sink::Env),
+        None if sweep_sets_env => Some(Sink::Env),
         None => None,
-        Some(_) => unreachable!("RustflagsEnv::active only returns known keys"),
     }
+}
+
+/// Where one cargo invocation's added flags of a kind ended up: an env pair
+/// to set (the live env source's value with the additions appended) or
+/// `--config` arguments, and whether the layer is proven ([`SinkDecision`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Placement {
+    pub(crate) env: Option<(String, String)>,
+    pub(crate) args: Vec<String>,
+    pub(crate) certain: bool,
+}
+
+/// Place `additions` of `kind` for one cargo invocation without displacing
+/// the flags that invocation already gets: appended to the live env source,
+/// else `--config` at the live config layer. The env value is composed from
+/// `cargo_env`, the same environment the decision read, so selection and
+/// construction cannot disagree about which source is live.
+pub(crate) fn place(
+    kind: FlagKind,
+    build_root: &Path,
+    target: Option<&crate::target_platform::SweepTarget>,
+    cargo_env: EffectiveEnv<'_>,
+    additions: &[String],
+) -> Result<Placement, crate::error::DevError> {
+    let decision = decide(kind, build_root, false, target, cargo_env);
+    if decision.sink.is_env() {
+        return Ok(Placement {
+            env: RustflagsEnv::for_kind(kind, cargo_env).compose(additions)?,
+            args: Vec::new(),
+            certain: decision.certain,
+        });
+    }
+    Ok(Placement {
+        env: None,
+        args: config_args_for(kind, decision.sink, additions),
+        certain: decision.certain,
+    })
 }
 
 /// The rustflags cargo applies to a host build rooted at `build_root`, and the
@@ -969,12 +1253,17 @@ pub(crate) fn plumbing<'a>(
 /// The `--config` arguments for `flags`, or empty for an env sink (where the
 /// caller appends to the env value instead).
 pub fn config_args(sink: Sink, flags: &[String]) -> Vec<String> {
+    config_args_for(FlagKind::Rustc, sink, flags)
+}
+
+/// [`config_args`] for either flag kind.
+pub(crate) fn config_args_for(kind: FlagKind, sink: Sink, flags: &[String]) -> Vec<String> {
     if flags.is_empty() || sink.is_env() {
         return Vec::new();
     }
     let key = match sink {
-        Sink::TargetConfig => "target.\"cfg(all())\".rustflags",
-        _ => "build.rustflags",
+        Sink::TargetConfig => format!("target.\"cfg(all())\".{}", kind.key()),
+        _ => format!("build.{}", kind.key()),
     };
     let list = flags
         .iter()
@@ -985,10 +1274,7 @@ pub fn config_args(sink: Sink, flags: &[String]) -> Vec<String> {
 }
 
 fn target_rustflags_env_var(triple: &str) -> String {
-    format!(
-        "CARGO_TARGET_{}_RUSTFLAGS",
-        triple.to_uppercase().replace('-', "_")
-    )
+    FlagKind::Rustc.target_env_var(triple)
 }
 
 /// Cargo's configured target names drive `CARGO_TARGET_<triple>_RUSTFLAGS`.
@@ -1050,73 +1336,21 @@ fn target_key_triple(value: &str, host: Option<&str>) -> Option<String> {
     )
 }
 
-/// Does this config document contribute a `target.*.rustflags` that applies to
-/// the host?
-///
-/// `triple` is `None` when the host triple could not be read, in which case a
-/// bare `[target.<triple>]` table cannot be confirmed to match and is treated
-/// as not matching - the inert direction.
-#[cfg(test)]
-fn has_matching_target_rustflags(doc: &toml::Table, triple: Option<&str>) -> bool {
-    target_rustflags_match(doc, Platform::Host(triple)) == Some(true)
-}
-
-/// Whether some flagged `target.*` table applies, three-valued: `Some(true)` when
-/// some flagged target table confidently matches the platform, `Some(false)`
-/// when none can, and `None` when none matched confidently but at least one
-/// could not be decided (an unmodelled `cfg(...)`, or a bare triple with no
-/// host triple to compare against).
-fn target_rustflags_match(doc: &toml::Table, platform: Platform<'_>) -> Option<bool> {
-    let Some(targets) = doc.get("target").and_then(toml::Value::as_table) else {
-        return Some(false);
-    };
-    let mut undecided = false;
-    for (selector, table) in targets {
-        let has_flags = table
-            .as_table()
-            .and_then(|t| t.get("rustflags"))
-            .is_some_and(|v| {
-                v.as_array().is_some_and(|a| !a.is_empty())
-                    || v.as_str().is_some_and(|s| !s.trim().is_empty())
-            });
-        if !has_flags {
-            continue;
-        }
-        let matches = match selector
-            .strip_prefix("cfg(")
-            .and_then(|s| s.strip_suffix(')'))
-        {
-            Some(expr) => eval_cfg_on(expr, platform),
-            None => platform.triple().map(|t| t == selector),
-        };
-        match matches {
-            Some(true) => return Some(true),
-            Some(false) => {}
-            None => undecided = true,
-        }
-    }
-    if undecided { None } else { Some(false) }
-}
-
 /// Whether [`sink`]'s answer for a plain sweep (one exporting no `rustflags`)
-/// might be inert: it fell through to `build.rustflags`, but some flagged
-/// `target.*` table in the chain could not be decided. If that table does
-/// match the host, cargo reads it instead and the injected flags do nothing.
-/// The fall-through is the deliberate safe direction; this is how the caller
-/// finds out it was taken on a guess.
+/// might be inert: it fell through to `build.rustflags` on a guess
+/// ([`SinkDecision::certain`]). If an undecided target table does match,
+/// cargo reads it instead and the injected flags do nothing. The fall-through
+/// is the deliberate safe direction; this is how the caller finds out it was
+/// taken on a guess.
 pub fn sink_may_be_inert(build_root: &Path) -> bool {
-    if sink(build_root, false, None, EffectiveEnv::new(&[])) != Sink::BuildConfig {
-        return false;
-    }
-    let triple = host_triple_for(build_root);
-    match read_config_files_under(build_root, EffectiveEnv::new(&[])) {
-        Ok(files) => files.iter().any(|(_, doc)| {
-            target_rustflags_match(doc, Platform::Host(triple.as_deref())).is_none()
-        }),
-        // The notice cannot establish that its chosen layer is live when part
-        // of the config chain was unreadable, so report the uncertainty.
-        Err(_) => true,
-    }
+    !decide(
+        FlagKind::Rustc,
+        build_root,
+        false,
+        None,
+        EffectiveEnv::new(&[]),
+    )
+    .certain
 }
 
 /// The rustc host selected from the current working directory. A failure here
@@ -1161,6 +1395,10 @@ pub(crate) enum Platform<'a> {
     Host(Option<&'a str>),
     /// A `[[check]]` sweep's `target`, with rustc's facts for it.
     Target(&'a crate::target_platform::SweepTarget),
+    /// A configured triple brokkr has no facts for (an ambient `build.target`
+    /// other than the host): every cfg atom is undecided, so only selectors
+    /// that need none (`cfg(all())`) are judged.
+    Unknown(&'a str),
 }
 
 impl<'a> Platform<'a> {
@@ -1169,6 +1407,7 @@ impl<'a> Platform<'a> {
         match self {
             Self::Host(host) => host,
             Self::Target(target) => Some(&target.triple),
+            Self::Unknown(triple) => Some(triple),
         }
     }
 
@@ -1177,6 +1416,7 @@ impl<'a> Platform<'a> {
         match self {
             Self::Host(host) => Some(cfg_key(key, host)? == value),
             Self::Target(target) => target.cfg.key_matches(key, value),
+            Self::Unknown(_) => None,
         }
     }
 
@@ -1185,6 +1425,7 @@ impl<'a> Platform<'a> {
         match self {
             Self::Host(_) => cfg_flag(name),
             Self::Target(target) => target.cfg.flag(name),
+            Self::Unknown(_) => None,
         }
     }
 }
@@ -1320,12 +1561,14 @@ mod tests {
     #[test]
     fn sink_selection_uses_injected_rustflags_presence() {
         let encoded_empty = RustflagsEnv {
+            kind: FlagKind::Rustc,
             encoded: Some("".into()),
             plain: Some("-D warnings".into()),
         };
         assert_eq!(env_sink(false, &encoded_empty), Some(Sink::EncodedEnv));
 
         let plain_empty = RustflagsEnv {
+            kind: FlagKind::Rustc,
             encoded: None,
             plain: Some("".into()),
         };
@@ -1338,8 +1581,16 @@ mod tests {
     fn the_target_source_is_decided_on_merged_flags() {
         let doc = |text: &str| (PathBuf::from("c"), text.parse::<toml::Table>().unwrap());
         let host = Platform::Host(Some("x86_64-unknown-linux-gnu"));
-        let triples = vec!["x86_64-unknown-linux-gnu".to_owned()];
-        let live = |files: &[(PathBuf, toml::Table)]| target_source_live(files, &triples, host);
+        let none: [(&str, &str); 0] = [];
+        let live = |files: &[(PathBuf, toml::Table)]| {
+            triple_source_live(
+                FlagKind::Rustc,
+                files,
+                Some("x86_64-unknown-linux-gnu"),
+                host,
+                EffectiveEnv::new(&none),
+            ) == Some(true)
+        };
 
         // A string value counts, not only a non-empty array.
         assert!(live(&[doc(
@@ -1397,6 +1648,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
 
         let env = RustflagsEnv {
+            kind: FlagKind::Rustc,
             encoded: Some(std::ffi::OsString::from_vec(vec![0xff])),
             plain: Some("-D warnings".into()),
         };
@@ -1542,6 +1794,189 @@ mod tests {
 
     fn doc(text: &str) -> toml::Table {
         text.parse().unwrap()
+    }
+
+    /// Whether this one document makes source 3 provably live for a host
+    /// whose triple is `triple` (`None`: the host triple could not be read).
+    fn has_matching_target_rustflags(doc: &toml::Table, triple: Option<&str>) -> bool {
+        let none: [(&str, &str); 0] = [];
+        triple_source_live(
+            FlagKind::Rustc,
+            &[(PathBuf::from("c"), doc.clone())],
+            triple,
+            Platform::Host(triple),
+            EffectiveEnv::new(&none),
+        ) == Some(true)
+    }
+
+    #[test]
+    fn a_triple_with_no_facts_judges_only_platform_free_selectors() {
+        // An ambient cross `build.target`: the host's values must not decide a
+        // cfg table for it, but `cfg(all())` holds on every platform.
+        let none: [(&str, &str); 0] = [];
+        let env = EffectiveEnv::new(&none);
+        let live = |text: &str| {
+            triple_source_live(
+                FlagKind::Rustdoc,
+                &[(PathBuf::from("c"), doc(text))],
+                Some("aarch64-pc-windows-msvc"),
+                Platform::Unknown("aarch64-pc-windows-msvc"),
+                env,
+            )
+        };
+        assert_eq!(
+            live("[target.'cfg(unix)']\nrustdocflags = [\"-x\"]\n"),
+            None
+        );
+        assert_eq!(
+            live("[target.'cfg(all())']\nrustdocflags = [\"-x\"]\n"),
+            Some(true)
+        );
+        assert_eq!(
+            live("[target.aarch64-pc-windows-msvc]\nrustdocflags = [\"-x\"]\n"),
+            Some(true)
+        );
+        // The rustc key is not the rustdoc one.
+        assert_eq!(
+            live("[target.'cfg(all())']\nrustflags = [\"-x\"]\n"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn an_empty_target_env_variable_proves_nothing() {
+        // Cargo falls through to `build.<key>` when the joined target source is
+        // empty, so injecting at the target layer would demote build flags.
+        let triple = "x86_64-unknown-linux-gnu";
+        let var = FlagKind::Rustdoc.target_env_var(triple);
+        assert_eq!(var, "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTDOCFLAGS");
+        let live = |value: &str| {
+            let pairs = [(var.as_str(), value)];
+            triple_source_live(
+                FlagKind::Rustdoc,
+                &[],
+                Some(triple),
+                Platform::Host(Some(triple)),
+                EffectiveEnv::new(&pairs),
+            )
+        };
+        assert_eq!(live("  "), Some(false));
+        assert_eq!(live("--cfg x"), Some(true));
+    }
+
+    #[test]
+    fn rustdoc_env_sources_are_appended_to_by_presence() {
+        // The placement the rustdoc phase's `--check` used to make on its own:
+        // an env source that is set is appended to, empty or not, and the
+        // encoded form outranks the plain one across override and process.
+        let compose = |pairs: &[(&str, &str)], additions: &[&str]| {
+            let additions: Vec<String> = additions.iter().map(|s| (*s).to_owned()).collect();
+            RustflagsEnv::for_kind(FlagKind::Rustdoc, EffectiveEnv::new(pairs))
+                .compose(&additions)
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(
+            compose(
+                &[("RUSTDOCFLAGS", "--cfg docsrs")],
+                &["-Zunstable-options", "--check"]
+            ),
+            (
+                "RUSTDOCFLAGS".into(),
+                "--cfg docsrs -Zunstable-options --check".into()
+            )
+        );
+        assert_eq!(
+            compose(&[("RUSTDOCFLAGS", "")], &["--cfg", "hooks"]),
+            ("RUSTDOCFLAGS".into(), "--cfg hooks".into())
+        );
+        assert_eq!(
+            compose(
+                &[
+                    ("RUSTDOCFLAGS", "-Dwarnings"),
+                    ("CARGO_ENCODED_RUSTDOCFLAGS", "--cfg\u{1f}x")
+                ],
+                &["--check"]
+            ),
+            (
+                "CARGO_ENCODED_RUSTDOCFLAGS".into(),
+                "--cfg\u{1f}x\u{1f}--check".into()
+            )
+        );
+        let env = RustflagsEnv::for_kind(
+            FlagKind::Rustdoc,
+            EffectiveEnv::new(&[("RUSTDOCFLAGS", "x")]),
+        );
+        assert_eq!(env_sink(false, &env), Some(Sink::Env));
+    }
+
+    #[test]
+    fn an_argument_the_plain_split_would_break_moves_to_the_encoded_form() {
+        let pairs = [("RUSTDOCFLAGS", " --cfg  docsrs ")];
+        let got = RustflagsEnv::for_kind(FlagKind::Rustdoc, EffectiveEnv::new(&pairs))
+            .compose(&["--check-cfg=cfg(mode, values(\"a\"))".into()])
+            .unwrap();
+        assert_eq!(
+            got,
+            Some((
+                "CARGO_ENCODED_RUSTDOCFLAGS".into(),
+                "--cfg\u{1f}docsrs\u{1f}--check-cfg=cfg(mode, values(\"a\"))".into()
+            ))
+        );
+        assert!(survives_plain_split("--cfg=x"));
+        assert!(!survives_plain_split(""));
+        assert!(!survives_plain_split("a b"));
+        assert!(!survives_plain_split("\tx"));
+    }
+
+    #[test]
+    fn cfg_args_take_cfg_options_and_nothing_else() {
+        let flags: Vec<String> = [
+            "--cfg",
+            "pbfhogg_test_hooks",
+            "-C",
+            "--cfg",
+            "--check-cfg=cfg(x)",
+            "-Dwarnings",
+            "--cfg=madsim",
+            "--check-cfg",
+            "cfg(y)",
+            "--cfg",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        // `-C --cfg` is `-C`'s operand, not a cfg; the trailing bare `--cfg`
+        // is carried for rustdoc to reject, not dropped.
+        assert_eq!(
+            cfg_args(&flags),
+            [
+                "--cfg",
+                "pbfhogg_test_hooks",
+                "--check-cfg=cfg(x)",
+                "--cfg=madsim",
+                "--check-cfg",
+                "cfg(y)",
+                "--cfg",
+            ]
+        );
+        assert!(cfg_args(&["-Ctarget-cpu=native".to_owned()]).is_empty());
+    }
+
+    #[test]
+    fn rustdoc_config_args_name_the_rustdoc_key() {
+        let flags = vec!["--cfg".to_string(), "x".to_string()];
+        assert_eq!(
+            config_args_for(FlagKind::Rustdoc, Sink::BuildConfig, &flags),
+            ["--config", "build.rustdocflags=[\"--cfg\",\"x\"]"]
+        );
+        assert_eq!(
+            config_args_for(FlagKind::Rustdoc, Sink::TargetConfig, &flags),
+            [
+                "--config",
+                "target.\"cfg(all())\".rustdocflags=[\"--cfg\",\"x\"]"
+            ]
+        );
     }
 
     #[test]

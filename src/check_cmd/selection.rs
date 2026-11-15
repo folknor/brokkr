@@ -477,11 +477,11 @@ impl ReproLine {
         sweep: &PlannedSweep,
         binary: &crate::check_cmd::TestBinary,
         request: Option<&ResolutionRun>,
-        allow_args: &[String],
+        config_args: &[String],
         forwarded: &ForwardedArgs,
     ) -> Self {
         let mut args = vec!["test".to_owned()];
-        args.extend(allow_args.iter().cloned());
+        args.extend(config_args.iter().cloned());
         if let Some(request) = request {
             // The planned request through the one selection renderer;
             // the binary narrows only the target.

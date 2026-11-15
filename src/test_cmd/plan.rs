@@ -138,7 +138,7 @@ pub(super) struct ReadySweep<'s> {
     pub(super) attempt: check_cmd::Attempt,
     pub(super) profile: SweepProfile,
     pub(super) env: Vec<(String, String)>,
-    pub(super) allow_args: Vec<String>,
+    pub(super) config_args: Vec<String>,
     /// The harnesses holding a match, run directly; `None` for a doc-only
     /// sweep's single `cargo test --doc`.
     pub(super) focused: Option<FocusedPlan>,
@@ -165,7 +165,7 @@ pub(super) fn prepare_sweep<'s>(
     let profile = resolve_profile(profile_override, cx.test_cfg, sweep.profile());
     let profile_dir = profile.target_subdir();
 
-    let (env_owned, allow_args) = sweep_env(
+    let (env_owned, config_args) = sweep_env(
         sweep,
         &cx.project,
         project_root,
@@ -184,7 +184,7 @@ pub(super) fn prepare_sweep<'s>(
     // aggregator marks it as failed.
     let mut support: Vec<check_cmd::SupportArtifact> = Vec::new();
     for req in attempt.support() {
-        match run_pre_build(project_root, sweep, req, &env_refs, &allow_args, profile)? {
+        match run_pre_build(project_root, sweep, req, &env_refs, &config_args, profile)? {
             Some(artifacts) => support.extend(artifacts),
             None => return Ok(SweepOutcome::Done(RunReport::bare(Outcome::BuildFailed))),
         }
@@ -196,7 +196,7 @@ pub(super) fn prepare_sweep<'s>(
     // `plan_focused`.
     let shape = BuildShape {
         sweep,
-        allow_args: &allow_args,
+        config_args: &config_args,
         run: single_run(sweep, attempt)?,
         jobs: cx.jobs,
         profile,
@@ -235,7 +235,7 @@ pub(super) fn prepare_sweep<'s>(
         attempt: attempt.clone(),
         profile,
         env: env_owned,
-        allow_args,
+        config_args,
         focused,
         support_fingerprint,
         runtime_fingerprint,
@@ -583,10 +583,11 @@ pub(super) fn direct_libtest_args(filter: &str, exact: bool) -> Vec<String> {
 /// false on a current nightly: rustdoc forwards its test arguments into
 /// libtest, which supports both `--list` and `--exact`, so a doc-only sweep can
 /// be enumerated once merging is disabled (rustdoc's own
-/// `--merge-doctests=no`, which reaches rustdoc through RUSTDOCFLAGS rather
-/// than through cargo's `--` split). Until that plumbing exists, refuse - but
-/// say which it is, so the next reader does not inherit a wrong reason for a
-/// right refusal.
+/// `--merge-doctests=no`, which reaches rustdoc through rustdocflags rather
+/// than through cargo's `--` split). Brokkr places rustdocflags for a sweep's
+/// cfg ([`sweep_env`]) but passes no such flag and lists no doctests, so until
+/// that enumeration is wired, refuse - but say which it is, so the next reader
+/// does not inherit a wrong reason for a right refusal.
 pub(super) fn doc_only_timeout_refusal(sweep: &PlannedSweep) -> DevError {
     DevError::Config(format!(
         "--timeout cannot apply within doc-only sweep '{}': brokkr does not enumerate doctests \
@@ -605,11 +606,11 @@ pub(super) fn run_pre_build(
     sweep: &PlannedSweep,
     req: &check_cmd::SupportRequest,
     env: &[(&str, &str)],
-    allow_args: &[String],
+    config_args: &[String],
     profile: SweepProfile,
 ) -> Result<Option<Vec<check_cmd::SupportArtifact>>, DevError> {
     let package = req.package();
-    let args = pre_build_argv(sweep, req, allow_args, profile);
+    let args = pre_build_argv(sweep, req, config_args, profile);
     let line = format!("cargo {} (sweep build: {})", args.join(" "), sweep.label);
     output::detail(&line);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -705,11 +706,11 @@ pub(super) fn cargo_with_deadline(
 /// `cargo test` resolves per package - two feature graphs for one lane), and
 /// the `[lints] allow` `--config` share, since a pre-build compiling the crate
 /// under an unsuppressed lint the project denies fails before the test run is
-/// ever reached. `allow_args` goes before the selection, as in [`test_argv`].
+/// ever reached. `config_args` goes before the selection, as in [`test_argv`].
 pub(super) fn pre_build_argv(
     sweep: &PlannedSweep,
     req: &check_cmd::SupportRequest,
-    allow_args: &[String],
+    config_args: &[String],
     profile: SweepProfile,
 ) -> Vec<String> {
     // `json-render-diagnostics`: the artifact stream on stdout names the
@@ -720,7 +721,7 @@ pub(super) fn pre_build_argv(
         "build".into(),
         "--message-format=json-render-diagnostics".into(),
     ];
-    args.extend(allow_args.iter().cloned());
+    args.extend(config_args.iter().cloned());
     args.extend(check_cmd::support_selection_args(sweep, req, profile));
     args
 }
@@ -747,7 +748,7 @@ pub(super) fn single_run<'a>(
 /// run that follows it, so the two cannot name different graphs.
 pub(super) struct BuildShape<'a> {
     pub(super) sweep: &'a PlannedSweep,
-    pub(super) allow_args: &'a [String],
+    pub(super) config_args: &'a [String],
     /// The sweep's request in this run: always the resolved package, as an
     /// override of the sweep's own selection, with the sweep's features
     /// projected onto it.
@@ -770,11 +771,11 @@ impl BuildShape<'_> {
 /// The cargo half every invocation of a sweep shares: subcommand, resolution
 /// pin, lint allows, profile, features, `-j`, and the one package.
 ///
-/// `allow_args` goes before the selection: `--config` is a cargo option, and
+/// `config_args` goes before the selection: `--config` is a cargo option, and
 /// everything past the `--` split belongs to libtest.
 pub(super) fn cargo_head(shape: &BuildShape<'_>, leading: &[&str]) -> Vec<String> {
     let mut args: Vec<String> = leading.iter().map(|s| (*s).to_owned()).collect();
-    args.extend(shape.allow_args.iter().cloned());
+    args.extend(shape.config_args.iter().cloned());
     args.extend(check_cmd::cargo_selection_args(
         shape.sweep,
         shape.run,
@@ -934,7 +935,8 @@ pub(super) type SweepEnv = (Vec<(String, String)>, Vec<String>);
 /// The two are returned together because one decision produces both: the
 /// `[lints] allow` flags reach the compiler through the environment or through
 /// cargo's command line depending on which rustflags layer this build actually
-/// reads (see [`crate::rustflags`]), never both.
+/// reads (see [`crate::rustflags`]), never both - and the sweep's cfg
+/// rustflags reach rustdoc the same way, by the rustdocflags layer.
 ///
 /// A sweep carrying `rustflags` - or package-mode `feature_unification`, on the
 /// same fingerprint-thrash grounds - gets its own isolated target dir + matching
@@ -959,7 +961,7 @@ pub(super) fn sweep_env(
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    let (env_allows, allow_args) = rustflags::plumbing(
+    let (env_allows, mut config_args) = rustflags::plumbing(
         project_root,
         !sweep.rustflags.is_empty(),
         target.as_ref(),
@@ -968,10 +970,18 @@ pub(super) fn sweep_env(
     );
     let project_env =
         check_cmd::sweep_runtime_env(sweep, Some(project), target_dir, profile_dir, env_allows)?;
-    Ok((
-        check_cmd::merged_env(&sweep.env, project_env.as_slice()),
-        allow_args,
-    ))
+    let mut env = check_cmd::merged_env(&sweep.env, project_env.as_slice());
+    // The sweep's cfg rustflags reach rustdoc, so a doc-only sweep's doctests
+    // are collected and compiled under the cfg, as `check`'s lanes do.
+    crate::build_purpose::environment::place_sweep_rustdocflags(
+        project_root,
+        sweep,
+        target.as_ref(),
+        &[],
+        &mut env,
+        &mut config_args,
+    )?;
+    Ok((env, config_args))
 }
 
 /// The `[lints] allow` flags for this command's builds.

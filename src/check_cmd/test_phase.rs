@@ -259,8 +259,8 @@ fn build_lane_support(
             a.project_root,
             sweep,
             req,
-            &env.project_env,
-            &env.allow_args,
+            &env.env,
+            &env.config_args,
             owners,
             a.commands,
         )?);
@@ -335,7 +335,7 @@ fn run_test_lane(
     // Decided once per lane: the route below and every run of the lane read
     // the same answer, so a lane routed to verify at the shim gets the shim.
     let shim = matches!(kind, LaneKind::Serial | LaneKind::DocOnly)
-        .then(|| SerialShim::decide(a.project_root, sweep, a.extra_args, &env.project_env));
+        .then(|| SerialShim::decide(a.project_root, sweep, a.extra_args, &env.env));
     let snapshot_holds = |p: &PreparedLane| p.snapshot.as_ref().is_some_and(|s| snapshot_drift(s).is_empty());
 
     // A lane that executes its binaries directly runs its prepared snapshot:
@@ -457,7 +457,7 @@ fn run_test_lane(
             timings,
             prepared,
             gated_support.as_deref(),
-            &shim.unwrap_or_else(|| SerialShim::decide(a.project_root, sweep, a.extra_args, &env.project_env)),
+            &shim.unwrap_or_else(|| SerialShim::decide(a.project_root, sweep, a.extra_args, &env.env)),
             tap,
         ),
     }

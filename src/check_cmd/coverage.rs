@@ -800,8 +800,8 @@ fn prepare_policy_universes(
 /// command per package and the universe must be enumerated the same way - a
 /// batched `-p a -p b` listing would catalogue binaries from a graph no run
 /// produced.
-fn shape_enumeration_args(sweep: &PlannedSweep, run: &ResolutionRun, allow_args: Vec<String>) -> Vec<String> {
-    let mut args = allow_args;
+fn shape_enumeration_args(sweep: &PlannedSweep, run: &ResolutionRun, config_args: Vec<String>) -> Vec<String> {
+    let mut args = config_args;
     args.extend(cargo_selection_args(
         sweep,
         run,

@@ -337,7 +337,7 @@ pub(super) fn run_ready(
         let plan = SweepPlan {
             shape: BuildShape {
                 sweep: r.sweep,
-                allow_args: &r.allow_args,
+                config_args: &r.config_args,
                 run: single_run(r.sweep, &r.attempt)?,
                 jobs: cx.jobs,
                 profile: r.profile,
@@ -477,7 +477,7 @@ pub(super) fn recheck_sweep(
             prepared.sweep,
             req,
             &env_refs,
-            &prepared.allow_args,
+            &prepared.config_args,
             prepared.profile,
         )? {
             Some(artifacts) => support.extend(artifacts),
@@ -486,7 +486,7 @@ pub(super) fn recheck_sweep(
     }
     let shape = BuildShape {
         sweep: prepared.sweep,
-        allow_args: &prepared.allow_args,
+        config_args: &prepared.config_args,
         run: single_run(prepared.sweep, &prepared.attempt)?,
         jobs: cx.jobs,
         profile: prepared.profile,

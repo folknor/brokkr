@@ -822,12 +822,21 @@ renders as before; there is no key to set either way. The lints reported are
 the same: a probe carrying one each of the default-on `rustdoc::` lints got the
 identical warnings from both modes.
 
-The flags ride cargo's rustdocflags, which, like rustflags, come from exactly
-one source. A set `CARGO_ENCODED_RUSTDOCFLAGS` or `RUSTDOCFLAGS` is appended
-to, never replaced; otherwise they go in as `--config build.rustdocflags`,
-merged after the project's own entries. If a matching `target.*.rustdocflags`
-outranks that layer the injection is inert - the phase renders, slower but
-correct. `--commands` shows the placement either way.
+The flags ride cargo's rustdocflags, which cargo resolves by the same
+one-source rule as rustflags, and brokkr places them with the same decision
+(`rustflags::place` with `FlagKind::Rustdoc`, see "How the test phase
+injects them" below for the layer rule): a set `CARGO_ENCODED_RUSTDOCFLAGS` or
+`RUSTDOCFLAGS`, the sweep's `env` included, is appended to, never replaced;
+otherwise they go in as `--config` at `target."cfg(all())".rustdocflags` or
+`build.rustdocflags`, whichever is live, merged after the project's own
+entries. Where the layer is a guess and a target table does outrank it, the
+injection is inert - the phase renders, slower but correct. `--commands` shows
+the placement either way.
+
+The same placement carries the sweep's cfg rustflags ("Per-sweep rustflags"),
+ahead of `--check`. For those an inert injection is not "slower but correct":
+rustdoc then resolves `cfg` unlike the build, so a guessed layer warns once per
+sweep.
 
 Cargo judges a doc unit up to date by its output, `target/doc/<crate>/index.html`,
 which `--check` never writes - so on its own every run would re-document every
@@ -1083,12 +1092,31 @@ ends (see "Output").
 
 A `[[check]]` entry may carry `rustflags` (a token list, e.g.
 `["--cfg", "madsim"]`), exported as `RUSTFLAGS` on that sweep's cargo processes
-only - clippy, the test-phase pre-build, and the test run - and **composed**
-with any inherited `RUSTFLAGS` (appended; `CARGO_ENCODED_RUSTFLAGS` is used
-instead when the environment already carries the encoded form, which cargo
-would otherwise let shadow `RUSTFLAGS`). brokkr sets no `RUSTFLAGS` of its own
+only - clippy, rustdoc, the test-phase pre-build, and the test run - and
+**composed** with any inherited `RUSTFLAGS` (appended; `CARGO_ENCODED_RUSTFLAGS`
+is used instead when the environment already carries the encoded form, which
+cargo would otherwise let shadow `RUSTFLAGS`, or when an argument holds a space
+the plain form's split would break). brokkr sets no `RUSTFLAGS` of its own
 (`--cap-lints=warn` is a cargo `--` arg, not a rustflag), so this composes only
 with what the caller's environment carries.
+
+Cargo resolves rustdocflags by the same rule but never hands rustdoc
+`RUSTFLAGS` (its doctest arguments are externs, search paths, features,
+check-cfg, build-script cfgs and the unit's rustdocflags), so without more a
+cfg sweep is documented with the cfg off and its doctests are collected and
+compiled with it off against a library built with it on. The `--cfg` and
+`--check-cfg` entries (`rustflags::cfg_args`, which walks options and operands
+so another option's operand is never read as one) are therefore placed in
+rustdocflags too, by `build_purpose::environment::place_sweep_rustdocflags`:
+in the rustdoc phase beside `--check`, and in `lane_env` (and `brokkr test`'s
+`sweep_env`) for every cargo invocation of a lane. Uniform placement is safe
+there because cargo hashes rustdocflags into doc units only, so a pre-build or
+a lane running no doctests compiles exactly as before. An env placement only
+ever appends to a source that was already set, so a test that launches cargo
+itself inherits the cfg on a `RUSTDOCFLAGS` it already inherited; a `--config`
+placement does not reach test processes. The composed pair replaces its key in
+`LaneEnv::env`, which every cargo run of the lane takes as is, so a sweep's own
+`RUSTDOCFLAGS` cannot undo it.
 
 Because a global cfg such as `--cfg madsim` reshapes every fingerprint in the
 build graph, a sweep with non-empty `rustflags` **auto-isolates** into its own
@@ -1806,8 +1834,17 @@ An unrecognised `cfg(...)` selector resolves to the inert direction, never the
 destructive one: injecting at `build.rustflags` when a target table actually
 wins merely does nothing, while injecting at `target."cfg(all())"` when
 `build.rustflags` was the live layer would demote it and drop the project's
-flags. The run always prints which layer it used, so an inert injection is
-diagnosable rather than mysterious:
+flags. The target layer is judged per triple the invocation builds for - a
+sweep's `target`, else `build.target` / `CARGO_BUILD_TARGET`, else the host -
+and a `cfg(...)` table is judged with the host's values only for the host
+triple; for an ambient cross triple only a selector needing no platform fact
+(`cfg(all())`) decides anything. One `--config` key serves the whole
+invocation, so `target."cfg(all())"` is chosen only when the target layer is
+live for every triple; triples that disagree get `build.rustflags`, on the
+inert side. A set-but-empty `CARGO_TARGET_<triple>_RUSTFLAGS` does not make
+the target layer live: cargo falls through to `build.rustflags` when the joined
+target source is empty. The run always prints which layer it used, so an inert
+injection is diagnosable rather than mysterious:
 
 ```
 test: allowing deprecated via --config target."cfg(all())".rustflags ([lints] allow)

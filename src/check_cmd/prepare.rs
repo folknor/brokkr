@@ -35,18 +35,22 @@
 // execute (parallel, isolated, nextest) prepare their own just before they
 // run, through the same code.
 
-/// The env a lane builds and runs under, and the lint allows its cargo
+/// The env a lane builds and runs under, and the `--config` flags its cargo
 /// invocations carry. Decided once per lane: every cargo run of a lane - the
 /// pre-build, the prebuild, the listing, the run - must see the same, or one
 /// of them re-fingerprints the shape and rebuilds it.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LaneEnv {
-    /// `--config` flags carrying `[lints] allow`, when the config layer is
-    /// the live one ([`rustflags::plumbing`]).
-    pub(crate) allow_args: Vec<String>,
-    /// brokkr's own pairs ([`sweep_runtime_env`]).
-    pub(crate) project_env: Vec<(String, String)>,
-    /// The sweep's env over brokkr's ([`merged_env`]): what cargo sees.
+    /// `--config` flags carrying `[lints] allow` when the rustflags config
+    /// layer is the live one ([`rustflags::plumbing`]), and the sweep's cfg
+    /// rustflags when the rustdocflags config layer is
+    /// ([`crate::build_purpose::environment::place_sweep_rustdocflags`]).
+    pub(crate) config_args: Vec<String>,
+    /// What cargo sees: the sweep's env over brokkr's own pairs
+    /// ([`sweep_runtime_env`], [`merged_env`]), with a composed rustdocflags
+    /// pair replacing its key. Every cargo run of the lane takes this one
+    /// value rather than re-merging, so a sweep's own `RUSTDOCFLAGS` cannot
+    /// undo the composition.
     pub(crate) env: Vec<(String, String)>,
     /// The cargo config chain as cargo will see it under `env`, discovered
     /// once per lane: the runner refusal, the serial shim decision and every
@@ -138,7 +142,21 @@ pub(crate) fn lane_env(inputs: &LaneInputs<'_>, sweep: &PlannedSweep) -> Result<
         profile_dir,
         env_allows,
     )?;
-    let env = merged_env(&sweep.env, &project_env);
+    let mut env = merged_env(&sweep.env, &project_env);
+    let mut config_args = allow_args;
+    // The sweep's cfg rustflags reach rustdoc too, so every doctest the lane
+    // runs - inline, doc-only, a derived carrier - is collected and compiled
+    // under the cfg its library was built with. Placed for every invocation
+    // of the lane alike: rustdocflags enter no rustc unit's fingerprint, so a
+    // pre-build or a lane running no doctests compiles exactly as before.
+    crate::build_purpose::environment::place_sweep_rustdocflags(
+        inputs.project_root,
+        sweep,
+        target.as_ref(),
+        &[],
+        &mut env,
+        &mut config_args,
+    )?;
     // Cargo sees the merged environment; a sweep CARGO_HOME changes the chain.
     let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let launch_config = rustflags::CargoLaunchConfig::discover_for(
@@ -147,7 +165,7 @@ pub(crate) fn lane_env(inputs: &LaneInputs<'_>, sweep: &PlannedSweep) -> Result<
         target.as_ref(),
     )?;
     refuse_target_runner(sweep, &launch_config)?;
-    Ok(LaneEnv { allow_args, project_env, env, launch_config, target })
+    Ok(LaneEnv { config_args, env, launch_config, target })
 }
 
 /// The sweep's `target`, resolved against the toolchain cargo picks under the
@@ -1161,7 +1179,7 @@ fn build_serial(
     let cargo_extra = forwarded.cargo();
     let target_args = serial_target_args(sweep, inputs.doctests, &forwarded);
     build_resolutions(inputs, attempt, &env.refs(), true, &|run| {
-        let mut selection = env.allow_args.clone();
+        let mut selection = env.config_args.clone();
         selection.extend(cargo_selection_args(
             sweep,
             run,
@@ -1231,7 +1249,7 @@ fn build_direct(
         None
     };
     build_resolutions(inputs, attempt, &env.refs(), false, &|run| {
-        let mut selection = env.allow_args.clone();
+        let mut selection = env.config_args.clone();
         selection.extend(resolution_selection(sweep, run, metadata.as_deref()));
         selection.extend(forwarded.selectors.iter().cloned());
         selection.extend(forwarded.cargo.iter().cloned());
@@ -1539,7 +1557,7 @@ fn build_universe(
     run: &ResolutionRun,
     env: &LaneEnv,
 ) -> Result<UniverseBuilt, DevError> {
-    let mut bare = shape_enumeration_args(sweep, run, env.allow_args.clone());
+    let mut bare = shape_enumeration_args(sweep, run, env.config_args.clone());
     let union = inputs
         .universe_selectors
         .get(&shape_id(sweep))
@@ -1781,8 +1799,8 @@ fn build_lane(
             inputs.project_root,
             sweep,
             req,
-            &env.project_env,
-            &env.allow_args,
+            &env.env,
+            &env.config_args,
             inputs.owners,
             inputs.commands,
         )?);

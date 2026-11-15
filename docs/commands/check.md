@@ -936,7 +936,10 @@ plus `--document-private-items` when `[rustdoc] document_private_items = true`,
 plus the sweep's selection exactly as clippy builds it: profile, feature
 unification, packages, features, env and isolated target dir. Rustdoc resolves
 `cfg` like the build does, so documenting under any other shape would judge doc
-comments on code that shape never compiles. It runs once per distinct build
+comments on code that shape never compiles. Cargo hands a sweep's `rustflags`
+to rustc only, so their `--cfg` and `--check-cfg` entries are also placed in
+the rustdocflags cargo reads (see `rustflags` in `brokkr man sweeps`); a
+`--cfg` hook build documents its hook-only items. It runs once per distinct build
 shape, deduped and `-p`-intersected by the same rules as clippy (see
 "Invocation selection") and through the same loop (`run_per_build_shape`), so
 the two phases cannot disagree about what a sweep covers. A `doc_only` sweep

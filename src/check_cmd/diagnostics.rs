@@ -76,9 +76,10 @@ fn run_one_clippy(
 /// past a denied lint, and `--keep-going` already does that for doc. No `-A`
 /// either - rustdoc takes lint flags only through rustdocflags, where every
 /// change re-fingerprints the doc units - so `[lints] allow` is applied at
-/// ingestion instead ([`code_allowed`]). The lint-only `--check` flags do go
-/// through rustdocflags, added in [`run_one_diagnostic_cargo`]
-/// (`crate::rustdoc_check`).
+/// ingestion instead ([`code_allowed`]). Two things do go through
+/// rustdocflags, added in [`run_one_diagnostic_cargo`]: the sweep's
+/// `--cfg` / `--check-cfg` rustflags, without which rustdoc would resolve `cfg`
+/// unlike the build, and the lint-only `--check` flags (`crate::rustdoc_check`).
 fn doc_args(sweep: &PlannedSweep, run: &ResolutionRun, cfg: &RustdocConfig) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "doc".into(),
@@ -136,19 +137,25 @@ fn run_one_diagnostic_cargo(
     // pair after it used to silently undo the override.
     let mut env_owned = merged_env(&sweep.env, &brokkr_env);
     let mut args = args.to_vec();
-    // rustdoc's lint-only mode when the toolchain has it: the phase reads the
-    // diagnostics and never the rendered site (`rustdoc_check`). An env
-    // placement is shown on the command line, since it changes what ran.
+    // rustdoc's flags: the sweep's cfg rustflags, which cargo never hands
+    // rustdoc on its own, and the lint-only mode when the toolchain has it -
+    // the phase reads the diagnostics and never the rendered site
+    // (`rustdoc_check`). An env placement is shown on the command line, since
+    // it changes what ran.
     let mut env_prefix = String::new();
     let doc_check = phase == Phase::Rustdoc && crate::rustdoc_check::supported(project_root, &env_owned);
-    if doc_check {
-        match crate::rustdoc_check::place(&env_owned) {
-            crate::rustdoc_check::Placement::Env { key, value } => {
-                env_prefix = format!("{key}={value:?} ");
-                env_owned.retain(|(k, _)| k != key);
-                env_owned.push((key.to_owned(), value));
-            }
-            crate::rustdoc_check::Placement::Config(extra) => args.extend(extra),
+    if phase == Phase::Rustdoc {
+        let target = resolve_sweep_target(project_root, sweep)?;
+        let extra: &[&str] = if doc_check { &crate::rustdoc_check::FLAGS } else { &[] };
+        if let Some((key, value)) = crate::build_purpose::environment::place_sweep_rustdocflags(
+            project_root,
+            sweep,
+            target.as_ref(),
+            extra,
+            &mut env_owned,
+            &mut args,
+        )? {
+            env_prefix = format!("{key}={value:?} ");
         }
     }
     let shape = describe_sweep(sweep, false, selection, run.feature_args());

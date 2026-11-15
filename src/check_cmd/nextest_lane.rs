@@ -358,7 +358,7 @@ pub(crate) fn build_nextest(
     // flags direct execution cannot honour are refused here (with advice that
     // fits an engine lane, not a parallel one).
     reject_direct_execution_args(sweep, &forwarded)?;
-    let mut selection = env.allow_args.clone();
+    let mut selection = env.config_args.clone();
     // The engine lane is one cargo build over the whole selection: it does not
     // run per-package resolutions (config refuses package mode on it).
     let run = attempt.combined_run().ok_or_else(|| {

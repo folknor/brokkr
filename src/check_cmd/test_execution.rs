@@ -170,11 +170,11 @@ pub(crate) fn describe_sweep(
 /// must come from the same feature graph as the tests themselves, or a
 /// package-mode lane runs its tests against a binary built under ambient
 /// resolution.
-fn pre_build_args(sweep: &PlannedSweep, req: &SupportRequest, allow_args: &[String]) -> Vec<String> {
+fn pre_build_args(sweep: &PlannedSweep, req: &SupportRequest, config_args: &[String]) -> Vec<String> {
     // One JSON stream carries both the support executables and typed compiler
     // diagnostics. The message format does not enter cargo's fingerprint.
     let mut args: Vec<String> = vec!["build".into(), "--message-format=json".into()];
-    args.extend(allow_args.iter().cloned());
+    args.extend(config_args.iter().cloned());
     // The profile must match BROKKR_TEST_BIN_DIR, and the support request
     // carries only features its package can resolve.
     args.extend(support_selection_args(sweep, req, sweep.cargo_profile()));
@@ -251,13 +251,13 @@ fn run_sweep_pre_build(
     project_root: &Path,
     sweep: &PlannedSweep,
     req: &SupportRequest,
-    project_env: &[(String, String)],
-    allow_args: &[String],
+    env: &[(String, String)],
+    config_args: &[String],
     owners: &crate::diagnostic::OwnerIndex,
     commands: bool,
 ) -> Result<Vec<SupportArtifact>, DevError> {
     let package = req.package();
-    let args = pre_build_args(sweep, req, allow_args);
+    let args = pre_build_args(sweep, req, config_args);
 
     // A pre-build is part of its sweep's shape: logged, shown as the status,
     // printed only under `--commands`.
@@ -270,8 +270,7 @@ fn run_sweep_pre_build(
     );
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let env_full = merged_env(&sweep.env, project_env);
-    let env_refs: Vec<(&str, &str)> = env_full
+    let env_refs: Vec<(&str, &str)> = env
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
@@ -323,7 +322,9 @@ impl SerialShim {
         root: &Path,
         sweep: &PlannedSweep,
         extra_args: &[String],
-        project_env: &[(String, String)],
+        // The lane's final env (`LaneEnv::env`); the sweep's env re-applied
+        // over it below is already in it.
+        env: &[(String, String)],
     ) -> Self {
         if sweep.lane_exec().threads().is_some_and(crate::profile::Threads::is_cargo_mediated) {
             return Self::CargoThreaded;
@@ -331,7 +332,7 @@ impl SerialShim {
         match serial_shim_fallback(
             root,
             &ForwardedArgs::parse(extra_args),
-            project_env,
+            env,
             &sweep.env,
             sweep.target.is_some(),
         ) {
@@ -767,9 +768,9 @@ fn run_one_test_sweep(
     sweep: &PlannedSweep,
     run: &ResolutionRun,
     extra_args: &[String],
-    project_env: &[(String, String)],
+    env: &[(String, String)],
     owners: &crate::diagnostic::OwnerIndex,
-    allow_args: &[String],
+    config_args: &[String],
     doctests: bool,
     multi: bool,
     commands: bool,
@@ -838,7 +839,7 @@ fn run_one_test_sweep(
     let mut args: Vec<String> = vec!["test".into(), "--message-format=json".into()];
     // Before the selection and the `--` split: `--config` is a cargo option,
     // and everything past `--` belongs to libtest.
-    args.extend(allow_args.iter().cloned());
+    args.extend(config_args.iter().cloned());
     args.extend(cargo_selection_args(
         sweep,
         run,
@@ -935,8 +936,7 @@ fn run_one_test_sweep(
     let full_command = format!("failing command: cargo {}", args.join(" "));
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let env_full = merged_env(&sweep.env, project_env);
-    let env_refs: Vec<(&str, &str)> = env_full
+    let env_refs: Vec<(&str, &str)> = env
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
