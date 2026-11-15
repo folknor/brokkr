@@ -1823,13 +1823,21 @@ Enrollment invalidates cargo's compile fingerprint once per target dir."
 Ask the brokkr process holding the lock to wrap up cleanly.
 
 Default: sends SIGTERM to the brokkr process. Brokkr catches it,
-SIGKILLs the tool being measured, flushes partial sidecar data
-(reachable via `brokkr sidecar dirty`), discards the stopped
+forwards SIGTERM to the run child (cargo for plain run, the
+program with --commit or --with), and waits up to 1.5s before
+SIGKILLing that child. Run descendants receive no direct signal
+from brokkr. Bench children receive SIGTERM as a process group;
+after the leader exits or 1.5s, the group receives SIGKILL.
+This gives a directly run program a bounded graceful stop;
+completion of shutdown output is not guaranteed.
+
+Brokkr flushes partial sidecar data (reachable via
+`brokkr sidecar dirty`), discards the stopped
 attempt's own scratch output, and releases the lock. No project
 clean follows; diagnostics and kept run directories stay.
 
---hard: sends SIGKILL to both the brokkr PID and the recorded
-child PID without any cleanup. Use when the default path is
+--hard: sends SIGKILL to brokkr and its descendants without any
+cleanup. Use when the default path is
 wedged; follow up with `brokkr clean` manually."
     )]
     Kill {

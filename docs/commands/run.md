@@ -49,6 +49,24 @@ under `--commit`, brokkr reports the signal and exits 1. An accepted interrupt
 or graceful stop exits 130. A failing `cargo install` ends with a one-line `[error]` naming
 the package and cargo's exit code, and exits 1.
 
+`brokkr kill` asks the lock holder to stop via SIGTERM. During `run`,
+brokkr forwards SIGTERM to its direct child and waits up to 1.5 seconds for
+that child to exit before sending it SIGKILL. With `--commit` or `--with`,
+the child is the program itself, so a program that handles SIGTERM has that
+bounded window to shut down gracefully and print its summary. Plain `run`
+launches `cargo run`, so cargo receives the signal; brokkr does not directly
+signal the program beneath cargo. Run children inherit brokkr's process group,
+and brokkr does not signal their descendants on this path. A shutdown summary
+is therefore not guaranteed.
+
+For `brokkr bench`, including preflight children, the same stop sends SIGTERM
+to the child's process group and waits up to 1.5 seconds for the group leader
+to exit. As soon as the leader exits, or when that grace expires, brokkr sends
+SIGKILL to the group to stop remaining members. This interruption grace is
+separate from a bench's `stop_at` marker grace and wall deadline.
+`brokkr kill --hard` skips the grace and cleanup and sends SIGKILL to brokkr
+and its descendants.
+
 Refusals that are about the request rather than the build (no such target, a
 name shared by several targets, no bin targets to install, a `[bin] install`
 entry with no bin) print their message bare, without a `build:` or `config:`
