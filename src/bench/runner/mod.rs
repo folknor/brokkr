@@ -46,7 +46,7 @@ pub(crate) struct BenchArgs {
     pub(crate) name: Option<String>,
     /// Run the commit's build, in a persistent worktree.
     pub(crate) commit: Option<String>,
-    pub(crate) iterations: std::num::NonZeroU32,
+    pub(crate) iterations: Option<std::num::NonZeroU32>,
     /// `--hotpath`: build with the bench's `hotpath_features` and require
     /// every marked call to capture.
     pub(crate) hotpath: bool,
@@ -60,6 +60,13 @@ pub(crate) struct BenchArgs {
     pub(crate) dry_run: bool,
     /// `--test`: run the project's contract tests (`bench_tests`) instead.
     pub(crate) test: bool,
+}
+
+impl BenchArgs {
+    fn iteration_count(&self, bench: &Bench) -> u32 {
+        self.iterations
+            .map_or(bench.iterations, std::num::NonZeroU32::get)
+    }
 }
 
 /// `brokkr bench --test`: every contract-test file under `bench_tests`,
@@ -209,7 +216,7 @@ pub(crate) fn run(
             committed: args.commit.is_some(),
             hostname: &hostname,
             container: &container,
-            iterations: args.iterations.get(),
+            iterations: args.iteration_count(bench),
             argv: argv.clone(),
             measurement,
             preflight_modules: &modules[index],
@@ -642,7 +649,7 @@ fn dry_run(
             ""
         },
         output::count(
-            usize::try_from(args.iterations.get()).unwrap_or(usize::MAX),
+            usize::try_from(args.iteration_count(bench)).unwrap_or(usize::MAX),
             "iteration"
         ),
         output::count(arms.len(), "arm"),

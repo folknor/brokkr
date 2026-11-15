@@ -362,7 +362,7 @@ impl Fixture {
         let args = BenchArgs {
             name: Some(bench.to_owned()),
             commit: None,
-            iterations: std::num::NonZeroU32::new(iterations).unwrap(),
+            iterations: std::num::NonZeroU32::new(iterations),
             hotpath: measurement == store::Measurement::Hotpath,
             alloc: measurement == store::Measurement::Alloc,
             params: params.iter().map(|p| (*p).to_owned()).collect(),
@@ -622,6 +622,61 @@ fn completed_twice(run: &store::RunDocument) {
         assert_eq!(child.ending, store::ChildEnding::Exited { code: 0 });
         assert_eq!(iteration.record.as_ref().unwrap()["mode"], mode(run));
     }
+}
+
+#[test]
+fn bench_iteration_default_and_cli_override_reach_the_run_document() {
+    let _serial = crate::test_scratch::process_global_lock();
+    let config = format!(
+        "project = \"e2e-iteration-default\"\n{}",
+        BENCHES.replace("[bench.probe]", "[bench.probe]\niterations = 1")
+    );
+    let fixture = Fixture::with_files("iteration-default", &[("brokkr.toml", &config)]);
+    let _hold = crate::lockfile::test_hold(
+        &fixture.detection.project_root,
+        &fixture.detection.build_root,
+    );
+    // Zero in this test helper means no CLI override; the CLI itself refuses zero.
+    for (label, override_count, expected) in [("configured", 0, 1), ("override", 4, 4)] {
+        let dry = fixture.invoke(
+            &format!("iteration-default-dry-{label}"),
+            "probe",
+            override_count,
+            store::Measurement::Timing,
+            true,
+            &[],
+        );
+        assert!(dry.result.is_ok(), "{}", dry.console);
+        dry.says(&format!(
+            "{expected} {} of 1 arm",
+            if expected == 1 {
+                "iteration"
+            } else {
+                "iterations"
+            }
+        ));
+        let ran = fixture.bench(
+            &format!("iteration-default-run-{label}"),
+            "probe",
+            override_count,
+            &["--mode", label],
+        );
+        assert!(ran.result.is_ok(), "{}", ran.console);
+        let runs = fixture.stored();
+        let run = runs.iter().find(|run| mode(run) == label).unwrap();
+        assert_eq!(run.iterations_requested, expected);
+        assert_eq!(run.iterations.len(), expected as usize);
+    }
+    let dry = fixture.invoke(
+        "iteration-default-fallback",
+        "broken",
+        0,
+        store::Measurement::Timing,
+        true,
+        &[],
+    );
+    assert!(dry.result.is_ok(), "{}", dry.console);
+    dry.says("3 iterations of 1 arm");
 }
 
 /// A failed iteration fails its arm and does not stop the rest; every arm is

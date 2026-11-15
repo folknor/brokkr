@@ -556,9 +556,10 @@ In depth: `brokkr man clippy`."
         #[arg(long, value_name = "REF")]
         commit: Option<String>,
 
-        /// Iterations to run; the result is the fastest.
-        #[arg(long, value_name = "N", default_value = DEFAULT_BENCH_RUNS)]
-        iterations: std::num::NonZeroU32,
+        /// Iterations to run; defaults to the bench setting, otherwise 3.
+        /// The result is the fastest.
+        #[arg(long, value_name = "N")]
+        iterations: Option<std::num::NonZeroU32>,
 
         /// Profile: build with the bench's hotpath_features and require
         /// every call marked hotpath to capture its report.

@@ -10,7 +10,7 @@ validating-a-script`).
 
 ```
 brokkr bench                          # the benches this project declares
-brokkr bench NAME                     # run one, three iterations
+brokkr bench NAME                     # run one, using its default iteration count
 brokkr bench --iterations 10 NAME
 brokkr bench --commit v0.5.0 NAME     # build and run that commit
 brokkr bench --hotpath NAME           # profile: its marked calls' reports
@@ -32,7 +32,9 @@ collide with a param. brokkr's options:
 - `--commit REF` - build REF in a persistent worktree, as `brokkr build
   --commit` does, and run it. The benches are always the working tree's:
   HEAD's scripts serve every commit, and branch on `since()` (below).
-- `--iterations N` - how many iterations, default 3. The result is the
+- `--iterations N` - how many iterations, overriding the bench table's
+  `iterations` setting (default 3 when absent). Any positive u32 count is
+  accepted, including one larger than the bench default. The result is the
   fastest.
 - `--hotpath` - profile: build with the bench's `hotpath_features` (`brokkr
   man bench-config`) added, and require every call marked `hotpath`

@@ -335,6 +335,7 @@ mod tests {
             script,
             target: None,
             profile: None,
+            iterations: 3,
             features: Vec::new(),
             default_features: true,
             hotpath_features: Vec::new(),

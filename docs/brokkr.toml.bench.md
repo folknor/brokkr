@@ -135,6 +135,10 @@ params.jobs = { free = true, help = "worker threads" }
   `hotpath_features`; absent or empty, the bench cannot be alloc-profiled.
   Held to the same rules, and a timing run that resolves one fails its arm
   too.
+- `iterations` - the default for `brokkr bench --iterations`, a positive
+  integer up to 4294967295; absent is 3. Use 1 when the child samples
+  internally and records its own summary. The command line overrides it,
+  including a larger count. This belongs to the bench, not a `bench_params` set.
 - `uses` - `[bench_params]` sets whose params the bench takes (below).
 - `params` - the bench's own params (below).
 - `description`, `version`, `date`, `changelog` - the devs' notes on the

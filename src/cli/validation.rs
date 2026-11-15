@@ -229,7 +229,7 @@ mod tests {
                 iterations,
                 bench,
                 ..
-            } => (commit, iterations.get(), bench),
+            } => (commit, iterations.map(std::num::NonZeroU32::get), bench),
             _ => panic!("unexpected command"),
         };
         let (commit, iterations, rest) = bench(
@@ -247,10 +247,10 @@ mod tests {
             ])
             .unwrap(),
         );
-        assert_eq!((commit.as_deref(), iterations), (Some("abc"), 5));
+        assert_eq!((commit.as_deref(), iterations), (Some("abc"), Some(5)));
         assert_eq!(rest, ["cat", "--help", "--commit", "x"]);
         let (_, iterations, rest) = bench(parse(["brokkr", "bench"]).unwrap());
-        assert_eq!((iterations, rest.len()), (3, 0));
+        assert_eq!((iterations, rest.len()), (None, 0));
         assert!(parse(["brokkr", "bench", "--iterations", "0", "cat"]).is_err());
     }
 

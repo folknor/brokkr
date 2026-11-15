@@ -35,6 +35,8 @@ pub struct Bench {
     pub script: BenchScript,
     /// The bin target to build; `None` means `[bin] default`.
     pub target: Option<String>,
+    /// Default iteration count when the command line gives none.
+    pub iterations: u32,
     pub profile: Option<RustProfile>,
     pub features: Vec<String>,
     /// Whether cargo builds the package's default features; `true` unless the
@@ -357,6 +359,7 @@ struct RawParam {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBench {
+    iterations: Option<std::num::NonZeroU32>,
     script: Option<String>,
     script_file: Option<String>,
     target: Option<String>,
@@ -777,6 +780,7 @@ fn parse_bench(
         name: name.to_owned(),
         script,
         target: raw.target,
+        iterations: raw.iterations.map_or(3, std::num::NonZeroU32::get),
         profile: raw.profile,
         features: raw.features,
         default_features: raw.default_features.unwrap_or(true),
@@ -1135,6 +1139,39 @@ mod tests {
             Ok(_) => panic!("{test_name}: the config should be refused"),
             Err(e) => e,
         }
+    }
+
+    #[test]
+    fn iteration_defaults_and_invalid_counts() {
+        for (value, expected) in [
+            ("", 3),
+            ("iterations = 1", 1),
+            ("iterations = 4294967295", u32::MAX),
+        ] {
+            let benches = single(
+                &format!("iterations_{expected}"),
+                &format!("[bench.c]\nscript = \"x = 1\"\n{value}\n"),
+            )
+            .unwrap();
+            assert_eq!(benches["c"].iterations, expected);
+        }
+        for (index, value) in ["0", "-1", "4294967296", "1.5", "true", "\"1\""]
+            .iter()
+            .enumerate()
+        {
+            let error = err_of(
+                &format!("iterations_bad_{index}"),
+                &format!("[bench.c]\nscript = \"x = 1\"\niterations = {value}\n"),
+            );
+            assert!(error.contains("[bench.c]"), "{error}");
+        }
+        assert!(
+            single(
+                "iterations_not_a_set_setting",
+                "[bench_params.s]\niterations = 1\n"
+            )
+            .is_err()
+        );
     }
 
     #[test]
