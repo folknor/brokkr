@@ -174,7 +174,10 @@ brokkr.
 
 `crit` takes the global lock, so a `disable_toolchain` project's pinned
 `rust-toolchain.toml` is moved aside for the window cargo runs in - the same
-mechanism every build path uses.
+mechanism every build path uses. Under that lock, a run that samples into a
+baseline refuses while a `brokkr serve` server is live, since a serving
+process perturbs the measurement; `--compare` and `--baselines` sample nothing
+and are not refused (`brokkr man serve`).
 
 That move is a rename to a `.brokkr-disabled` sidecar, which `git status` sees
 as a deletion plus an untracked file. The baseline name is therefore resolved

@@ -80,6 +80,7 @@ Check => ("check", Visibility::Any, Optional, Blocking, true, crate::measure::Me
 Clippy => ("clippy", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Fmt => ("fmt", Visibility::Any, Optional, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Run => ("run", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
+Serve => ("serve", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
 Build => ("build", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
 Install => ("install", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Wc => ("wc", Visibility::Any, Optional, None, true, crate::measure::MeasureMode::Run, None, &[]),
@@ -211,7 +212,9 @@ impl CommandSpec {
     /// (whose hosts are virtual), and any `brokkr bench` that only lists,
     /// describes or refuses, decided against the declared
     /// `benches` (`None` before a config is detected, when a bench is
-    /// refused anyway).
+    /// refused anyway). Bare `brokkr serve` and `serve --stop` count too:
+    /// they list or signal a serve generation, which the serve registry's
+    /// flocks govern and no hold protects, and they build nothing.
     pub(crate) fn reads_only(
         command: &super::Command,
         benches: Option<&std::collections::BTreeMap<String, crate::config::bench::Bench>>,
@@ -222,6 +225,9 @@ impl CommandSpec {
             super::Command::Bench { bench, .. } => {
                 benches.is_none_or(|benches| !crate::bench::runner::runs(benches, bench))
             }
+            // Listing and stopping serves: the registry's own flocks govern
+            // them, never the global lock (`crate::serve`).
+            super::Command::Serve { target, stop, .. } => target.is_none() || stop.is_some(),
             _ => false,
         }
     }
@@ -281,12 +287,10 @@ impl CommandSpec {
                 // Historical only when no stage builds the live tree: a
                 // `--with` target built from the live tree needs the live
                 // tree's policy even when the program itself is `--commit`.
-                super::Command::Run {
-                    commit,
-                    with,
-                    with_commit,
-                    ..
-                } => Ok(commit.is_some() && (with.is_none() || with_commit.is_some())),
+                super::Command::Run { program, .. } | super::Command::Serve { program, .. } => {
+                    Ok(program.commit.is_some()
+                        && (program.with.is_none() || program.with_commit.is_some()))
+                }
                 super::Command::Build { commit, .. }
                 | super::Command::Crit { commit, .. }
                 | super::Command::Bench { commit, .. }

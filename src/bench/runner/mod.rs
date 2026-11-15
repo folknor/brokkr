@@ -442,6 +442,9 @@ fn preflight_and_digest(
     config: &std::sync::Arc<lua::Value>,
     validated: Vec<BTreeSet<String>>,
 ) -> Result<Prepared, DevError> {
+    // Under dispatch's hold, before the preflight launches anything: a run
+    // beside a `brokkr serve` generation would measure the server too.
+    crate::serve::refuse_measurement("a script bench")?;
     let commit = crate::git::resolve_commit(
         detection.build_root.as_path(),
         args.commit.as_deref().unwrap_or("HEAD"),

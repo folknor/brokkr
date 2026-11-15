@@ -25,6 +25,10 @@ use crate::output;
 /// target name can collide with it.
 pub const NO_NAME: &str = "\u{0}brokkr-bare-run";
 
+/// The environment variable `run --with` and `serve --with` hand the program
+/// the `--with` target's executable path in.
+pub(crate) const WITH_EXE_ENV: &str = "BROKKR_WITH_EXE";
+
 /// Flags of `brokkr run` that take a separate value argument. Derived from
 /// clap so adding an option cannot silently desynchronise the argv pre-pass.
 /// Build on a larger-stack helper thread: constructing brokkr's full clap

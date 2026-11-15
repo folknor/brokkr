@@ -175,6 +175,18 @@ fn mark_requested() -> bool {
     transition(ShutdownState::request).has_request()
 }
 
+/// Set once by a process whose every wait polls the flag, so a repeated
+/// signal can never mean "nothing is listening" (see [`never_escalate`]).
+static NEVER_ESCALATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Make a repeated SIGTERM or SIGINT stay a request instead of taking the
+/// default action. For the `brokkr serve` supervisor (`crate::serve`), which
+/// polls the flag on every tick: two stoppers that each send one SIGTERM must
+/// not turn the server's graceful drain into the supervisor's death.
+pub fn never_escalate() {
+    NEVER_ESCALATE.store(true, Ordering::SeqCst);
+}
+
 /// How many [`SigtermGuard`]s are live. Only the transition 0 -> 1 installs
 /// the handlers (and clears a stale request); only 1 -> 0 restores the
 /// defaults. Touched outside signal context only.
@@ -290,7 +302,7 @@ extern "C" fn shutdown_handler(sig: libc::c_int) {
     // a runner blocked in `wait()` never polls, and a test process has no
     // cooperative-shutdown contract to honour. See [`GroupReaper`].
     kill_registered_groups();
-    if mark_requested() {
+    if mark_requested() && !NEVER_ESCALATE.load(Ordering::SeqCst) {
         // A request is already pending and brokkr is still here: whatever is
         // running is not polling the flag. The second Ctrl-C / `brokkr kill`
         // takes the default action, as it would with no guard at all.

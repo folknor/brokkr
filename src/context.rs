@@ -159,7 +159,7 @@ impl MeasurementSession {
             DirtyPolicy::for_request(req).allowed(),
             req.stop_marker.map(str::to_owned),
         )
-        .map(|ctx| ctx.with_request(req))
+        .and_then(|ctx| ctx.with_request(req))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -204,7 +204,19 @@ impl MeasurementSession {
     /// given `MeasureRequest` to the harness. Every row built by this
     /// harness will carry them in the `brokkr_args` and `variant`
     /// columns, so individual bench writers don't have to plumb them.
-    pub(crate) fn with_request(mut self, req: &crate::measure::MeasureRequest) -> Self {
+    ///
+    /// Every measured command's session passes here, under its hold, before
+    /// its first sample: a recorded mode refuses while a `brokkr serve`
+    /// generation is outstanding.
+    pub(crate) fn with_request(
+        mut self,
+        req: &crate::measure::MeasureRequest,
+    ) -> Result<Self, DevError> {
+        if let Some(mode) = req.mode.recorded()
+            && !req.dry_run
+        {
+            crate::serve::refuse_measurement(&format!("a --{} run", mode.label()))?;
+        }
         if req.mode.recorded().is_some() {
             self.harness.note_unneeded_force(req.force);
         }
@@ -213,7 +225,7 @@ impl MeasurementSession {
             .with_invocation(req.invocation.clone())
             .with_measure_mode(req.mode.recorded())
             .with_env_kv(config::captured_env_pairs(req.dev_config));
-        self
+        Ok(self)
     }
 
     /// Create a session with a built executable using the dirty-tree policy for this request.
@@ -234,7 +246,7 @@ impl MeasurementSession {
             DirtyPolicy::for_request(req).allowed(),
             req.stop_marker.map(str::to_owned),
         )
-        .map(|ctx| ctx.with_request(req))
+        .and_then(|ctx| ctx.with_request(req))
     }
 
     /// Create a new session with a built executable.
@@ -337,7 +349,7 @@ impl MeasurementSession {
             DirtyPolicy::for_request(req).allowed(),
             req.stop_marker.map(str::to_owned),
         )
-        .map(|ctx| ctx.with_request(req))
+        .and_then(|ctx| ctx.with_request(req))
     }
 
     /// The built executable's path. Code under `src/pbfhogg` does not call

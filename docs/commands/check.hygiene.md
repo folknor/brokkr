@@ -282,6 +282,11 @@ another PID namespace cannot be sampled from here, and `brokkr lock` says so.
 `BROKKR_EXEC` is reserved like the hold variables below: a sweep env value for
 it is ignored. A nextest lane's processes share one launch token for the lane.
 
+After the holder's lines, or `no active lock`, `brokkr lock` prints one
+`serve:` line per live `brokkr serve` server, since a serve holds no lock but
+makes every measurement refuse. It only looks: what a stopped serve left is
+cleaned by the commands that act on serves (`brokkr man serve`).
+
 ## Strays
 
 brokkr assumes every cargo on a development host runs through it. A cargo

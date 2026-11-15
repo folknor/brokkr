@@ -1196,6 +1196,65 @@ fn terminate_child(
     ended
 }
 
+/// Supervise a long-lived process-group leader with no output of brokkr's to
+/// capture (`brokkr serve`'s server, its streams on a file) until it exits on
+/// its own or a stop is requested.
+///
+/// Every ending sends the group SIGKILL while the leader is still an unreaped
+/// child, so the pgid cannot name a recycled group: an own exit is observed
+/// with `WNOWAIT` first, and a stop goes through [`terminate_child`]'s SIGTERM,
+/// `grace`, SIGKILL. That is escalation, not a barrier, exactly as there: a
+/// killed member may outlive the leader's reap for a moment, and one that left
+/// the group is out of reach. `isolation` must be the process group the child
+/// was spawned into.
+pub(crate) fn supervise_group_leader(
+    mut child: std::process::Child,
+    isolation: ChildIsolation<'_>,
+    grace: Duration,
+) -> Ending {
+    let pid = child.id();
+    let mut pidfd = crate::process::pidfd::open_own(pid).ok();
+    let reap = |child: &mut std::process::Child, ending: Option<Ending>| match child.wait() {
+        Ok(status) => ending.unwrap_or_else(|| {
+            Ending::from_status(&status).unwrap_or_else(|| {
+                Ending::WaitFailed("wait returned no exit code or signal".to_owned())
+            })
+        }),
+        Err(error) => Ending::WaitFailed(error.to_string()),
+    };
+    loop {
+        if crate::shutdown::is_shutdown_requested() {
+            terminate_child(
+                &mut child,
+                isolation,
+                true,
+                grace,
+                DEADLINE_POLL_INTERVAL,
+                None,
+            );
+            return reap(&mut child, Some(Ending::Interrupted));
+        }
+        match leader_exited(pid) {
+            Ok(true) => {
+                if isolation.is_process_group() {
+                    crate::process::signal_process_group(pid, libc::SIGKILL).ok();
+                }
+                return reap(&mut child, None);
+            }
+            Ok(false) => {}
+            Err(()) => {
+                child.kill().ok();
+                return reap(&mut child, None);
+            }
+        }
+        let next = Instant::now() + DEADLINE_POLL_INTERVAL;
+        if wait_for_tick(&mut pidfd, next, Instant::now()).is_some() {
+            // The exit is read on the next round, through `leader_exited`.
+            pidfd = None;
+        }
+    }
+}
+
 /// How a stop's SIGTERM grace ended (`terminate_child`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Grace {

@@ -5,6 +5,16 @@ use crate::lockfile;
 use crate::output;
 
 pub(crate) fn cmd_lock() -> Result<(), DevError> {
+    let holder = holder_status();
+    // The serves hold no lock but are the other thing a measurement waits
+    // on: they make it refuse (`crate::serve`).
+    for line in crate::serve::lock_report() {
+        output::lock_msg(&format!("serve: {line}"));
+    }
+    holder
+}
+
+fn holder_status() -> Result<(), DevError> {
     let Some(info) = lockfile::status()? else {
         output::lock_msg("no active lock");
         return Ok(());

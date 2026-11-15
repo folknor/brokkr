@@ -164,6 +164,14 @@ impl ProjectState {
         self.root.join("artifacts")
     }
 
+    /// `brokkr serve`'s generation directories, `serve/<name>.<token>/`: the
+    /// served executables' own links and the generation's log
+    /// (`crate::serve`). Kept apart from `artifacts/` so `brokkr clean`
+    /// removing the snapshot store never takes a running server's files.
+    pub(crate) fn serve_dir(&self) -> PathBuf {
+        self.root.join("serve")
+    }
+
     /// Spill directory for the corpus digest's external sort. Each sorter
     /// makes its own subdirectory here and removes it when dropped.
     pub(crate) fn corpus_sort_dir(&self) -> PathBuf {

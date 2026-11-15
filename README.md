@@ -62,7 +62,8 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 | `invalidate` | Hard-delete results + sidecar rows by UUID or commit prefix (dry-run unless `-f`) |
 | `clean [--worktrees]` | Remove scratch/temp files; `--worktrees` also purges persistent benchmark worktrees |
 | `history` | Browse global command history |
-| `lock` | Show who holds the benchmark lock |
+| `lock` | Show who holds the benchmark lock, and the live serves |
+| `serve [TARGET]` | Bare: list the live background servers. `TARGET`: build it as `run` does and serve it in the background without holding the lock; measurements refuse while it lives. `--stop [WHICH]` stops one (`brokkr man serve`) |
 
 `check` filters cargo output into one line per diagnostic. Compilation noise is stripped; each error or warning becomes `error[CODE] file:line:col message` or `warning[rule] file:line:col message`. Passing tests are aggregated (for example, `cargo test: N passed (M suites, elapsed)`), failures become `FAILED name location message`. There is no unfiltered mode - the one-line form is the whole surface - though a parse failure still falls back to dumping the raw streams, since a stream brokkr could not read is the one case where the unprocessed text is all there is. `--json` appends a single machine-readable summary line.
 

@@ -419,6 +419,11 @@ pub fn lock_msg(msg: &str) {
     emit_tag("[lock]", msg);
 }
 
+/// `brokkr serve`: starting, listing and stopping served programs.
+pub fn serve_msg(msg: &str) {
+    emit_tag("[serve]", msg);
+}
+
 /// The stray-process reaps and `brokkr strays`.
 pub fn strays_msg(msg: &str) {
     emit_tag("[strays]", msg);

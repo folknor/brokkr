@@ -147,10 +147,15 @@ fn host_drain() -> Result<Option<OwnedFd>, DevError> {
 /// match: test processes left behind by a brokkr that died by SIGKILL
 /// (`crate::test_orphans`). Its liveness proof is a per-process flock, not
 /// this hold, so it is only placed here, not dependent on it.
+///
+/// A `brokkr serve` generation does not hold the lock, so the hold proceeds
+/// beside one; the warning says so once, and a measurement refuses at its own
+/// start (`crate::serve::refuse_measurement`).
 fn host_after_fresh_hold() {
     crate::stray::reap_after_lock();
     crate::test_orphans::reap_after_lock();
     crate::guard::warn_if_guard_stale();
+    crate::serve::warn_if_live();
 }
 
 /// Path-explicit body of [`super::acquire`], parameterised by its [`HoldEffects`] -

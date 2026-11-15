@@ -23,7 +23,7 @@ The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bar
 - `docs/commands/check.test-lanes.md` - check's test phase and its lanes.
 - `docs/commands/check.hygiene.md` - time ceilings, `brokkr lock`, strays and orphans, the rustc guard.
 - `reference/check-internals.md` - how the check/test pipeline is built. Read before changing it.
-- `docs/commands/test.md`, `clippy.md`, `deps.md`, `crit.md`, `run.md` (also `build`, `install`), `clean.md`, `results.md` - those commands.
+- `docs/commands/test.md`, `clippy.md`, `deps.md`, `crit.md`, `run.md` (also `build`, `install`), `serve.md`, `clean.md`, `results.md` - those commands.
 - `docs/commands/bench.md` - `brokkr bench NAME`: running a script bench, its builtins, what a run stores.
 - `docs/commands/measure.md` - `--bench`/`--hotpath`/`--alloc`/`--stop`, the sidecar profiler, `brokkr sidecar`.
 - `docs/commands/output-channels.md` - where a run's output goes.
@@ -49,7 +49,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 ## Shared commands quick reference
 
 - `check` / `test` - the validation pipeline. A markdown-only dirty tree runs the prose phases only.
-- `bench`, `clippy`, `deps`, `crit`, `run` / `build` / `install`, `clean`, `results` - see their docs above.
+- `bench`, `clippy`, `deps`, `crit`, `run` / `build` / `install`, `serve`, `clean`, `results` - see their docs above.
 - `man [TOPIC] [SECTION...]` - read the bundled docs.
 - `env` - host facts, tool versions, datasets, and brokkr's own store sizes.
 - `wc [threshold]` - tracked `.rs` files over `threshold` lines (default 800).

@@ -124,6 +124,12 @@ const TOPICS: &[Topic] = &[
         commands: &[CommandId::Env],
     },
     Topic {
+        name: "serve",
+        summary: "serve: background dev servers without the lock, the bench-lock, stopping",
+        content: include_str!("../docs/commands/serve.md"),
+        commands: &[CommandId::Serve],
+    },
+    Topic {
         name: "clean",
         summary: "what clean removes, what is permanently out of scope",
         content: include_str!("../docs/commands/clean.md"),

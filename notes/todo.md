@@ -202,6 +202,7 @@ shape" was the principled call; the use case might suggest a different shape
 Ruled no 2026-10-28. `run` keeps the global lock through the program's whole
 run: it serializes against benchmarks, keeps `brokkr lock`/`kill` tracking and
 the `disable_toolchain` window, and protects `--commit` worktree artifacts.
+A long-lived server is `brokkr serve`'s job instead (brokkr#186).
 
 ### A bare `check` naming `--gate` when `gate_profile` is set
 Ruled no 2026-10-28. A nag on the high-frequency loop path teaches people to
@@ -238,6 +239,21 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 ---
 
 ## Backlog
+
+### A serve's cleanup after its supervisor dies is best effort (2026-11-15)
+
+`src/serve.rs` retires a generation whose supervisor is gone once a `/proc`
+scan for `BROKKR_SERVE` carriers comes back empty. Enumeration is not atomic:
+a carrier that forks and exits while the scan passes it can leave its child
+unseen, and a process that drops the variable, turns undumpable or leaves the
+namespace is invisible by construction. While the supervisor runs, exclusion
+is strict; this gap is only for a supervisor that was SIGKILLed or exited with
+escapees. Wanted where cgroup v2 delegation exists (the condition
+`src/lock/cgroup.rs` already tests): a per-generation `brokkr-serve-<token>`
+group the supervisor puts the server in, `cgroup.events` `populated 0` as the
+quiescence proof and `cgroup.kill` as the reconcile, keeping the scan as the
+fallback on undelegated login scopes. Sparred during brokkr#186 and left out
+of that landing as an opportunistic upgrade.
 
 ### A results param filter cannot tell collections apart by comma (2026-11-09)
 

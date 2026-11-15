@@ -169,6 +169,16 @@ impl Drop for HoldCgroup {
     }
 }
 
+impl HoldCgroup {
+    /// The holder's original cgroup directory, the parent of the hold's
+    /// group: where a process meant to outlive the hold is moved before it
+    /// execs (`process::spawn::spawn_detached`), so it never keeps the hold's
+    /// group populated.
+    pub(crate) fn parent_fd(&self) -> RawFd {
+        self.parent.as_raw_fd()
+    }
+}
+
 impl CgroupView {
     /// Cumulative CPU of everything charged to the group, microseconds.
     pub(crate) fn cpu_usec(&self) -> Option<u64> {

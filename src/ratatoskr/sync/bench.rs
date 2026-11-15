@@ -97,6 +97,8 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         req.force,
         None,
     )?;
+    // Under the session's hold, before anything is measured.
+    crate::serve::refuse_measurement("a sync --bench run")?;
     harness.note_unneeded_force(req.force);
     let code_root = req.build_root.as_path();
     let harness = harness

@@ -198,6 +198,11 @@ pub(crate) fn main() {
     if let Some(code) = test_runner::maybe_run_harness_shim() {
         std::process::exit(code);
     }
+    // A `brokkr serve` supervisor is no command: it skips detection, parsing,
+    // history and every lock (`crate::serve::supervisor`).
+    if let Some(code) = crate::serve::maybe_run_supervisor() {
+        std::process::exit(code);
+    }
     shed_inherited_run_env();
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let start = Instant::now();
@@ -473,9 +478,76 @@ pub(super) fn run_program(
     )
 }
 
-/// The environment variable `run --with` hands the program the `--with`
-/// target's snapshot path in.
-const WITH_EXE_VAR: &str = "BROKKR_WITH_EXE";
+const WITH_EXE_VAR: &str = runnables::WITH_EXE_ENV;
+
+/// `brokkr serve TARGET`: what dispatch parsed.
+pub(super) struct ServeRequest<'a> {
+    pub(super) target: &'a str,
+    pub(super) choice: Option<crate::build::RustProfile>,
+    pub(super) feat: &'a runnables::FeatureArgs<'a>,
+    pub(super) commit: Option<&'a str>,
+    pub(super) with: Option<&'a WithTarget<'a>>,
+    pub(super) name: Option<&'a str>,
+    pub(super) ready: Option<&'a str>,
+    pub(super) ready_timeout: std::time::Duration,
+    pub(super) grace: std::time::Duration,
+    pub(super) args: &'a [String],
+    pub(super) detection: Option<&'a project::Detection>,
+}
+
+/// `brokkr serve TARGET`: build the program and any `--with` target as
+/// `brokkr build` does - snapshots, each worktree stage finished before the
+/// next begins, the `--with` target first as for `run` - then hand them to
+/// `crate::serve::start`, all under the dispatch hold.
+pub(super) fn run_serve(req: &ServeRequest<'_>) -> Result<(), DevError> {
+    crate::serve::refuse_nested_start()?;
+    let with = match req.with {
+        Some(w) => Some(build_snapshot(
+            Some(w.name),
+            req.choice.clone(),
+            &w.feat,
+            w.commit,
+            req.detection,
+        )?),
+        None => None,
+    };
+    let program = build_snapshot(
+        Some(req.target),
+        req.choice.clone(),
+        req.feat,
+        req.commit,
+        req.detection,
+    )?;
+    let fallback = match req.detection {
+        Some(_) => None,
+        None => Some(project::detect_roots()?),
+    };
+    let (project, root, cwd) = match (req.detection, fallback.as_ref()) {
+        (Some(d), _) => (
+            d.project.name().to_owned(),
+            d.project_root.as_path(),
+            d.build_root.as_path(),
+        ),
+        (None, Some((root, build))) => ("brokkr".to_owned(), root.as_path(), build.as_path()),
+        (None, None) => {
+            return Err(DevError::Internal(
+                "serve roots were not resolved for an unconfigured tree".into(),
+            ));
+        }
+    };
+    crate::serve::start(&crate::serve::StartRequest {
+        project: &project,
+        root,
+        cwd,
+        name: req.name,
+        program,
+        with,
+        args: req.args,
+        grace: req.grace,
+        ready: req.ready,
+        ready_timeout: req.ready_timeout,
+    })
+}
 
 /// `run --with TARGET`: the second target, built as `brokkr build` builds it,
 /// with its own commit and features and the program's profile.

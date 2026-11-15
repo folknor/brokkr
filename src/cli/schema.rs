@@ -329,64 +329,63 @@ In depth: `brokkr man clippy`."
         /// Bin or example target name (bare form: `[bin] default`)
         name: Option<String>,
 
-        /// Dev profile (overrides `[bin] debug`)
-        #[arg(long, conflicts_with = "release")]
-        debug: bool,
-
-        /// Release profile (overrides `[bin] debug = true`)
-        #[arg(long)]
-        release: bool,
-
-        /// Cargo profile by name: `dev`, `release` or a custom
-        /// `[profile.<name>]` (overrides `[bin] profile`/`debug`)
-        #[arg(long, value_name = "NAME", value_parser = crate::build::RustProfile::parse,
-              conflicts_with_all = ["debug", "release"])]
-        profile: Option<crate::build::RustProfile>,
-
-        /// Cargo features to enable. Forwarded verbatim to `cargo run`,
-        /// which validates them - comma- or space-separated, repeatable.
-        #[arg(long, short = 'F', value_name = "LIST")]
-        features: Vec<String>,
-
-        /// Enable all Cargo features.
-        #[arg(long, conflicts_with = "features")]
-        all_features: bool,
-
-        /// Disable default Cargo features.
-        #[arg(long)]
-        no_default_features: bool,
-
-        /// Build this commit in a persistent worktree, then run it from the
-        /// current directory - the A/B partner of a plain `run`. Remove the
-        /// worktrees with `brokkr clean --worktrees`.
-        #[arg(long, value_name = "REF")]
-        commit: Option<String>,
-
-        /// Also build this target, as `brokkr build` does, and hand the
-        /// program its snapshot's path in `BROKKR_WITH_EXE`. The program is
-        /// then built and executed directly, as under `--commit`.
-        #[arg(long, value_name = "TARGET")]
-        with: Option<String>,
-
-        /// Build the `--with` target at this commit (the program's own
-        /// `--commit` is separate)
-        #[arg(long, value_name = "REF", requires = "with")]
-        with_commit: Option<String>,
-
-        /// Cargo features for the `--with` target, forwarded verbatim
-        #[arg(long, value_name = "LIST", requires = "with")]
-        with_features: Vec<String>,
-
-        /// Enable all Cargo features of the `--with` target
-        #[arg(long, requires = "with", conflicts_with = "with_features")]
-        with_all_features: bool,
-
-        /// Disable default Cargo features of the `--with` target
-        #[arg(long, requires = "with")]
-        with_no_default_features: bool,
+        #[command(flatten)]
+        program: ProgramArgs,
 
         /// Raw arguments forwarded to the program (after `--`)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Serve a bin or example target in the background, without the lock.
+    ///
+    /// Bare lists the live serves, all projects. `serve TARGET` builds it as
+    /// `run` would (same flags, `--with` included), replaces a serve of the
+    /// same name in this project, starts it detached under a brokkr
+    /// supervisor and returns; the global lock is released then. Every
+    /// measurement (`--bench`, `--hotpath`, `--alloc`, `brokkr bench`, `crit`
+    /// sampling, `sync --bench`) refuses while a serve is live; every other
+    /// command runs beside it with a warning. `--stop` stops one.
+    ///
+    /// In depth: `brokkr man serve`.
+    #[command(display_order = 0)]
+    Serve {
+        /// Bin or example target to serve. Omit to list the live serves.
+        #[arg(value_name = "TARGET", conflicts_with = "stop")]
+        target: Option<String>,
+
+        #[command(flatten)]
+        program: ProgramArgs,
+
+        /// The instance name, so one target can be served twice (two
+        /// datasets on two ports). Default: the target's name. A start
+        /// replaces the live serve of this name in this project.
+        #[arg(long, value_name = "NAME", requires = "target")]
+        name: Option<String>,
+
+        /// Wait until a line of the server's output (stdout or stderr)
+        /// contains TEXT before returning, failing and stopping it if it
+        /// exits first or the wait runs out. A server that buffers its
+        /// output may print it late.
+        #[arg(long, value_name = "TEXT", requires = "target")]
+        ready: Option<String>,
+
+        /// How long `--ready` waits, in seconds (default 60)
+        #[arg(long, value_name = "SECS", requires = "ready")]
+        ready_timeout: Option<u64>,
+
+        /// Seconds the server gets to exit after SIGTERM before its process
+        /// group is SIGKILLed, on a stop or a replacement (default 5)
+        #[arg(long, value_name = "SECS", requires = "target")]
+        grace: Option<u64>,
+
+        /// Stop a live serve: bare, this project's only one; or the one
+        /// named WHICH in this project, or whose listed id starts with
+        /// WHICH in any project.
+        #[arg(long, value_name = "WHICH", num_args = 0..=1, default_missing_value = "")]
+        stop: Option<String>,
+
+        /// Raw arguments forwarded to the program, after `--`
+        #[arg(last = true, requires = "target")]
         args: Vec<String>,
     },
     /// Build one bin or example target and print a stable path to it.
@@ -1838,7 +1837,11 @@ clean follows; diagnostics and kept run directories stay.
 
 --hard: sends SIGKILL to brokkr and its descendants without any
 cleanup. Use when the default path is
-wedged; follow up with `brokkr clean` manually."
+wedged; follow up with `brokkr clean` manually.
+
+A `brokkr serve` server is not the lock holder once its start has
+returned, so kill does not reach it; `brokkr serve --stop` stops it
+(SIGTERM to its process group, its grace, then SIGKILL)."
     )]
     Kill {
         /// SIGKILL immediately (brokkr + child) without graceful cleanup.
@@ -2983,6 +2986,81 @@ pub(crate) struct ModeArgs {
 // ---------------------------------------------------------------------------
 // Shared args for pbfhogg measured commands
 // ---------------------------------------------------------------------------
+
+/// How `run` and `serve` build their program, and an optional second target
+/// handed to it.
+#[derive(Args, Clone, Default)]
+pub(crate) struct ProgramArgs {
+    /// Dev profile (overrides `[bin] debug`)
+    #[arg(long, conflicts_with = "release")]
+    pub(crate) debug: bool,
+
+    /// Release profile (overrides `[bin] debug = true`)
+    #[arg(long)]
+    pub(crate) release: bool,
+
+    /// Cargo profile by name: `dev`, `release` or a custom
+    /// `[profile.<name>]` (overrides `[bin] profile`/`debug`)
+    #[arg(long, value_name = "NAME", value_parser = crate::build::RustProfile::parse,
+          conflicts_with_all = ["debug", "release"])]
+    pub(crate) profile: Option<crate::build::RustProfile>,
+
+    /// Cargo features to enable. Forwarded verbatim to cargo, which
+    /// validates them - comma- or space-separated, repeatable.
+    #[arg(long, short = 'F', value_name = "LIST")]
+    pub(crate) features: Vec<String>,
+
+    /// Enable all Cargo features.
+    #[arg(long, conflicts_with = "features")]
+    pub(crate) all_features: bool,
+
+    /// Disable default Cargo features.
+    #[arg(long)]
+    pub(crate) no_default_features: bool,
+
+    /// Build this commit in a persistent worktree, then run it from the
+    /// current directory - the A/B partner of a plain `run`. Remove the
+    /// worktrees with `brokkr clean --worktrees`.
+    #[arg(long, value_name = "REF")]
+    pub(crate) commit: Option<String>,
+
+    /// Also build this target, as `brokkr build` does, and hand the
+    /// program its path in `BROKKR_WITH_EXE`. The program is then built and
+    /// executed directly, as under `--commit`.
+    #[arg(long, value_name = "TARGET")]
+    pub(crate) with: Option<String>,
+
+    /// Build the `--with` target at this commit (the program's own
+    /// `--commit` is separate)
+    #[arg(long, value_name = "REF", requires = "with")]
+    pub(crate) with_commit: Option<String>,
+
+    /// Cargo features for the `--with` target, forwarded verbatim
+    #[arg(long, value_name = "LIST", requires = "with")]
+    pub(crate) with_features: Vec<String>,
+
+    /// Enable all Cargo features of the `--with` target
+    #[arg(long, requires = "with", conflicts_with = "with_features")]
+    pub(crate) with_all_features: bool,
+
+    /// Disable default Cargo features of the `--with` target
+    #[arg(long, requires = "with")]
+    pub(crate) with_no_default_features: bool,
+}
+
+impl ProgramArgs {
+    /// Whether any flag was given: `serve --stop` and bare `serve` take none.
+    pub(crate) fn is_empty(&self) -> bool {
+        !self.debug
+            && !self.release
+            && self.profile.is_none()
+            && self.features.is_empty()
+            && !self.all_features
+            && !self.no_default_features
+            && self.commit.is_none()
+            && self.with.is_none()
+    }
+}
 
 #[derive(Args, Clone)]
 pub(crate) struct PbfArgs {

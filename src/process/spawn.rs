@@ -200,6 +200,85 @@ pub(crate) fn spawn(
     Ok(child)
 }
 
+/// The variables that tie a process to a hold, a run or a sidecar. A process
+/// spawned to outlive the hold ([`spawn_detached`]) carries none of them: it
+/// is no descendant of any hold, its compiles are no hold's, and no reaper or
+/// launch cohort owns it.
+pub(crate) const HOLD_BOUND_ENV: &[&str] = &[
+    crate::hold::CAPABILITY_ENV,
+    EXEC_ENV,
+    crate::test_orphans::MARKER_ENV,
+    crate::hold::LEASE_MARKER_ENV,
+    crate::sidecar::MARKER_FIFO_ENV,
+];
+
+/// Spawn a process meant to outlive the current hold: the `brokkr serve`
+/// supervisor (`crate::serve`). It bypasses [`stamp`] entirely, so no launch
+/// cohort, capability or armed reservation reaches it, and the caller must not
+/// have applied a runtime policy (no parent-death, no orphan token). Before it
+/// execs, the child leaves brokkr's session and process group (`setsid`), so
+/// no terminal signal and no group signal of brokkr's reaches it, and, where
+/// the hold runs inside its own accounting cgroup, moves into the holder's
+/// original cgroup; a move that fails fails the spawn, since a process left
+/// in the hold's group would keep it populated after the hold.
+///
+/// `keep` is the one descriptor the child inherits beyond its streams; every
+/// other descriptor brokkr opens is close-on-exec.
+pub(crate) fn spawn_detached(
+    mut command: Command,
+    keep: std::os::fd::RawFd,
+) -> Result<std::process::Child, DevError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt as _;
+
+    let program = command.get_program().to_string_lossy().into_owned();
+    for name in HOLD_BOUND_ENV {
+        command.env_remove(name);
+    }
+    let cgroup =
+        crate::lockfile::current_hold_cgroup_parent().map_err(|error| DevError::Spawn {
+            program: program.clone(),
+            error,
+        })?;
+    let cgroup_fd = cgroup.as_ref().map(AsRawFd::as_raw_fd);
+    // SAFETY: the closure runs between fork and exec and calls only
+    // async-signal-safe functions (setsid, fcntl, openat, write, close) on
+    // descriptors and a literal prepared before the fork.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let flags = libc::fcntl(keep, libc::F_GETFD);
+            if flags < 0 || libc::fcntl(keep, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if let Some(dir) = cgroup_fd {
+                let procs = libc::openat(
+                    dir,
+                    c"cgroup.procs".as_ptr(),
+                    libc::O_WRONLY | libc::O_CLOEXEC,
+                );
+                if procs < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let written = libc::write(procs, b"0".as_ptr().cast(), 1);
+                let error = std::io::Error::last_os_error();
+                libc::close(procs);
+                if written != 1 {
+                    return Err(error);
+                }
+            }
+            Ok(())
+        });
+    }
+    let child = command
+        .spawn()
+        .map_err(|error| DevError::Spawn { program, error })?;
+    drop(cgroup);
+    Ok(child)
+}
+
 /// What the spawn choke point adds to every command at the last moment.
 fn stamp(command: &mut Command) {
     // A reserved launch (`crate::reservations`): this child, and only this

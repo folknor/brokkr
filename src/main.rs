@@ -82,6 +82,7 @@ mod rustdoc_check;
 mod rustflags;
 mod scope;
 mod script_check;
+mod serve;
 mod shutdown;
 mod sidecar;
 mod sidecar_backup;

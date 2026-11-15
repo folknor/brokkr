@@ -207,6 +207,8 @@ fn measure(
     args: &CritArgs,
     lock: &crate::lockfile::LockGuard,
 ) -> Result<(), DevError> {
+    // Under the hold `lock` is a guard of, before anything is sampled.
+    crate::serve::refuse_measurement("a criterion sampling run")?;
     let mut criterion_args = vec!["--save-baseline".to_owned(), baseline.to_owned()];
     criterion_args.extend(args.args.iter().cloned());
 

@@ -67,6 +67,12 @@ separate from a bench's `stop_at` marker grace and wall deadline.
 `brokkr kill --hard` skips the grace and cleanup and sends SIGKILL to brokkr
 and its descendants.
 
+A server started by `brokkr serve` is stopped differently: once its start has
+returned it is no lock holder, so `kill` does not reach it, and `brokkr serve
+--stop` sends its process group SIGTERM, waits the serve's grace (5 seconds
+unless `--grace` said otherwise at the start), then sends the group SIGKILL.
+See `brokkr man serve`.
+
 Refusals that are about the request rather than the build (no such target, a
 name shared by several targets, no bin targets to install, a `[bin] install`
 entry with no bin) print their message bare, without a `build:` or `config:`
@@ -471,7 +477,10 @@ program is serialized against benchmarks and tracked by `brokkr lock` and
 `brokkr run brokkr -- test NAME` would wait on its own parent forever. It
 refuses at once instead, naming the remedy: run the built binary
 (`target/debug/brokkr`) or an installed one directly, outside `run`. See `brokkr
-man check` ("A descendant of the holder refuses rather than waits").
+man check` ("A descendant of the holder refuses rather than waits"). A program
+that serves rather than finishes - a dev server its clients must reach while it
+runs - belongs under `brokkr serve`, which releases the lock once the server
+is up and refuses only measurements while it lives (`brokkr man serve`).
 
 With no `brokkr.toml`, the working directory is the project root and there is
 no `[bin]` section - discovery, the bare index, and the sole-runnable and

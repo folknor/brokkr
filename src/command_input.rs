@@ -505,6 +505,7 @@ impl Command {
             | Self::Clippy { .. }
             | Self::Fmt { .. }
             | Self::Run { .. }
+            | Self::Serve { .. }
             | Self::Build { .. }
             | Self::Install { .. }
             | Self::Wc { .. }

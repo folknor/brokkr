@@ -1,8 +1,8 @@
 //! Top-level and project command dispatch.
 
 use super::bootstrap::{
-    WithTarget, require_detection, run_build, run_check, run_clippy, run_deps, run_fmt,
-    run_install, run_man, run_measured, run_program, run_sync, run_wc,
+    ServeRequest, WithTarget, require_detection, run_build, run_check, run_clippy, run_deps,
+    run_fmt, run_install, run_man, run_measured, run_program, run_serve, run_sync, run_wc,
 };
 use crate::clean::CleanOpts;
 use crate::clean::{cargo_clean_package, cmd_clean};
@@ -167,43 +167,64 @@ pub(super) fn run(
 
         Command::Run {
             name,
-            debug,
-            release,
-            profile,
-            features,
-            all_features,
-            no_default_features,
-            commit,
-            with,
-            with_commit,
-            with_features,
-            with_all_features,
-            with_no_default_features,
+            program,
+            args,
+        } => run_program(
+            name.as_deref(),
+            profile_choice(program.debug, program.release, program.profile.as_ref()),
+            &program_features(program),
+            program.commit.as_deref(),
+            with_target(program).as_ref(),
+            args,
+            detection,
+        ),
+        Command::Serve {
+            target,
+            program,
+            name,
+            ready,
+            ready_timeout,
+            grace,
+            stop,
             args,
         } => {
-            let feat = runnables::FeatureArgs {
-                features,
-                all: *all_features,
-                no_default: *no_default_features,
+            if let Some(which) = stop {
+                if !program.is_empty() {
+                    return Err(DevError::Usage(
+                        "--stop takes no build flags; it stops a serve already running".into(),
+                    ));
+                }
+                let root = state_root.map(project::ProjectRoot::as_path);
+                return crate::serve::cmd_stop(
+                    Some(which.as_str()).filter(|w| !w.is_empty()),
+                    root,
+                );
+            }
+            let Some(target) = target else {
+                if !program.is_empty() {
+                    return Err(DevError::Usage(
+                        "name the TARGET to serve; bare `brokkr serve` lists the live serves"
+                            .into(),
+                    ));
+                }
+                return crate::serve::cmd_list();
             };
-            let with = with.as_deref().map(|name| WithTarget {
-                name,
-                commit: with_commit.as_deref(),
-                feat: runnables::FeatureArgs {
-                    features: with_features,
-                    all: *with_all_features,
-                    no_default: *with_no_default_features,
-                },
-            });
-            run_program(
-                name.as_deref(),
-                profile_choice(*debug, *release, profile.as_ref()),
-                &feat,
-                commit.as_deref(),
-                with.as_ref(),
+            run_serve(&ServeRequest {
+                target,
+                choice: profile_choice(program.debug, program.release, program.profile.as_ref()),
+                feat: &program_features(program),
+                commit: program.commit.as_deref(),
+                with: with_target(program).as_ref(),
+                name: name.as_deref(),
+                ready: ready.as_deref(),
+                ready_timeout: ready_timeout.map_or(
+                    crate::serve::DEFAULT_READY_TIMEOUT,
+                    std::time::Duration::from_secs,
+                ),
+                grace: grace.map_or(crate::serve::DEFAULT_GRACE, std::time::Duration::from_secs),
                 args,
                 detection,
-            )
+            })
         }
         Command::Build {
             name,
@@ -343,6 +364,28 @@ pub(super) fn run(
     }
 }
 
+/// The program's own feature selection from the shared `run`/`serve` flags.
+fn program_features(program: &cli::ProgramArgs) -> runnables::FeatureArgs<'_> {
+    runnables::FeatureArgs {
+        features: &program.features,
+        all: program.all_features,
+        no_default: program.no_default_features,
+    }
+}
+
+/// The `--with` target the shared `run`/`serve` flags name, if any.
+fn with_target(program: &cli::ProgramArgs) -> Option<WithTarget<'_>> {
+    program.with.as_deref().map(|name| WithTarget {
+        name,
+        commit: program.with_commit.as_deref(),
+        feat: runnables::FeatureArgs {
+            features: &program.with_features,
+            all: program.with_all_features,
+            no_default: program.with_no_default_features,
+        },
+    })
+}
+
 /// `write`, `merge` and `read` share `PbfArgs` with the single-command benches
 /// but run pbfhogg's `bench-write`, `bench-merge` and `bench-read`, which take
 /// none of `--compression`, `--direct-io` and `--io-uring` (write and merge
@@ -435,6 +478,7 @@ fn run_project(
         | Command::Crit { .. }
         | Command::Bench { .. }
         | Command::Run { .. }
+        | Command::Serve { .. }
         | Command::Build { .. }
         | Command::Install { .. }
         | Command::Wc { .. }

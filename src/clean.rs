@@ -442,6 +442,20 @@ fn clean_isolated_targets_and_snapshots(
     if c.dir(&state.artifacts_dir())? {
         output::run_msg(&format!("{} build artifact snapshots", c.verb()));
     }
+    // A served program runs from its generation's own links, so the store
+    // above goes while it serves; only an ended generation's directory (its
+    // log, and the links of one whose supervisor was killed) goes here.
+    let mut ended = 0usize;
+    for dir in crate::serve::ended_generations(&state.serve_dir(), c.dry_run) {
+        ended += usize::from(c.dir(&dir)?);
+    }
+    if ended > 0 {
+        output::run_msg(&format!(
+            "{} {}",
+            c.verb(),
+            output::count(ended, "ended serve generation")
+        ));
+    }
     // Left by the retired pbfhogg verify; nothing writes it now.
     if *project == Project::Pbfhogg && c.guarded_dir(&state.verify_reference_dir())? {
         output::run_msg(&format!("{} verify reference cache", c.verb()));

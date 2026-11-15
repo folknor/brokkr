@@ -18,6 +18,12 @@ brokkr <command> [--bench [N] | --hotpath [N] | --alloc [N]] [command options]
   benchmarking a specific phase in isolation. The SIGKILL exit is treated as
   success.
 
+`--bench`, `--hotpath` and `--alloc` (and a command whose default mode
+measures, such as sluggrs `hotpath`) refuse while a `brokkr serve` server is
+live, since a serving process perturbs the measurement; the refusal comes when
+the measured session starts, under its hold, after any build, and `--dry-run`
+is exempt. See `brokkr man serve`.
+
 Sidecar-enabled subprocess modes sample `/proc` metrics at 100ms and provide
 `BROKKR_MARKER_FIFO` for phase markers. Closure-only modes such as
 `run_internal` do not use a sidecar. Collected sidecar

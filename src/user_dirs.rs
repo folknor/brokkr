@@ -31,6 +31,14 @@ pub(crate) fn test_runs_dir() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("test-runs"))
 }
 
+/// The registry of `brokkr serve` generations: one liveness flock, intent
+/// record and state file per generation, across every project. Unit tests
+/// use a scratch registry instead.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn serves_dir() -> Option<PathBuf> {
+    brokkr_state_dir().map(|dir| dir.join("serves"))
+}
+
 /// Private state for isolated harness and rustdoc output.
 pub(crate) fn harness_dir() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("harness"))

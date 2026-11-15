@@ -73,8 +73,10 @@ among its `choices`), a bench whose `validated` params have no `validate()`
 to check them, a `validate()` that refuses any arm (Validate), a
 bound input another reservation writes or whose pin does not match (every
 arm's inputs are reserved for reading, then hashed, after the script is
-read and the store opened, before any build), a `--commit` that names
-no commit, and a preflight that refuses any arm (Preflight); from there on
+read and the store opened, before any build), a live `brokkr serve` server
+(a serving process perturbs the measurement; `brokkr man serve`), a
+`--commit` that names no commit, and a preflight that refuses any arm
+(Preflight); from there on
 every attempt is stored, a worktree that could not be set up included.
 
 ## Validate

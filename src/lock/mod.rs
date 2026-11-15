@@ -638,6 +638,38 @@ pub(crate) fn current_observed_and_capability() -> Option<(Arc<observe::Observed
     })
 }
 
+/// What a process spawned to outlive the live global hold needs from it: a
+/// duplicate of the descriptor of the holder's original cgroup directory when
+/// the hold runs inside its own accounting group (`cgroup`), so the spawn can
+/// move the child back out before it execs. `Ok(None)` when no hold or no
+/// group exists; an error when the group exists but its parent cannot be
+/// duplicated, since the child would then stay inside the hold's group.
+pub(crate) fn current_hold_cgroup_parent() -> std::io::Result<Option<OwnedFd>> {
+    let path = match lock_path() {
+        Ok(path) => path,
+        Err(_) => return Ok(None),
+    };
+    let mut held = held_registry();
+    held.retain(|w| w.strong_count() > 0);
+    let Some(inner) = held
+        .iter()
+        .filter_map(Weak::upgrade)
+        .find(|inner| inner.path == path)
+    else {
+        return Ok(None);
+    };
+    let Some(cgroup) = inner.cgroup.as_ref() else {
+        return Ok(None);
+    };
+    // SAFETY: a valid descriptor this hold owns for its whole life.
+    let fd = unsafe { libc::fcntl(cgroup.parent_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fcntl just returned this descriptor, owned by nobody else.
+    Ok(Some(unsafe { OwnedFd::from_raw_fd(fd) }))
+}
+
 /// Edited tree paths attached to the active global hold, or `None` if no such
 /// hold exists. `Some([])` is meaningful: the live hold intentionally edits
 /// nothing, so a watchdog must not fall back to the command's armed path.
