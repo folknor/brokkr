@@ -118,6 +118,7 @@ pub(crate) fn universe_selectors(sweeps: &[PlannedSweep]) -> UniverseSelectors {
 
 pub(crate) fn lane_env(inputs: &LaneInputs<'_>, sweep: &PlannedSweep) -> Result<LaneEnv, DevError> {
     let target = resolve_sweep_target(inputs.project_root, sweep)?;
+    let facts = target.as_ref().map(crate::target_platform::SweepTarget::facts);
     // A lint allow reaches this build through exactly one layer, and which
     // one is per sweep: a sweep carrying `rustflags` exports an env var, so
     // the env is live for it whatever the config chain says. The sweep's own
@@ -128,7 +129,7 @@ pub(crate) fn lane_env(inputs: &LaneInputs<'_>, sweep: &PlannedSweep) -> Result<
     let (env_allows, allow_args) = rustflags::plumbing(
         inputs.project_root,
         !sweep.rustflags.is_empty(),
-        target.as_ref(),
+        facts,
         rustflags::EffectiveEnv::new(&sweep_env_refs),
         inputs.allow_flags,
     );
@@ -152,7 +153,7 @@ pub(crate) fn lane_env(inputs: &LaneInputs<'_>, sweep: &PlannedSweep) -> Result<
     crate::build_purpose::environment::place_sweep_rustdocflags(
         inputs.project_root,
         sweep,
-        target.as_ref(),
+        || Ok(facts.map(std::borrow::Cow::Borrowed)),
         &[],
         &mut env,
         &mut config_args,
@@ -162,18 +163,45 @@ pub(crate) fn lane_env(inputs: &LaneInputs<'_>, sweep: &PlannedSweep) -> Result<
     let launch_config = rustflags::CargoLaunchConfig::discover_for(
         inputs.project_root,
         rustflags::EffectiveEnv::new(&env_refs),
-        target.as_ref(),
+        facts,
     )?;
     refuse_target_runner(sweep, &launch_config)?;
     Ok(LaneEnv { config_args, env, launch_config, target })
 }
 
-/// The sweep's `target`, resolved against the toolchain cargo picks under the
-/// sweep's own env, or `None` for a host sweep.
+/// The sweep's `target`, resolved through a tested lane's preflight against
+/// the toolchain cargo picks under the sweep's own env, or `None` for a host
+/// sweep. Test machinery only: the rustdoc phase reads [`sweep_target_facts`].
 pub(crate) fn resolve_sweep_target(
     project_root: &Path,
     sweep: &PlannedSweep,
 ) -> Result<Option<crate::target_platform::SweepTarget>, DevError> {
+    with_sweep_toolchain(project_root, sweep, crate::target_platform::SweepTarget::resolve)
+}
+
+/// The sweep triple's cfg facts from the toolchain cargo picks under the
+/// sweep's own env, or `None` for a host sweep. Refuses nothing about the
+/// toolchain, so a `[[lint_sweep]]` keeps having no target preflight: a
+/// missing standard library is rustc's to report in the lane's own build.
+pub(crate) fn sweep_target_facts(
+    project_root: &Path,
+    sweep: &PlannedSweep,
+) -> Result<Option<crate::target_platform::TargetFacts>, DevError> {
+    with_sweep_toolchain(project_root, sweep, crate::target_platform::TargetFacts::query)
+}
+
+/// Run a triple query against the toolchain the sweep's env selects, its
+/// error naming the sweep.
+fn with_sweep_toolchain<T>(
+    project_root: &Path,
+    sweep: &PlannedSweep,
+    query: impl FnOnce(
+        &Path,
+        &str,
+        rustflags::EffectiveEnv<'_>,
+        &[(std::path::PathBuf, toml::Table)],
+    ) -> Result<T, DevError>,
+) -> Result<Option<T>, DevError> {
     let Some(triple) = sweep.target() else {
         return Ok(None);
     };
@@ -181,7 +209,7 @@ pub(crate) fn resolve_sweep_target(
     let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let effective = rustflags::EffectiveEnv::new(&env_refs);
     let files = rustflags::read_config_files_under(project_root, effective)?;
-    crate::target_platform::SweepTarget::resolve(project_root, triple, effective, &files)
+    query(project_root, triple, effective, &files)
         .map(Some)
         .map_err(|e| DevError::Config(format!("sweep '{}': {e}", sweep.label)))
 }

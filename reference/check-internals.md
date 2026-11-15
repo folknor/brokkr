@@ -1209,8 +1209,9 @@ That triple is build shape (`EffectiveBuild` and
 `DeclaredShape` encode it; the shape id encoding appends it only when set, so
 every host shape id is unchanged, and a template and a literal naming the
 same triple share an id) and `build_purpose::sweep_args` puts
-`--target <triple>` on every cargo run of the sweep. Each lane resolves it
-once, when its environment is decided (`resolve_sweep_target`,
+`--target <triple>` on every cargo run of the sweep. Each test lane resolves
+it once, when its environment is decided (`resolve_sweep_target`,
+`src/check_cmd/prepare.rs`, over `SweepTarget::resolve` in
 `src/target_platform.rs`): the compiler cargo would run is found by cargo's
 precedence (`RUSTC`, `CARGO_BUILD_RUSTC`, `build.rustc`, `rustc`) under the
 sweep's env, and through it the sysroot must hold the triple's standard
@@ -1219,6 +1220,19 @@ library, `rustc --print cfg --target` gives the triple's cfg facts and
 newer, since an older cargo builds a cross target's doctests and does not run
 them. The cfg facts decide only names the triple alone fixes; every other name
 is undecided, and an undecided atom makes its whole selector undecided.
+
+The two halves are two types. `TargetFacts` is the triple and its cfg facts,
+read by `TargetFacts::query` and refusing nothing; `SweepTarget` is the
+preflighted lane target, made only by `SweepTarget::resolve`, which holds
+`TargetFacts` plus the libdir. Everything matching cargo's `[target.*]`
+tables (`src/rustflags.rs`, and `place_sweep_rustdocflags`) takes
+`TargetFacts`; the libdir consumers take `SweepTarget`. The rustdoc phase
+reads facts alone (`sweep_target_facts`), for tested and lint lanes alike:
+it runs no doctest and links no binary, so the preflight's refusals protect
+nothing there, and a lint lane keeps the no-preflight rule its docs state.
+`place_sweep_rustdocflags` takes the facts as a supplier it calls once when
+it has flags to place and never otherwise, so a rustdoc run with nothing to
+carry queries no target facts.
 
 Those facts feed three consumers. Runner discovery (`CargoLaunchConfig::
 discover_for`) adds the triple's runner - its table, its env spelling, or a

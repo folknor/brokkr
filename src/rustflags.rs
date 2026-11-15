@@ -398,7 +398,7 @@ impl CargoLaunchConfig {
     pub(crate) fn discover_for(
         root: &Path,
         env: EffectiveEnv<'_>,
-        target: Option<&crate::target_platform::SweepTarget>,
+        target: Option<&crate::target_platform::TargetFacts>,
     ) -> Result<Self, crate::error::DevError> {
         let files = read_config_files_under(root, env)?;
 
@@ -409,7 +409,7 @@ impl CargoLaunchConfig {
             .and_then(|key| env.source(key))
             .or_else(|| config_runner_source(&files, Platform::Host(host.as_deref())));
         let target_runner = target.and_then(|t| {
-            env.source(&runner_env_var(&t.triple))
+            env.source(&runner_env_var(t.triple()))
                 .or_else(|| config_runner_source(&files, Platform::Target(t)))
         });
         let build_target = if target.is_some() {
@@ -797,7 +797,7 @@ impl Sink {
 pub(crate) fn sink(
     build_root: &Path,
     sweep_sets_rustflags: bool,
-    target: Option<&crate::target_platform::SweepTarget>,
+    target: Option<&crate::target_platform::TargetFacts>,
     cargo_env: EffectiveEnv<'_>,
 ) -> Sink {
     decide(
@@ -864,7 +864,7 @@ pub(crate) fn decide(
     kind: FlagKind,
     build_root: &Path,
     sweep_sets_env: bool,
-    target: Option<&crate::target_platform::SweepTarget>,
+    target: Option<&crate::target_platform::TargetFacts>,
     cargo_env: EffectiveEnv<'_>,
 ) -> SinkDecision {
     let env = RustflagsEnv::for_kind(kind, cargo_env);
@@ -889,7 +889,7 @@ pub(crate) fn decide(
     };
     let host = host_triple_for(build_root);
     let triples = match target {
-        Some(t) => vec![t.triple.clone()],
+        Some(t) => vec![t.triple().to_owned()],
         None => target_triples_for_sink(build_root, &files, cargo_env),
     };
     let answers: Vec<Option<bool>> = if triples.is_empty() {
@@ -1030,7 +1030,7 @@ pub(crate) struct Placement {
 pub(crate) fn place(
     kind: FlagKind,
     build_root: &Path,
-    target: Option<&crate::target_platform::SweepTarget>,
+    target: Option<&crate::target_platform::TargetFacts>,
     cargo_env: EffectiveEnv<'_>,
     additions: &[String],
 ) -> Result<Placement, crate::error::DevError> {
@@ -1238,7 +1238,7 @@ fn merged_config_flags(
 pub(crate) fn plumbing<'a>(
     build_root: &Path,
     sweep_sets_rustflags: bool,
-    target: Option<&crate::target_platform::SweepTarget>,
+    target: Option<&crate::target_platform::TargetFacts>,
     cargo_env: EffectiveEnv<'_>,
     allow_flags: &'a [String],
 ) -> (&'a [String], Vec<String>) {
@@ -1394,7 +1394,7 @@ pub(crate) enum Platform<'a> {
     /// it could not be read).
     Host(Option<&'a str>),
     /// A `[[check]]` sweep's `target`, with rustc's facts for it.
-    Target(&'a crate::target_platform::SweepTarget),
+    Target(&'a crate::target_platform::TargetFacts),
     /// A configured triple brokkr has no facts for (an ambient `build.target`
     /// other than the host): every cfg atom is undecided, so only selectors
     /// that need none (`cfg(all())`) are judged.
@@ -1406,7 +1406,7 @@ impl<'a> Platform<'a> {
     fn triple(self) -> Option<&'a str> {
         match self {
             Self::Host(host) => host,
-            Self::Target(target) => Some(&target.triple),
+            Self::Target(target) => Some(target.triple()),
             Self::Unknown(triple) => Some(triple),
         }
     }
@@ -1415,7 +1415,7 @@ impl<'a> Platform<'a> {
     fn key_matches(self, key: &str, value: &str) -> Option<bool> {
         match self {
             Self::Host(host) => Some(cfg_key(key, host)? == value),
-            Self::Target(target) => target.cfg.key_matches(key, value),
+            Self::Target(target) => target.cfg().key_matches(key, value),
             Self::Unknown(_) => None,
         }
     }
@@ -1424,7 +1424,7 @@ impl<'a> Platform<'a> {
     fn flag(self, name: &str) -> Option<bool> {
         match self {
             Self::Host(_) => cfg_flag(name),
-            Self::Target(target) => target.cfg.flag(name),
+            Self::Target(target) => target.cfg().flag(name),
             Self::Unknown(_) => None,
         }
     }

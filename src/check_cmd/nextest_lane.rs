@@ -398,12 +398,12 @@ fn build_platforms(
         .map_err(|e| DevError::Build(format!("nextest host platform detection failed: {e}")))?;
     let target = target
         .map(|t| {
-            let triple = nextest_runner::cargo_config::TargetTriple::deserialize_str(Some(t.triple.clone()))
-                .map_err(|e| DevError::Build(format!("nextest cannot model target `{}`: {e}", t.triple)))?
+            let triple = nextest_runner::cargo_config::TargetTriple::deserialize_str(Some(t.triple().to_owned()))
+                .map_err(|e| DevError::Build(format!("nextest cannot model target `{}`: {e}", t.triple())))?
                 .ok_or_else(|| DevError::Internal("a present triple deserialized to none".into()))?;
             Ok::<_, DevError>(nextest_runner::platform::TargetPlatform::new(
                 triple,
-                PlatformLibdir::from_rustc_stdout(Some(t.libdir.clone().into_bytes())),
+                PlatformLibdir::from_rustc_stdout(Some(t.libdir().as_bytes().to_vec())),
             ))
         })
         .transpose()?;
@@ -448,7 +448,7 @@ fn build_nextest_shape(
     // build's resolution.
     let build_platforms = build_platforms(project_root, &env_refs, env.target.as_ref())?;
     let triple = match &env.target {
-        Some(t) => t.triple.clone(),
+        Some(t) => t.triple().to_owned(),
         None => build_platforms.host.platform.triple_str().to_owned(),
     };
 

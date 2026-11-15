@@ -142,15 +142,21 @@ fn run_one_diagnostic_cargo(
     // the phase reads the diagnostics and never the rendered site
     // (`rustdoc_check`). An env placement is shown on the command line, since
     // it changes what ran.
+    //
+    // A target sweep's triple is read for its cfg facts alone, which placing
+    // the flags needs, and never through the tested lanes' preflight: this
+    // runs no doctest and links nothing, so neither the cargo 1.89 floor nor
+    // the installed-std check has anything to protect, and a lint lane, which
+    // has no preflight, would otherwise get one here. rustc reports a missing
+    // standard library itself wherever a crate needs one, as in clippy.
     let mut env_prefix = String::new();
     let doc_check = phase == Phase::Rustdoc && crate::rustdoc_check::supported(project_root, &env_owned);
     if phase == Phase::Rustdoc {
-        let target = resolve_sweep_target(project_root, sweep)?;
         let extra: &[&str] = if doc_check { &crate::rustdoc_check::FLAGS } else { &[] };
         if let Some((key, value)) = crate::build_purpose::environment::place_sweep_rustdocflags(
             project_root,
             sweep,
-            target.as_ref(),
+            || Ok(sweep_target_facts(project_root, sweep)?.map(std::borrow::Cow::Owned)),
             extra,
             &mut env_owned,
             &mut args,

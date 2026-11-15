@@ -6,7 +6,9 @@
 //! the triple that only the toolchain has: which `cfg` it sets (for cargo's
 //! `[target.'cfg(...)']` runner and rustflags tables), where its runtime
 //! libraries live (for the loader path), and that cargo runs its doctests at
-//! all. Every probe goes through the compiler cargo itself would pick, under
+//! all. The cfg facts alone are [`TargetFacts`], read without refusing
+//! anything; a tested lane's [`SweepTarget`] adds the refusals and the libdir.
+//! Every probe goes through the compiler cargo itself would pick, under
 //! the sweep's environment, so preflight never inspects one toolchain while
 //! cargo builds with another. The same compiler's host triple is what a
 //! `{host_arch}` [`TargetSpec`] resolves against.
@@ -209,14 +211,71 @@ pub(crate) fn differing_host(
     host_triple(root, env, files).ok()
 }
 
-/// A target sweep's triple, with the toolchain facts every lane needs.
+/// A triple with the cfg facts the compiler cargo would use reports for it:
+/// what matching cargo's `[target.*]` tables needs, and nothing more.
+///
+/// Reading them refuses nothing. `rustc --print cfg --target` answers for a
+/// built-in triple whether or not its standard library is installed, so a
+/// missing library is left to rustc, which reports it where a crate needs one.
+/// The rustdoc phase holds these alone: it runs no doctest and links no
+/// binary, so the test lanes' preflight ([`SweepTarget::resolve`]) has nothing
+/// to protect there, which is how a `[[lint_sweep]]` keeps having none.
+#[derive(Debug, Clone)]
+pub(crate) struct TargetFacts {
+    triple: String,
+    cfg: TargetCfg,
+}
+
+impl TargetFacts {
+    /// `rustc --print cfg --target <triple>` from the compiler cargo would use
+    /// in `root` under `env`.
+    pub(crate) fn query(
+        root: &Path,
+        triple: &str,
+        env: EffectiveEnv<'_>,
+        files: &[(PathBuf, toml::Table)],
+    ) -> Result<Self, DevError> {
+        let rustc = compiler(root, env, files);
+        Self::query_with(root, triple, env, &rustc)
+    }
+
+    fn query_with(
+        root: &Path,
+        triple: &str,
+        env: EffectiveEnv<'_>,
+        rustc: &str,
+    ) -> Result<Self, DevError> {
+        let cfg = TargetCfg::parse(&probe(
+            root,
+            env,
+            rustc,
+            &["--print", "cfg", "--target", triple],
+        )?);
+        Ok(Self {
+            triple: triple.to_owned(),
+            cfg,
+        })
+    }
+
+    pub(crate) fn triple(&self) -> &str {
+        &self.triple
+    }
+
+    pub(crate) fn cfg(&self) -> &TargetCfg {
+        &self.cfg
+    }
+}
+
+/// A tested target lane's triple, through the preflight its lanes need: the
+/// toolchain holds the triple's standard library, its cargo runs a cross
+/// target's doctests, and where the triple's runtime libraries live. Only
+/// [`SweepTarget::resolve`] makes one, so holding one means the lane passed.
 #[derive(Debug, Clone)]
 pub(crate) struct SweepTarget {
-    pub(crate) triple: String,
-    pub(crate) cfg: TargetCfg,
+    facts: TargetFacts,
     /// `rustc --print target-libdir --target <triple>`: the runtime libraries
     /// a binary built for the triple loads from.
-    pub(crate) libdir: String,
+    libdir: String,
 }
 
 impl SweepTarget {
@@ -242,12 +301,7 @@ impl SweepTarget {
                 sysroot.trim()
             )));
         }
-        let cfg = TargetCfg::parse(&probe(
-            root,
-            env,
-            &rustc,
-            &["--print", "cfg", "--target", triple],
-        )?);
+        let facts = TargetFacts::query_with(root, triple, env, &rustc)?;
         let libdir = probe(
             root,
             env,
@@ -256,11 +310,19 @@ impl SweepTarget {
         )?
         .trim()
         .to_owned();
-        Ok(Self {
-            triple: triple.to_owned(),
-            cfg,
-            libdir,
-        })
+        Ok(Self { facts, libdir })
+    }
+
+    pub(crate) fn triple(&self) -> &str {
+        self.facts.triple()
+    }
+
+    pub(crate) fn facts(&self) -> &TargetFacts {
+        &self.facts
+    }
+
+    pub(crate) fn libdir(&self) -> &str {
+        &self.libdir
     }
 }
 
@@ -474,6 +536,47 @@ mod tests {
                 &[]
             ),
             None
+        );
+    }
+
+    // A triple whose standard library is not in the sysroot still has its
+    // cfg facts read; only a tested lane's preflight refuses it.
+    #[cfg(unix)]
+    #[test]
+    fn target_facts_refuse_nothing_the_preflight_refuses() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::test_scratch::scratch("target_platform", "facts_without_std");
+        let sysroot = root.join("sysroot");
+        std::fs::create_dir_all(&sysroot).unwrap();
+        let rustc = root.join("fake-rustc");
+        std::fs::write(
+            &rustc,
+            format!(
+                "#!/bin/sh\n\
+                 case \"$*\" in\n\
+                 '--print sysroot') printf '%s\\n' '{}' ;;\n\
+                 *) printf 'target_arch=\"riscv64\"\\ntarget_os=\"linux\"\\nunix\\n' ;;\n\
+                 esac\n",
+                sysroot.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let rustc = rustc.display().to_string();
+        let env = [("RUSTC", rustc.as_str())];
+        let env = EffectiveEnv::new(&env);
+        let triple = "riscv64gc-unknown-linux-gnu";
+        let facts = TargetFacts::query(&root, triple, env, &[]).unwrap();
+        assert_eq!(facts.triple(), triple);
+        assert_eq!(
+            facts.cfg().key_matches("target_arch", "riscv64"),
+            Some(true)
+        );
+        assert_eq!(facts.cfg().flag("unix"), Some(true));
+        let refused = SweepTarget::resolve(&root, triple, env, &[]).unwrap_err();
+        assert!(
+            refused.to_string().contains("is not installed"),
+            "{refused}"
         );
     }
 

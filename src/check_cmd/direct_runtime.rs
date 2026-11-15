@@ -179,7 +179,7 @@ impl DirectRuntime {
         let linked_paths = index.all_linked_paths();
         let effective_env = rustflags::EffectiveEnv::new(env_refs);
         let target = target
-            .map(|t| target_roots(project_root, env_refs, t))
+            .map(|t| target_roots(project_root, env_refs, &t))
             .transpose()?;
         Ok(Self {
             project_root: project_root.to_path_buf(),
@@ -290,7 +290,7 @@ impl DirectRuntime {
 fn target_roots(
     project_root: &Path,
     env_refs: &[(&str, &str)],
-    target: crate::target_platform::SweepTarget,
+    target: &crate::target_platform::SweepTarget,
 ) -> Result<TargetRoots, DevError> {
     let metadata = crate::cargo::metadata::load(
         project_root,
@@ -303,8 +303,8 @@ fn target_roots(
         bases.push(PathBuf::from(build));
     }
     Ok(TargetRoots {
-        triple: target.triple,
-        libdir: target.libdir,
+        triple: target.triple().to_owned(),
+        libdir: target.libdir().to_owned(),
         bases,
     })
 }

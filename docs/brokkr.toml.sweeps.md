@@ -335,12 +335,16 @@ env = { HIGH_PRECISION = "1" }
   (binfmt_misc) is invisible to brokkr and runs like native execution.
   A host runner keeps its usual treatment.
 
-  Before anything builds, each lane resolves the triple against the compiler
-  cargo would use (`RUSTC`, `CARGO_BUILD_RUSTC`, `build.rustc`, then `rustc`,
-  under the sweep's env) and refuses: a triple the toolchain has no standard
-  library for (`rustup target add <triple>`); a cargo older than 1.89, which
-  builds a cross target's doctests without running them; and forwarded
-  `--target`, `--config`, `--manifest-path` or `--target-dir`. The sweep's
+  Before anything builds, each test lane resolves the triple against the
+  compiler cargo would use (`RUSTC`, `CARGO_BUILD_RUSTC`, `build.rustc`, then
+  `rustc`, under the sweep's env) and refuses: a triple the toolchain has no
+  standard library for (`rustup target add <triple>`); a cargo older than
+  1.89, which builds a cross target's doctests without running them; and
+  forwarded `--target`, `--config`, `--manifest-path` or `--target-dir`. This
+  is the test lanes' preflight. Clippy refuses none of it, and the `rustdoc`
+  phase only reads the triple's cfg facts from the same compiler, for placing
+  rustdocflags, so neither refuses a missing standard library or an older
+  cargo: rustc reports a missing library itself wherever a crate needs one. The sweep's
   `env` may not set `CARGO_BUILD_TARGET`; an ambient one is overridden. There
   is no check for a C compiler: which one a `cc`-based build script picks is
   its own decision, and its error names it (`musl-gcc` from `musl-tools` on
@@ -477,9 +481,11 @@ How a run treats one:
   or system libraries, which the entry's `env` can point it at. Their `env`
   may also configure a cargo build dir; that serializes the clippy and
   rustdoc runs and leaves preparation alone.
-- A missing standard library for the triple fails in clippy with rustc's own
-  error (`can't find crate for core`, naming `rustup target add`); there is no
-  separate preflight.
+- A missing standard library for the triple fails in clippy and rustdoc with
+  rustc's own error (`can't find crate for core`, naming `rustup target add`)
+  wherever a crate needs it; there is no separate preflight. The rustdoc
+  phase reads the triple's cfg facts (`rustc --print cfg --target`), which
+  needs no installed library, and refuses nothing about the toolchain.
 - Skipped with the phases that run them: a profile's `skip_phases` naming
   `clippy` and `rustdoc`, and the markdown-only shortcut. An ad-hoc
   `--features`/`--no-default-features` run replaces sweep selection wholesale

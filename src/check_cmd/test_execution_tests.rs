@@ -1482,7 +1482,7 @@ warning: `b` (manifest) generated 1 warning
         let placed = crate::build_purpose::environment::place_sweep_rustdocflags(
             Path::new("."),
             &sweep,
-            None,
+            || Ok(None),
             &["--check"],
             &mut env,
             &mut args,
@@ -1494,14 +1494,15 @@ warning: `b` (manifest) generated 1 warning
         assert!(env.contains(&want));
         assert_eq!(args.len(), 2, "an env placement adds no --config: {args:?}");
 
-        // A sweep with no cfg rustflags and no extras places nothing.
+        // A sweep with no cfg rustflags and no extras places nothing, and
+        // queries no target facts: the target supplier is never called.
         let plain = crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default());
         let before = env.clone();
         assert_eq!(
             crate::build_purpose::environment::place_sweep_rustdocflags(
                 Path::new("."),
                 &plain,
-                None,
+                || Err(DevError::Internal("target facts asked for with nothing to place".into())),
                 &[],
                 &mut env,
                 &mut args,

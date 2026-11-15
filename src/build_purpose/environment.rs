@@ -178,7 +178,10 @@ fn resolve_sweep_env(
 /// the build does, and every other rustc flag stays rustc's.
 ///
 /// `env` is the invocation's final environment (sweep env over brokkr's), and
-/// `args` its cargo argv before the selection. The flags are placed by
+/// `args` its cargo argv before the selection. `target` supplies the sweep
+/// triple's cfg facts, `None` for a host sweep; it is called exactly once when
+/// there is something to place and never otherwise, so a run with nothing to
+/// carry queries no target facts. The flags are placed by
 /// [`crate::rustflags::place`]: appended to the live env source - the pair
 /// then replaces the key in `env`, so a sweep's own `RUSTDOCFLAGS` cannot undo
 /// it - else as `--config` at the live config layer, pushed onto `args`.
@@ -191,10 +194,13 @@ fn resolve_sweep_env(
 /// should that table apply, the flags are inert and rustdoc runs without the
 /// cfg. A known unsupported case, not a satisfied promise; a `RUSTDOCFLAGS`
 /// in the sweep's `env` makes the placement exact.
-pub(crate) fn place_sweep_rustdocflags(
+pub(crate) fn place_sweep_rustdocflags<'t>(
     project_root: &Path,
     sweep: &PlannedSweep,
-    target: Option<&crate::target_platform::SweepTarget>,
+    target: impl FnOnce() -> Result<
+        Option<std::borrow::Cow<'t, crate::target_platform::TargetFacts>>,
+        crate::error::DevError,
+    >,
     extra: &[&str],
     env: &mut Vec<(String, String)>,
     args: &mut Vec<String>,
@@ -208,12 +214,13 @@ pub(crate) fn place_sweep_rustdocflags(
     if additions.is_empty() {
         return Ok(None);
     }
+    let target = target()?;
     let placement = {
         let refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         crate::rustflags::place(
             crate::rustflags::FlagKind::Rustdoc,
             project_root,
-            target,
+            target.as_deref(),
             crate::rustflags::EffectiveEnv::new(&refs),
             &additions,
         )?

@@ -411,7 +411,9 @@ pub(super) fn plan_focused(
     let launch_config = crate::rustflags::CargoLaunchConfig::discover_for(
         project_root,
         crate::rustflags::EffectiveEnv::new(env),
-        target.as_ref(),
+        target
+            .as_ref()
+            .map(crate::target_platform::SweepTarget::facts),
     )?;
     check_cmd::refuse_configured_runner_with_config(&launch_config)?;
     check_cmd::refuse_target_runner(shape.sweep, &launch_config)?;
@@ -956,6 +958,9 @@ pub(super) fn sweep_env(
     allow_flags: &[String],
 ) -> Result<SweepEnv, DevError> {
     let target = check_cmd::resolve_sweep_target(project_root, sweep)?;
+    let facts = target
+        .as_ref()
+        .map(crate::target_platform::SweepTarget::facts);
     let sweep_only = check_cmd::merged_env(&sweep.env, &[]);
     let sweep_refs: Vec<(&str, &str)> = sweep_only
         .iter()
@@ -964,7 +969,7 @@ pub(super) fn sweep_env(
     let (env_allows, mut config_args) = rustflags::plumbing(
         project_root,
         !sweep.rustflags.is_empty(),
-        target.as_ref(),
+        facts,
         rustflags::EffectiveEnv::new(&sweep_refs),
         allow_flags,
     );
@@ -976,7 +981,7 @@ pub(super) fn sweep_env(
     crate::build_purpose::environment::place_sweep_rustdocflags(
         project_root,
         sweep,
-        target.as_ref(),
+        || Ok(facts.map(std::borrow::Cow::Borrowed)),
         &[],
         &mut env,
         &mut config_args,
