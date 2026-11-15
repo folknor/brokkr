@@ -24,9 +24,7 @@ use super::super::constants::{
 };
 use super::super::corpus::layout::tile_svg_file_name;
 use super::super::corpus::render::{path_data, xml_attr, xml_text};
-use super::super::eliv::{
-    ArchiveView, DetailAttr, Strictness, find_entry, gzip_decompress, tile_id_to_zxy,
-};
+use super::super::eliv::{ArchiveView, DetailAttr, Strictness, find_entry, tile_id_to_zxy};
 use super::compare::{DiffSink, OutcomeClass, compare_detail_tiles};
 use super::engine::invalid_tile;
 use super::prepared::{PreparedFeature, PreparedLayer, decode_prepared_tile};
@@ -288,7 +286,7 @@ pub(crate) fn dump_overlays(
         let read =
             |view: &ArchiveView, runs: &[super::super::eliv::RawDirEntry]| -> io::Result<Vec<u8>> {
                 match find_entry(runs, *tile_id) {
-                    Some(entry) => gzip_decompress(view.raw_blob_at(entry.offset, entry.length)?),
+                    Some(entry) => view.read_tile(entry.blob()),
                     None => Ok(Vec::new()),
                 }
             };

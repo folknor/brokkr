@@ -14,16 +14,19 @@
 - `src/elivagar/artifacts.rs` - admits successful tilegen output into the
   durable store and removes non-tilegen outputs.
 - `src/elivagar/archive_store.rs` - owns archive keys, path construction,
-  revision resolution, admission and per-group pruning. It is exposed through
-  the linked-crate seam in `eliv.rs`.
+  revision resolution, admission and per-group pruning. It is brokkr's own and
+  not part of the linked-crate seam.
 - `src/elivagar/...` - benchmarks (self, node-store, pmtiles, planetiler,
   tilemaker, all), verify, download-ocean, hotpath, ocean_build
   (`ocean-build`).
 - `src/elivagar/eliv.rs` - the linked-crate seam. The one place that names the
-  elivagar API the adjudication code depends on (reader, `tile_detail` decoder,
-  writer, PMTiles addressing), so `corpus/`, `regress/` and the stats/sampling
-  adapters import from here rather than reaching into `elivagar::` directly.
-- `src/elivagar/constants.rs` - shared MVT/PMTiles values, defaults, and fixed
+  elivagar API the adjudication code depends on (the `archive` reader and
+  writer, `tile_detail` decoder, `TileId` addressing), so `corpus/`, `regress/`
+  and the stats/sampling adapters import from here rather than reaching into
+  `elivagar::` directly. Archive refusals cross it as `io::Error` with their
+  class kept: malformed bytes are `InvalidData`, an unsupported codec or layout
+  `Unsupported`.
+- `src/elivagar/constants.rs` - shared MVT values, defaults, and fixed
   policy thresholds used by archive, render, diff, and benchmark paths.
 - `src/elivagar/tilegen_config.rs` - closed tile format/compression sets,
   byte-size and budget types, and validation run before a tilegen build.
@@ -271,7 +274,8 @@ tile count at report time. Each pass only sees what the last could not settle:
    blob, not per pair), which absorbs the intra-layer feature reordering the
    pipeline deliberately leaves unconstrained across archives. This is the *same*
    frozen hash the corpus gate uses, so the two can never disagree about "the
-   same tile".
+   same tile". It enforces the same MVT spec 4.3.4 command grammar as the strict
+   detail decode, so it refuses exactly the geometry streams that pass refuses.
 3. **detail** - full structural decode via elivagar's `tile_detail`, re-augmented
    by `prepared.rs` with the bboxes, digests and structure signatures the matcher
    needs, then classified.

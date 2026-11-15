@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use super::super::constants::mvt;
 use super::super::eliv::{
-    PmtilesConfig, PmtilesWriter, WIRE_32BIT, WIRE_64BIT, encode_bytes_field_always, encode_tag,
+    LonLatBbox, MapCenter, PmtilesConfig, PmtilesWriter, WIRE_32BIT, WIRE_64BIT, encode_bytes_field_always, encode_tag,
     encode_varint, encode_varint_field_always, xy_to_tile_id,
 };
 use flate2::Compression;
@@ -622,12 +622,23 @@ pub(crate) fn gzip(data: &[u8]) -> Vec<u8> {
 /// is built around.
 pub(crate) fn write_archive(path: &Path, mut tiles: Vec<(u8, u32, u32, Vec<u8>)>) {
     tiles.sort_by_key(|(z, x, y, _)| xy_to_tile_id(*z, *x, *y));
-    let mut writer = PmtilesWriter::new(PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 2,
-        bounds: (0.0, 0.0, 1.0, 1.0),
-        center: (0.5, 0.5, 1),
-    });
+    let config = PmtilesConfig::new(
+        0,
+        2,
+        LonLatBbox {
+            west: 0.0,
+            south: 0.0,
+            east: 1.0,
+            north: 1.0,
+        },
+        MapCenter {
+            lon: 0.5,
+            lat: 0.5,
+            zoom: 1,
+        },
+    )
+    .expect("valid fixture geography");
+    let mut writer = PmtilesWriter::new(config);
     for (z, x, y, tile) in tiles {
         writer
             .add_tile(z, x, y, &gzip(&tile))

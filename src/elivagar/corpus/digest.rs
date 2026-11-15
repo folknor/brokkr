@@ -608,9 +608,8 @@ fn parse_cell(token: Option<&str>) -> io::Result<u64> {
     checked_tile_id(z, x, y)
 }
 
-/// The deepest zoom a committed coordinate may name: [`next_zoom_boundary`]
-/// saturates from z30, so past it a run's zoom-end check stops meaning anything.
-/// Far beyond any zoom elivagar writes (z14).
+/// The deepest zoom a committed coordinate may name. Far beyond any zoom
+/// elivagar writes (z14), so a deeper one in committed text is damage.
 const MAX_COMMITTED_ZOOM: u8 = 29;
 
 /// `xy_to_tile_id` for a coordinate read from committed text: the zoom and the

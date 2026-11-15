@@ -82,10 +82,7 @@ fn archive_runs(archive: &ArchiveView) -> io::Result<Vec<TileRun>> {
             Ok(TileRun {
                 start: entry.tile_id,
                 end,
-                blob: BlobRef {
-                    offset: entry.offset,
-                    length: entry.length,
-                },
+                blob: entry.blob(),
             })
         })
         .collect()
@@ -200,7 +197,7 @@ pub fn regress(
         .try_for_each(|state| -> io::Result<()> {
             let cur = current.raw_blob(state.work.pair.current)?;
             let bl = baseline.raw_blob(state.work.pair.baseline)?;
-            state.raw_equal = raw_equal(cur, bl);
+            state.raw_equal = raw_equal(&cur, &bl);
             Ok(())
         })?;
     report.counters.raw_pass_ms = crate::passthrough_cmd::duration_ms(raw_start.elapsed());
@@ -236,9 +233,9 @@ pub fn regress(
         .par_iter_mut()
         .filter(|state| !state.raw_equal && !state.canonical_equal)
         .try_for_each_init(DecodeScratch::default, |scratch, state| -> io::Result<()> {
-            let cur_bytes = scratch.decompress(current.raw_blob(state.work.pair.current)?)?;
+            let cur_bytes = scratch.decompress(&current.raw_blob(state.work.pair.current)?)?;
             let cur = decode_prepared_tile(cur_bytes, strictness).map_err(invalid_tile)?;
-            let bl_bytes = scratch.decompress(baseline.raw_blob(state.work.pair.baseline)?)?;
+            let bl_bytes = scratch.decompress(&baseline.raw_blob(state.work.pair.baseline)?)?;
             let bl = decode_prepared_tile(bl_bytes, strictness).map_err(invalid_tile)?;
             state.detail = Some(compare_detail_tiles::<DetailOutcome>(&cur, &bl, cfg));
             Ok(())
@@ -339,7 +336,7 @@ fn fingerprint_blobs(
             |scratch, (blob, hash)| -> io::Result<()> {
                 // Keep semantic hashing identical to the corpus walk; rayon
                 // changes scheduling only, not the hash implementation.
-                *hash = semantic_hash(archive.raw_blob(*blob)?, scratch)?;
+                *hash = semantic_hash(&archive.raw_blob(*blob)?, scratch)?;
                 Ok(())
             },
         )?;

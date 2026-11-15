@@ -49,22 +49,6 @@ pub(crate) mod mvt {
     }
 }
 
-pub(crate) mod pmtiles {
-    pub(crate) const TILE_TYPE_MVT: u8 = 1;
-    pub(crate) const TILE_COMPRESSION_NONE: u8 = 1;
-    pub(crate) const TILE_COMPRESSION_GZIP: u8 = 2;
-    pub(crate) const TILE_COMPRESSION_BROTLI: u8 = 3;
-    pub(crate) const TILE_COMPRESSION_ZSTD: u8 = 4;
-
-    pub(crate) const HEADER_BOUNDS_LEFT: usize = 102;
-    pub(crate) const HEADER_BOUNDS_BOTTOM: usize = 106;
-    pub(crate) const HEADER_BOUNDS_RIGHT: usize = 110;
-    pub(crate) const HEADER_BOUNDS_TOP: usize = 114;
-    pub(crate) const HEADER_CENTER_ZOOM: usize = 118;
-    pub(crate) const HEADER_CENTER_LONGITUDE: usize = 119;
-    pub(crate) const HEADER_CENTER_LATITUDE: usize = 123;
-}
-
 pub(crate) const SVG_TILE_SIZE: u32 = mvt::TILE_EXTENT;
 pub(crate) const SVG_FALLBACK_COLOR: &str = "#ff00ff";
 pub(crate) const REGRESS_OVERLAY_BACKGROUND: &str = "#f2efe9";

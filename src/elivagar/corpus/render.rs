@@ -19,8 +19,7 @@ use std::sync::Arc;
 use super::super::constants::{RING_GROUP_LIMIT, SVG_FALLBACK_COLOR, SVG_TILE_SIZE, mvt};
 use super::super::eliv::{
     ArchiveView, Cursor, DetailAttr, DetailFeature, RawDirEntry, Strictness, WIRE_LEN, WIRE_VARINT,
-    decode_detail_attr, decode_detail_feature, find_entry, gzip_decompress, tile_id_to_zxy,
-    xy_to_tile_id,
+    checked_tile_id, decode_detail_attr, decode_detail_feature, find_entry, tile_id_to_zxy,
 };
 use super::canonical::{compare_detail_components, compare_detail_features};
 use super::style::{Paint, Style};
@@ -305,10 +304,10 @@ pub(crate) fn render_archive_tile_from_runs(
     style: &Style,
     layers: Option<&[String]>,
 ) -> io::Result<RenderedSvg> {
-    let id = xy_to_tile_id(z, x, y);
+    let id = checked_tile_id(z, x, y)?;
     let entry = find_entry(runs, id);
     let raw = if let Some(e) = entry {
-        gzip_decompress(archive.raw_blob_at(e.offset, e.length)?)?
+        archive.read_tile(e.blob())?
     } else {
         Vec::new()
     };
@@ -328,7 +327,7 @@ pub(crate) fn render_archive_tile_from_runs(
 /// summaries are reused for every tile id in that run.
 pub fn dump_ring_grouping(archive: &ArchiveView, out: &mut dyn Write) -> io::Result<()> {
     for run in archive.read_all_runs()? {
-        let raw = gzip_decompress(archive.raw_blob_at(run.offset, run.length)?)?;
+        let raw = archive.read_tile(run.blob())?;
         let summaries = ring_grouping_for_blob(&raw)?;
         for tile_id in run.tile_id..run.tile_id + u64::from(run.run_length) {
             let (z, x, y) = tile_id_to_zxy(tile_id);

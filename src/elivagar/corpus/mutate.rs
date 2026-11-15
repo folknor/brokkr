@@ -16,10 +16,10 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 
 use super::super::constants::mvt;
-use super::super::constants::pmtiles as pmtiles_constants;
 use super::super::eliv::{
-    ArchiveView, BlobRef, PmtilesConfig, PmtilesWriter, RawDirEntry, WIRE_32BIT, WIRE_64BIT,
-    WIRE_LEN, WIRE_VARINT, encode_varint, read_i32_le, read_varint, xy_to_tile_id,
+    ArchiveView, Header, LonLatBbox, MapCenter, PmtilesConfig, PmtilesWriter, RawDirEntry,
+    TileId, WIRE_32BIT, WIRE_64BIT, WIRE_LEN, WIRE_VARINT, checked_tile_id, e7_to_degrees,
+    encode_varint, read_varint,
 };
 
 /// A deliberately small set of direct archive mutations used to calibrate the
@@ -62,27 +62,11 @@ pub fn mutate(
         ));
     }
     let archive = ArchiveView::open(input)?;
-    let target_id = target.map(|(z, x, y)| xy_to_tile_id(z, x, y));
+    let target_id = target
+        .map(|(z, x, y)| checked_tile_id(z, x, y))
+        .transpose()?;
     let mut found = op == MutationOp::Regzip;
-    let header = archive.header();
-    let e7 =
-        |offset| -> io::Result<f64> { Ok(f64::from(read_i32_le(header, offset)?) / 10_000_000.0) };
-    let config = PmtilesConfig {
-        min_zoom: archive.min_zoom(),
-        max_zoom: archive.max_zoom(),
-        bounds: (
-            e7(pmtiles_constants::HEADER_BOUNDS_LEFT)?,
-            e7(pmtiles_constants::HEADER_BOUNDS_BOTTOM)?,
-            e7(pmtiles_constants::HEADER_BOUNDS_RIGHT)?,
-            e7(pmtiles_constants::HEADER_BOUNDS_TOP)?,
-        ),
-        center: (
-            e7(pmtiles_constants::HEADER_CENTER_LONGITUDE)?,
-            e7(pmtiles_constants::HEADER_CENTER_LATITUDE)?,
-            header[pmtiles_constants::HEADER_CENTER_ZOOM],
-        ),
-    };
-    let mut writer = PmtilesWriter::new(config);
+    let mut writer = PmtilesWriter::new(header_config(archive.header())?);
     writer.set_metadata_verbatim(archive.metadata()?);
     for run in archive.read_all_runs()? {
         let is_target = op != MutationOp::Regzip
@@ -101,12 +85,9 @@ pub fn mutate(
             match op {
                 MutationOp::DropTile => {}
                 MutationOp::NudgeGeometry | MutationOp::LayerVersion => {
-                    let raw = archive.raw_blob(BlobRef {
-                        offset: run.offset,
-                        length: run.length,
-                    })?;
-                    let edited = mutate_payload(raw, op)?;
-                    writer.add_run(id, 1, &edited)?;
+                    let raw = archive.raw_blob(run.blob())?;
+                    let edited = mutate_payload(&raw, op)?;
+                    writer.add_run(archive_tile_id(id)?, 1, &edited)?;
                 }
                 MutationOp::Regzip => {
                     return Err(io::Error::new(
@@ -124,12 +105,9 @@ pub fn mutate(
                 run.tile_id + u64::from(run.run_length) - after,
             )?;
         } else if op == MutationOp::Regzip {
-            let raw = archive.raw_blob(BlobRef {
-                offset: run.offset,
-                length: run.length,
-            })?;
-            let recompressed = regzip(raw)?;
-            writer.add_run(run.tile_id, run.run_length, &recompressed)?;
+            let raw = archive.raw_blob(run.blob())?;
+            let recompressed = regzip(&raw)?;
+            writer.add_run(archive_tile_id(run.tile_id)?, run.run_length, &recompressed)?;
         } else {
             copy_run(
                 &mut writer,
@@ -149,6 +127,37 @@ pub fn mutate(
     writer.write_to(output)
 }
 
+/// The writer configuration that reproduces `header`'s zoom range and
+/// geography. E7 to degrees and back rounds to the same integers, so the
+/// rewritten header carries the source's bounds and center exactly.
+fn header_config(header: &Header) -> io::Result<PmtilesConfig> {
+    PmtilesConfig::new(
+        header.min_zoom,
+        header.max_zoom,
+        LonLatBbox {
+            west: e7_to_degrees(header.bounds.west),
+            south: e7_to_degrees(header.bounds.south),
+            east: e7_to_degrees(header.bounds.east),
+            north: e7_to_degrees(header.bounds.north),
+        },
+        MapCenter {
+            lon: e7_to_degrees(header.center.lon),
+            lat: e7_to_degrees(header.center.lat),
+            zoom: header.center.zoom,
+        },
+    )
+}
+
+/// A run start read back from the source archive's validated directory.
+fn archive_tile_id(raw: u64) -> io::Result<TileId> {
+    TileId::new(raw).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("tile id {raw} is past the last z31 tile"),
+        )
+    })
+}
+
 fn copy_run(
     writer: &mut PmtilesWriter,
     archive: &ArchiveView,
@@ -160,12 +169,9 @@ fn copy_run(
         let length = u32::try_from(length)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "run too long"))?;
         writer.add_run(
-            tile_id,
+            archive_tile_id(tile_id)?,
             length,
-            archive.raw_blob(BlobRef {
-                offset: run.offset,
-                length: run.length,
-            })?,
+            &archive.raw_blob(run.blob())?,
         )?;
     }
     Ok(())
@@ -397,8 +403,8 @@ mod calibration {
 
     use super::super::super::constants::mvt;
     use super::super::super::eliv::{
-        ArchiveView, PmtilesConfig, PmtilesWriter, WIRE_LEN, WIRE_VARINT, tile_id_to_zxy,
-        xy_to_tile_id,
+        ArchiveView, LonLatBbox, MapCenter, PmtilesConfig, PmtilesWriter, TileId, WIRE_LEN,
+        WIRE_VARINT, tile_id_to_zxy,
     };
     use super::super::compute;
     use super::super::digest::{DigestMode, LeafRun};
@@ -459,16 +465,27 @@ mod calibration {
     // A z1 run of 4 tiles sharing one blob; the target is the second tile.
     fn source(path: &Path) -> u64 {
         let payload = fixture_payload();
-        let mut writer = PmtilesWriter::new(PmtilesConfig {
-            min_zoom: 1,
-            max_zoom: 1,
-            bounds: (0.0, 0.0, 1.0, 1.0),
-            center: (0.0, 0.0, 1),
-        });
-        let first = xy_to_tile_id(1, 0, 0);
+        let config = PmtilesConfig::new(
+            1,
+            1,
+            LonLatBbox {
+                west: 0.0,
+                south: 0.0,
+                east: 1.0,
+                north: 1.0,
+            },
+            MapCenter {
+                lon: 0.0,
+                lat: 0.0,
+                zoom: 1,
+            },
+        )
+        .unwrap();
+        let mut writer = PmtilesWriter::new(config);
+        let first = TileId::at(1, 0, 0);
         writer.add_run(first, 4, &payload).unwrap();
         writer.write_to(path).unwrap();
-        first + 1
+        first.raw() + 1
     }
 
     fn leaf_hashes(leaves: &[LeafRun]) -> BTreeMap<u64, u128> {

@@ -152,16 +152,7 @@ pub(crate) fn corpus_style_path(corpus_dir: &Path) -> std::path::PathBuf {
 }
 
 fn format_guard(a: &ArchiveView) -> Option<String> {
-    if a.tile_type() != super::constants::pmtiles::TILE_TYPE_MVT {
-        return Some(format!("archive tile type {} is not MVT", a.tile_type()));
-    }
-    if a.tile_compression() != super::constants::pmtiles::TILE_COMPRESSION_GZIP {
-        return Some(format!(
-            "archive tile compression {} is not gzip",
-            a.tile_compression()
-        ));
-    }
-    None
+    a.tile_format_refusal()
 }
 
 /// Compute the canonical digest and leaf runs from an open archive.
@@ -196,7 +187,7 @@ pub fn compute(
     for b in &blobs {
         // Regress uses this same canonical function in its parallel pass; only
         // the scheduling differs between the two archive walks.
-        let h = semantic_hash(archive.raw_blob(*b)?, &mut scratch)?;
+        let h = semantic_hash(&archive.raw_blob(*b)?, &mut scratch)?;
         hashes.insert(*b, h);
     }
     let mut leaves: Vec<LeafRun> = Vec::new();

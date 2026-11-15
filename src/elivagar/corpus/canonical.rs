@@ -552,6 +552,119 @@ fn streaming_geometry_hash(geom_type: u8, data: &[u8]) -> Result<u128, String> {
     Ok(sink.finish())
 }
 
+/// The MVT spec 4.3.4 command grammar, checked per command header before its
+/// parameters are read and once more at the end of the stream. It mirrors the
+/// grammar elivagar's strict `decode_detail_tile` enforces, so the streaming
+/// hash refuses exactly the command streams the detail decode refuses and the
+/// two stay one equivalence relation over the tiles they accept.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Grammar {
+    Point,
+    LineString,
+    Polygon,
+}
+
+struct GrammarState {
+    grammar: Grammar,
+    /// Point: a MoveTo was seen. LineString: a MoveTo awaits its LineTo.
+    pending: bool,
+    /// Polygon ring phase: 0 expects MoveTo, 1 LineTo, 2 ClosePath.
+    phase: u8,
+    any: bool,
+}
+
+impl GrammarState {
+    fn new(grammar: Grammar) -> Self {
+        Self {
+            grammar,
+            pending: false,
+            phase: 0,
+            any: false,
+        }
+    }
+
+    fn check(&mut self, id: u32, count: u32) -> Result<(), String> {
+        let err = |message: &str| Err(message.to_string());
+        self.any = true;
+        if count == 0 {
+            return err("geometry command with zero repeat count");
+        }
+        match (self.grammar, id) {
+            (Grammar::Polygon, mvt::COMMAND_CLOSE_PATH) => {
+                if count != 1 {
+                    return err("ClosePath command count is not 1 (spec 4.3.3.3)");
+                }
+                match self.phase {
+                    1 => return err("polygon ring has too few points (need >=3)"),
+                    0 => return err("polygon ClosePath must follow LineTo (spec 4.3.4.4)"),
+                    _ => self.phase = 0,
+                }
+            }
+            (_, mvt::COMMAND_CLOSE_PATH) => return err("ClosePath in non-polygon geometry"),
+            (Grammar::Point, mvt::COMMAND_MOVE_TO) => {
+                if self.pending {
+                    return err("point geometry must use a single MoveTo command (spec 4.3.4.2)");
+                }
+                self.pending = true;
+            }
+            (Grammar::Point, mvt::COMMAND_LINE_TO) => {
+                return err("LineTo is invalid for point geometry (spec 4.3.4.2)");
+            }
+            (Grammar::LineString, mvt::COMMAND_MOVE_TO) => {
+                if count != 1 {
+                    return err("linestring MoveTo count must be 1 (spec 4.3.4.3)");
+                }
+                if self.pending {
+                    return err("linestring MoveTo must follow a LineTo (spec 4.3.4.3)");
+                }
+                self.pending = true;
+            }
+            (Grammar::LineString, mvt::COMMAND_LINE_TO) => {
+                if !self.pending {
+                    return err("linestring LineTo must follow MoveTo (spec 4.3.4.3)");
+                }
+                self.pending = false;
+            }
+            (Grammar::Polygon, mvt::COMMAND_MOVE_TO) => {
+                if count != 1 {
+                    return err("polygon ring MoveTo count must be 1 (spec 4.3.4.4)");
+                }
+                match self.phase {
+                    1 => return err("polygon ring missing LineTo"),
+                    2 => return err("polygon ring missing ClosePath"),
+                    _ => self.phase = 1,
+                }
+            }
+            (Grammar::Polygon, mvt::COMMAND_LINE_TO) => {
+                if self.phase != 1 {
+                    return err("polygon LineTo must follow MoveTo (spec 4.3.4.4)");
+                }
+                if count <= 1 {
+                    return err("polygon ring LineTo count must be greater than 1 (spec 4.3.4.4)");
+                }
+                self.phase = 2;
+            }
+            (_, id) => return Err(format!("unknown geometry command id {id}")),
+        }
+        Ok(())
+    }
+
+    fn finish(&self) -> Result<(), String> {
+        let err = |message: &str| Err(message.to_string());
+        if !self.any {
+            return err("feature has empty geometry command stream");
+        }
+        match self.grammar {
+            Grammar::LineString if self.pending => {
+                err("linestring MoveTo missing LineTo (spec 4.3.4.3)")
+            }
+            Grammar::Polygon if self.phase == 1 => err("polygon ring missing LineTo"),
+            Grammar::Polygon if self.phase == 2 => err("polygon ring missing ClosePath"),
+            _ => Ok(()),
+        }
+    }
+}
+
 fn unzigzag(value: u32) -> i32 {
     ((value >> 1) as i32) ^ (-((value & 1) as i32))
 }
@@ -588,18 +701,18 @@ fn streaming_points(data: &[u8]) -> Result<Vec<u128>, String> {
     let mut cursor = Cursor::new(data);
     let (mut x, mut y) = (0, 0);
     let mut ring = StreamingRing::new();
+    let mut grammar = GrammarState::new(Grammar::Point);
     while !cursor.is_empty() {
         let command = read_geometry_varint(&mut cursor, "point command")?;
-        if command & mvt::COMMAND_ID_MASK != mvt::COMMAND_MOVE_TO {
-            return Err(format!(
-                "point geometry contains command {}",
-                command & mvt::COMMAND_ID_MASK
-            ));
-        }
+        grammar.check(
+            command & mvt::COMMAND_ID_MASK,
+            command >> mvt::COMMAND_COUNT_SHIFT,
+        )?;
         for _ in 0..(command >> mvt::COMMAND_COUNT_SHIFT) {
             ring.point(next_geometry_point(&mut cursor, &mut x, &mut y, "point")?);
         }
     }
+    grammar.finish()?;
     Ok(if ring.vertices == 0 {
         Vec::new()
     } else {
@@ -617,8 +730,13 @@ fn streaming_lines(data: &[u8]) -> Result<Vec<u128>, String> {
     let (mut x, mut y) = (0, 0);
     let mut components = Vec::new();
     let mut path: Option<StreamingRing> = None;
+    let mut grammar = GrammarState::new(Grammar::LineString);
     while !cursor.is_empty() {
         let command = read_geometry_varint(&mut cursor, "line command")?;
+        grammar.check(
+            command & mvt::COMMAND_ID_MASK,
+            command >> mvt::COMMAND_COUNT_SHIFT,
+        )?;
         match (
             command & mvt::COMMAND_ID_MASK,
             command >> mvt::COMMAND_COUNT_SHIFT,
@@ -669,6 +787,7 @@ fn streaming_lines(data: &[u8]) -> Result<Vec<u128>, String> {
             (id, _) => return Err(format!("unknown line command {id}")),
         }
     }
+    grammar.finish()?;
     if let Some(path) = path {
         components.push(
             StreamingComponent {
@@ -707,8 +826,13 @@ fn streaming_polygons(data: &[u8]) -> Result<Vec<u128>, String> {
         component.rings.push(ring.finish(role));
         Ok(())
     };
+    let mut grammar = GrammarState::new(Grammar::Polygon);
     while !cursor.is_empty() {
         let command = read_geometry_varint(&mut cursor, "polygon command")?;
+        grammar.check(
+            command & mvt::COMMAND_ID_MASK,
+            command >> mvt::COMMAND_COUNT_SHIFT,
+        )?;
         match (
             command & mvt::COMMAND_ID_MASK,
             command >> mvt::COMMAND_COUNT_SHIFT,
@@ -751,6 +875,7 @@ fn streaming_polygons(data: &[u8]) -> Result<Vec<u128>, String> {
             (id, _) => return Err(format!("unknown polygon command {id}")),
         }
     }
+    grammar.finish()?;
     if let Some(ring) = ring {
         add_ring(ring, &mut component, &mut components)?;
     }
@@ -871,24 +996,64 @@ mod equivalence {
             false,
         );
 
-        // A repeated-count line MoveTo splits identically in both decoders.
-        let mut repeated = Vec::new();
-        repeated.push(command(mvt::COMMAND_MOVE_TO, 2));
-        repeated.extend([zigzag(0), zigzag(0), zigzag(5), zigzag(5)]);
-        repeated.push(command(mvt::COMMAND_LINE_TO, 1));
-        repeated.extend([zigzag(5), zigzag(5)]);
-        let mut conventional = Vec::new();
-        conventional.push(command(mvt::COMMAND_MOVE_TO, 1));
-        conventional.extend([zigzag(0), zigzag(0)]);
-        conventional.push(command(mvt::COMMAND_LINE_TO, 1));
-        conventional.extend([zigzag(10), zigzag(10)]);
-        conventional.push(command(mvt::COMMAND_MOVE_TO, 1));
-        conventional.extend([zigzag(-5), zigzag(-5)]);
-        assert_fingerprint_verdict(
-            &raw_geometry_tile(GeomType::LineString, repeated),
-            &raw_geometry_tile(GeomType::LineString, conventional),
-            true,
-        );
+    }
+
+    /// Both decoders refuse every command stream the spec 4.3.4 grammar
+    /// forbids, so neither hashes a tile the other will not read.
+    #[test]
+    fn streaming_and_detail_refuse_the_same_command_grammar() {
+        let mv = |n| command(mvt::COMMAND_MOVE_TO, n);
+        let lt = |n| command(mvt::COMMAND_LINE_TO, n);
+        let close = command(mvt::COMMAND_CLOSE_PATH, 1);
+        let z = zigzag;
+        let refused: [(GeomType, Vec<u32>); 10] = [
+            // A repeated-count line MoveTo.
+            (
+                GeomType::LineString,
+                vec![mv(2), z(0), z(0), z(5), z(5), lt(1), z(5), z(5)],
+            ),
+            // A line MoveTo with no LineTo after it.
+            (GeomType::LineString, vec![mv(1), z(0), z(0)]),
+            // Two LineTos for one MoveTo.
+            (
+                GeomType::LineString,
+                vec![mv(1), z(0), z(0), lt(1), z(2), z(2), lt(1), z(2), z(2)],
+            ),
+            // ClosePath in a line.
+            (
+                GeomType::LineString,
+                vec![mv(1), z(0), z(0), lt(1), z(2), z(2), close],
+            ),
+            // A zero-count command.
+            (GeomType::LineString, vec![mv(0)]),
+            // Two point MoveTos.
+            (
+                GeomType::Point,
+                vec![mv(1), z(0), z(0), mv(1), z(2), z(2)],
+            ),
+            // A polygon ring without its ClosePath.
+            (
+                GeomType::Polygon,
+                vec![mv(1), z(0), z(0), lt(2), z(10), z(0), z(0), z(10)],
+            ),
+            // A polygon ring of two points.
+            (
+                GeomType::Polygon,
+                vec![mv(1), z(0), z(0), lt(1), z(10), z(0), close],
+            ),
+            // A repeated-count polygon MoveTo.
+            (
+                GeomType::Polygon,
+                vec![mv(2), z(0), z(0), z(5), z(5), lt(2), z(10), z(0), z(0), z(10), close],
+            ),
+            // An empty command stream.
+            (GeomType::Polygon, Vec::new()),
+        ];
+        for (index, (geom_type, words)) in refused.into_iter().enumerate() {
+            let tile = raw_geometry_tile(geom_type, words);
+            assert!(stream(&tile).is_err(), "streaming accepted case {index}");
+            assert!(detail(&tile).is_err(), "detail accepted case {index}");
+        }
     }
 
     #[test]

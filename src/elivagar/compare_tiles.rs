@@ -29,8 +29,7 @@ use std::path::Path;
 use super::constants::mvt;
 use super::constants::{DEFAULT_COMPARE_SAMPLE_PER_ZOOM, MAX_COMPARE_SAMPLE_PER_ZOOM};
 use super::eliv::{
-    ArchiveView, BlobRef, Strictness, decode_detail_tile, gzip_decompress, next_zoom_boundary,
-    tile_id_to_zxy,
+    ArchiveView, BlobRef, Strictness, decode_detail_tile, next_zoom_boundary, tile_id_to_zxy,
 };
 use crate::error::DevError;
 use crate::output;
@@ -87,9 +86,6 @@ fn addressed_runs(archive: &ArchiveView, path: &str) -> Result<(ZoomRuns, u64), 
     let mut by_zoom = ZoomRuns::new();
     let mut addressed = 0u64;
     for run in runs {
-        if run.run_length == 0 {
-            continue;
-        }
         let run_end = run
             .tile_id
             .checked_add(u64::from(run.run_length))
@@ -97,10 +93,7 @@ fn addressed_runs(archive: &ArchiveView, path: &str) -> Result<(ZoomRuns, u64), 
         addressed = addressed
             .checked_add(u64::from(run.run_length))
             .ok_or_else(|| DevError::Verify("addressed tile count overflows".into()))?;
-        let blob = BlobRef {
-            offset: run.offset,
-            length: run.length,
-        };
+        let blob = run.blob();
         let mut start = run.tile_id;
         while start < run_end {
             let (zoom, _, _) = tile_id_to_zxy(start);
@@ -186,12 +179,7 @@ fn tally_tile(
     blob: BlobRef,
     path: &str,
 ) -> Result<Option<(Tallies, usize)>, DevError> {
-    let raw = match archive.raw_blob(blob) {
-        Ok(raw) => raw,
-        Err(error) if malformed_tile_error(error.kind()) => return Ok(None),
-        Err(error) => return Err(archive_failure(path, &error)),
-    };
-    let bytes = match gzip_decompress(raw) {
+    let bytes = match archive.read_tile(blob) {
         Ok(bytes) => bytes,
         Err(error) if malformed_tile_error(error.kind()) => return Ok(None),
         Err(error) => return Err(archive_failure(path, &error)),
