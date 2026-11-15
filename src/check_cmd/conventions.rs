@@ -290,7 +290,7 @@ pub(super) fn run_bench(set: super::Benches<'_>) -> Result<(), DevError> {
             checked.push_str(" and bench_lib");
         }
         if set.registry.is_some() {
-            checked.push_str(", none unregistered");
+            checked.push_str(", every bench script under bench_scripts and none unregistered");
         }
         if let Some(files) = &tests {
             checked.push_str(&format!(

@@ -635,9 +635,11 @@ that its names went unchecked. What a name check can and cannot see is in
 `brokkr man bench-config validating-a-script`. Every bench is checked; each
 finding names the bench, the file to open and the line, and a clean run
 counts the scripts on the conventions line (`bench (3 scripts)`). With
-`bench_scripts` set it also refuses every `.lua` file under that directory
-that no bench registers, a module or an exemption aside, each finding naming
-the file (`brokkr man bench-config bench_scripts`). With `bench_tests` set it
+`bench_scripts` set it also refuses every bench whose script is inline or
+whose `script_file` lies outside that directory, and every `.lua` file under
+it that no bench registers, a module, a contract-test file or an exemption
+aside, each finding naming the bench or the file without a line (`brokkr man
+bench-config bench_scripts`). With `bench_tests` set it
 runs every contract-test file under that directory against virtual hosts, no
 build, data or child process, each failed case a finding naming the file and
 the case (`brokkr man bench contract-tests`). It also runs

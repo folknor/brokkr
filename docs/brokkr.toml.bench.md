@@ -51,8 +51,11 @@ define any name through it (`_G[k] = v`, `rawset(_G, k, v)`), so its names
 are not checked at all, and the phase warns which bench and line made it so.
 The compile still is.
 
-With `bench_scripts` set, the phase also refuses every `.lua` file under
-that directory no bench registers (`bench_scripts`).
+With `bench_scripts` set, the phase also refuses every bench whose script is
+inline or whose `script_file` lies outside that directory, and every `.lua`
+file under it no bench registers, a module, a contract-test file or an
+exemption aside (`bench_scripts`). These findings name the bench or the
+file, with no line: they are about where a script is, not what it says.
 
 With `bench_lib` set and a bench declared or `bench_scripts` set (without
 either the phase is inert, library and all), the phase also checks every module in it, once, each
@@ -97,7 +100,8 @@ uses = ["dataset"]
 params.jobs = { free = true, help = "worker threads" }
 ```
 
-- `script` - the Lua, inline. Or:
+- `script` - the Lua, inline; `brokkr check` refuses one in a config that
+  sets `bench_scripts`. Or:
 - `script_file` - a `.lua` file holding it, resolved against the directory of
   the config file that set `script_file` (the same base `include` paths use,
   and the real directory when that file is reached through a symlink). The
@@ -515,14 +519,28 @@ bench_scripts = "../benches"
 bench_scripts_exempt = ["../benches/scratch", "../benches/old/probe.lua"]
 ```
 
-The directory every bench script lives under, so that `brokkr check`'s
-`bench` phase can refuse one no bench registers: each `.lua` file below it
-must be the `script_file` of some `[bench.NAME]`, a module `bench_lib`
-loads, a contract-test file `bench_tests` holds (exactly the files the
-tests run, found by the same walk), or covered by `bench_scripts_exempt`.
-Each finding names the file.
+The directory every bench script lives under, which `brokkr check`'s
+`bench` phase holds both ways. Every bench of the composed config, whichever
+included file declared it, names a `script_file` located under the
+directory: an inline `script`, or a `script_file` located outside, is a
+finding naming the bench and the config file or the script. And each `.lua`
+file below it must be the `script_file` of some `[bench.NAME]`, a module
+`bench_lib` loads, a contract-test file `bench_tests` holds (exactly the
+files the tests run, found by the same walk), or covered by
+`bench_scripts_exempt`, each finding naming the file. Those three excuse a
+file from needing a bench, never a bench from living under the directory.
 With it set the phase runs even with no bench declared, and then checks
-`bench_lib` too. Unset, nothing is discovered.
+`bench_lib` too. Unset, nothing is discovered and an inline script or a
+`script_file` anywhere is fine. Neither refusal is a load error: a
+misplaced script fails the check and blocks no other command.
+
+A script is judged by its location when the check runs, the rule below:
+its directory resolved on disk, its name as spelled. So a link named
+`fam/x.lua` under the directory is under it wherever it points, and a
+script reached through a linked directory leading out is outside. A
+`script_file` whose directory cannot be resolved is not judged for place,
+since reading it fails the phase already; inline scripts are refused even
+when the directory itself cannot be resolved.
 
 Both keys resolve against the directory of the config file that set them,
 as `script_file` does; the exemptions resolve beside the file that set the

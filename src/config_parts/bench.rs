@@ -842,9 +842,11 @@ pub(crate) fn parse_tests(
 
 /// The optional bench-script registry: `bench_scripts = "dir"` and
 /// `bench_scripts_exempt = ["path", ...]`. With it set, `brokkr check`'s
-/// `bench` phase refuses every `.lua` entry under `dir` that no bench's
-/// `script_file` names, that is not a module `bench_lib` loads, and that no
-/// exemption covers (`crate::bench::check_registry`).
+/// `bench` phase refuses every bench whose script is inline or whose
+/// `script_file` lies outside `dir`, and every `.lua` entry under `dir` that
+/// no bench's `script_file` names, that is not a module `bench_lib` loads,
+/// and that no exemption covers (`crate::bench::check_registry`). The load
+/// refuses neither: a misplaced script fails the check, not every command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Registry {
     /// The scripts directory, resolved beside the file that set it.

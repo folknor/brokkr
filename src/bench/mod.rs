@@ -61,7 +61,8 @@ pub(crate) enum FindingOwner {
     Bench(String),
     /// A `bench_lib` module, which belongs to no one bench.
     Library,
-    /// A `.lua` entry under `bench_scripts` no bench names.
+    /// A `.lua` entry under `bench_scripts` no bench names. A bench whose
+    /// script is not under `bench_scripts` is the bench's finding.
     Registry,
     /// A contract-test file under `bench_tests`, or a case in one.
     Test,
@@ -90,10 +91,11 @@ impl std::fmt::Display for ScriptFinding {
     }
 }
 
-/// Walk the `bench_scripts` directory and name every `.lua` entry in it
-/// that no bench's `script_file` names, that is not a module `bench_lib`
-/// loads, that is not one of the contract-test files `tests`, and that no
-/// exemption covers (`registry`).
+/// Hold every bench to the `bench_scripts` directory: name each bench whose
+/// script is inline or whose `script_file` lies outside it, then walk it and
+/// name every `.lua` entry in it that no bench's `script_file` names, that
+/// is not a module `bench_lib` loads, that is not one of the contract-test
+/// files `tests`, and that no exemption covers (`registry`).
 pub(crate) fn check_registry(
     registry: &crate::config::bench::Registry,
     benches: &std::collections::BTreeMap<String, Bench>,
@@ -127,10 +129,12 @@ pub(crate) fn test_overlaps(
             file: test.clone(),
             problem,
         };
-        if let Some(bench) = benches
-            .values()
-            .find(|bench| matches!(&bench.script, BenchScript::File { path, .. } if path == test))
-        {
+        // By the script's location now, as the registry judges it: the
+        // loaded path keeps a spelling its directory did not resolve to.
+        if let Some(bench) = benches.values().find(|bench| {
+            matches!(&bench.script, BenchScript::File { path, .. }
+                if registry::location(path).path == *test)
+        }) {
             findings.push(finding(format!(
                 "is [bench.{}]'s script_file: a test file is never a bench script",
                 bench.name

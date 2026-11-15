@@ -386,7 +386,7 @@ fn phase_disposition(phase: Phase, plan: &CheckPlan<'_>, i: &PlanInputs<'_>, a: 
         Phase::Bench => {
             let mut what = output::count(a.benches.benches.len(), "bench");
             if a.benches.registry.is_some() {
-                what.push_str(" and the bench_scripts registry");
+                what.push_str(" and bench_scripts placement and registration");
             }
             if a.benches.tests.is_some() {
                 what.push_str(", with the bench_tests contract tests");

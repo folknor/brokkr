@@ -210,9 +210,9 @@ pub struct DevConfig {
     /// `[bench_params]` sets they use. Empty when none are declared. See
     /// [`bench`](mod@bench).
     pub benches: BTreeMap<String, bench::Bench>,
-    /// `bench_scripts` and `bench_scripts_exempt`: the directory every `.lua`
-    /// under which a bench must name, `None` when unset. See
-    /// [`bench::Registry`].
+    /// `bench_scripts` and `bench_scripts_exempt`: the directory every bench
+    /// script lives under and every `.lua` under which a bench must name,
+    /// `None` when unset. See [`bench::Registry`].
     pub bench_registry: Option<bench::Registry>,
     /// `bench_tests`: the directory of contract-test files `brokkr check`'s
     /// `bench` phase and `brokkr bench --test` run, resolved beside the file
