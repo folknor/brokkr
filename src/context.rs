@@ -69,7 +69,7 @@ pub(crate) fn acquire_cmd_lock_opt(
     // `lockfile::acquire`'s fresh-hold path, so every acquirer gets them -
     // not only the commands that come through here.
     lockfile::acquire(&lockfile::LockContext {
-        project: project.map_or("brokkr", Project::name),
+        project: project.map(Project::name),
         command: crate::cli::invocation(),
         project_root,
         build_root,
@@ -175,7 +175,7 @@ impl MeasurementSession {
         // anything the session does with the tree; the harness is handed the
         // held lock. Path resolution is config alone and asks cargo nothing.
         let lock = lockfile::acquire(&lockfile::LockContext {
-            project: project.name(),
+            project: Some(project.name()),
             command: crate::cli::invocation(),
             project_root,
             build_root,
@@ -432,7 +432,7 @@ where
             // alone and explicitly activate the worktree's tree below, once
             // its checkout exists.
             let lock = lockfile::acquire_without_tree(&lockfile::LockContext {
-                project: project.map_or("brokkr", Project::name),
+                project: project.map(Project::name),
                 command: crate::cli::invocation(),
                 project_root,
                 build_root,

@@ -1,9 +1,10 @@
-# Time ceilings, strays, lock status and the rustc guard
+# Time ceilings, strays, lock status, stopping commands and the rustc guard
 
 What bounds, protects and reports every locked brokkr command: the time
 ceilings and per-test cap on `check`, `test` and `clippy`, the stray and orphan
-reaps, what `brokkr lock` shows about a holder, and the rustc guard. Their
-internals are in `reference/check-internals.md`.
+reaps, what `brokkr lock` shows about the holder and the queue, what `brokkr
+kill` stops, and the rustc guard. Their internals are in
+`reference/check-internals.md`.
 
 ## Time ceilings
 
@@ -283,9 +284,66 @@ another PID namespace cannot be sampled from here, and `brokkr lock` says so.
 it is ignored. A nextest lane's processes share one launch token for the lane.
 
 After the holder's lines, or `no active lock`, `brokkr lock` prints one
-`serve:` line per live `brokkr serve` server, since a serve holds no lock but
-makes every measurement refuse. It only looks: what a stopped serve left is
-cleaned by the commands that act on serves (`brokkr man serve`).
+`queued:` line per brokkr command waiting for the lock, oldest first: its
+project and invocation, how long it has waited, its state root, and its PID
+where that means the same thing to the caller. A command with no `brokkr.toml`
+shows as `(no brokkr.toml)` in place of a project, the holder too. A waiter
+whose cancel committed but which has not yet let go shows as `queued,
+cancelled`. Then one `serve:` line per live `brokkr serve` server, since a
+serve holds no lock but makes every measurement refuse. It only looks: what a
+dead waiter or a stopped serve left is cleaned by the commands that act on
+them (`brokkr man serve`).
+
+## Stopping commands
+
+`brokkr kill` stops the caller's own project's brokkr commands, never another
+project's unless asked. Several projects share one host and one lock, so a
+kill meant to cancel this project's queued command must not take down another
+project's holder and let the queued one run.
+
+The scope is the `project` key of `brokkr.toml`: a second checkout of the same
+project, or a `--commit` worktree, is the same scope. Without a `brokkr.toml`
+the scope is the commands run with none under the same state root (the working
+directory), so two directories of one unconfigured repository are two scopes.
+Where a `brokkr.toml` is present but does not load, a bare kill cannot know the
+key and refuses. `--project NAME` takes the commands of the project with that
+key instead, `--all` every project's.
+
+In the scope, kill does three things, in order:
+
+- **Queued commands are cancelled.** Every brokkr command waiting for the lock
+  is recorded in the lock queue before it prints its wait line. A kill marks
+  the scope's records cancelled, without a signal, so it reaches a waiter in
+  any PID namespace; the waiter prints that it was cancelled and did not run,
+  and exits 130. A cancelled waiter never runs, even one that was stopped or had
+  just won the lock. Kill waits up to two seconds for the cancelled waiters to
+  let go and says which have not. A kill covers every command that had printed
+  its wait line before it started; one starting at the same moment can escape
+  it.
+- **The lock holder is stopped when it is in the scope**, read after the
+  cancels: the cooperative stop over its control socket (`brokkr man measure`
+  has the protocol, `brokkr man run` what `run` and `bench` do with it), or with
+  `--hard` the SIGKILL of the holder and everything beneath it. `--hard` changes
+  only this step; queued commands are cancelled the same way with or without
+  it. A holder outside the scope is left alone, and kill names it and the form
+  that would stop it (`--project NAME`, or `--all`).
+- **Serves are listed, not stopped.** A `brokkr serve` whose start returned
+  holds no lock and is no command in flight; kill prints each of the scope's
+  live serves as left running, with the `brokkr serve --stop TOKEN` that stops
+  it. A serve still starting holds the lock and is stopped like any holder,
+  taking the server it was starting down with it.
+
+Queued commands outside the scope are listed as left waiting. So in a nidhogg
+checkout with a serve running and a `brokkr check` holding the lock, `brokkr
+kill` stops the check, cancels any other queued nidhogg commands, and leaves
+the server running, saying so; another project's queued commands keep their
+places.
+
+Kill exits 0 when everything in its scope was stopped or cancelled, including
+when there was nothing to stop, and 1 when a stop failed (a refused or failed
+signal included) or a holder or queued command could not be placed in or out of
+the scope because its record cannot be read. Under `--all` an unreadable holder
+record fails too: the holder is in scope but cannot be addressed.
 
 ## Strays
 

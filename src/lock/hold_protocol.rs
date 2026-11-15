@@ -122,8 +122,9 @@ fn host_service(
 }
 
 /// Refuse to start or continue an acquisition once this process has committed
-/// to stopping. Checked before re-entry, after the flock wait and after the
-/// drain, so no path into a hold can bypass an accepted `brokkr kill`.
+/// to stopping. Checked before re-entry, after the flock wait, after the queue
+/// claim, before the drain (which polls it too) and after it, so no path into
+/// a hold can bypass an accepted `brokkr kill`.
 fn refuse_if_stopping() -> Result<(), DevError> {
     if !crate::shutdown::admits_new_work() {
         return Err(DevError::Interrupted);
@@ -227,15 +228,28 @@ pub(super) fn acquire_at_with(
         }))
     })?;
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    let flocked = Flocked {
+    let mut flocked = Flocked {
+        service: None,
+        unpublish: Unpublish {
+            fd: owned.as_raw_fd(),
+            armed: false,
+        },
         fd: owned,
         path: path.to_owned(),
-        service: None,
+        ticket: None,
     };
     match wait {
         FlockWait::Block => {
             let inherited = crate::hold::inherited_capability_hash();
-            wait_for_flock(flocked.fd.as_raw_fd(), inherited.as_ref())?;
+            let queue = super::queue_dir().ok_or_else(|| {
+                DevError::Lock(LockError::acquisition(AcquireRefusal::QueueJoin {
+                    source: std::io::Error::other("$HOME is not set or is empty"),
+                }))
+            })?;
+            flocked.ticket =
+                wait_for_flock(flocked.fd.as_raw_fd(), inherited.as_ref(), &queue, &|| {
+                    waiter_record(ctx)
+                })?;
         }
         FlockWait::NonBlocking => try_flock(flocked.fd.as_raw_fd())?,
     }
@@ -259,10 +273,35 @@ pub(super) fn acquire_at_with(
 struct Flocked {
     // Fields are dropped in declaration order. The service must stop first,
     // while the exclusive flock still prevents another acquisition from
-    // replacing it.
+    // replacing it; then whatever this acquisition published is invalidated,
+    // still under the flock; then the flock goes.
     service: Option<(AcqId, crate::lock_service::Service)>,
+    unpublish: Unpublish,
     fd: OwnedFd,
     path: PathBuf,
+    /// This acquisition's place in the lock queue, when it waited: kept past
+    /// the flock until the holder record is published, then claimed
+    /// ([`Gated::drain`]).
+    ticket: Option<super::queue::Ticket>,
+}
+
+/// The pre-live owner's duty to invalidate the lock record it wrote: armed
+/// before the first rewrite (a failed rewrite can still have written part of
+/// a record), disarmed when [`LockInner`] takes the descriptor and the duty
+/// with it. Without it a refused or cancelled acquisition left a complete
+/// draining record naming itself, which a reader could take for the next
+/// acquirer's before that one rewrote it.
+struct Unpublish {
+    fd: RawFd,
+    armed: bool,
+}
+
+impl Drop for Unpublish {
+    fn drop(&mut self) {
+        if self.armed {
+            super::record::invalidate_metadata(self.fd);
+        }
+    }
 }
 
 impl Flocked {
@@ -298,20 +337,56 @@ impl Flocked {
 struct Gated(Flocked);
 
 impl Gated {
-    /// Publish a draining record, then obtain the exclusive compile lease.
+    /// Publish a draining record, claim the queue place, then obtain the
+    /// exclusive compile lease.
+    ///
+    /// The claim comes after the publish so a `brokkr kill` that loses the
+    /// cancel race to it (`super::queue`) finds a holder record and a live
+    /// control socket to stop instead of a holder it cannot address. A cancel
+    /// that won makes the claim fail: the acquisition ends as interrupted
+    /// before any work, and the drop invalidates the record and releases the
+    /// flock.
     fn drain(
-        self,
+        mut self,
         ctx: &LockContext<'_>,
         drain: fn() -> Result<Option<OwnedFd>, DevError>,
     ) -> Result<Drained, DevError> {
         let acq_id = self.0.service.as_ref().map(|(id, _)| id);
         let state = build_state(ctx, acq_id);
+        self.0.unpublish.armed = true;
         rewrite_from_state(self.0.fd.as_raw_fd(), &state).map_err(|source| {
             DevError::Lock(LockError::acquisition(AcquireRefusal::MetadataPublish {
                 stage: MetadataStage::Draining,
                 source,
             }))
         })?;
+        if let Some(ticket) = self.0.ticket.take() {
+            match ticket.claim() {
+                Ok(true) => {}
+                Ok(false) => {
+                    announce_cancelled();
+                    return Err(DevError::Interrupted);
+                }
+                Err(source) => {
+                    return Err(DevError::Lock(LockError::acquisition(
+                        AcquireRefusal::QueueClaim { source },
+                    )));
+                }
+            }
+            // A stop accepted over the socket since the publish.
+            refuse_if_stopping()?;
+            // Wording fixed on purpose - do not shorten or "improve" it.
+            // These two lines have been revised many times, and every terser
+            // version was misread by agents: without "you now hold the global
+            // brokkr lock for the duration of this command", an agent
+            // concludes its runs are contested and that other projects'
+            // brokkr commands are loading the machine during its benchmarks.
+            // They are not - the lock excludes them.
+            crate::output::lock_msg(
+                "acquired - you now hold the global brokkr lock for the duration of this command",
+            );
+        }
+        refuse_if_stopping()?;
         let compile_lease = drain()?;
         Ok(Drained {
             compile_lease,
@@ -387,8 +462,17 @@ impl Authorized {
         enter_cgroup: CgroupEntry,
         maintenance: bool,
     ) -> LockGuard {
-        let acq = self.flocked.service.as_ref().map(|(id, _)| id.clone());
-        let service = self.flocked.service.map(|(_, service)| service);
+        let Flocked {
+            service,
+            mut unpublish,
+            fd,
+            path,
+            ticket: _,
+        } = self.flocked;
+        // The live owner invalidates on release from here on.
+        unpublish.armed = false;
+        let acq = service.as_ref().map(|(id, _)| id.clone());
+        let service = service.map(|(_, service)| service);
         if let Some(service) = &service {
             service.update(snapshot_of(&self.state));
         }
@@ -405,9 +489,10 @@ impl Authorized {
         if let Some(held) = &self.tree {
             active_tree_dirs.insert(held.directory().to_owned(), 1);
         }
+        drop(unpublish);
         let inner = Arc::new(LockInner {
-            fd: self.flocked.fd,
-            path: self.flocked.path,
+            fd,
+            path,
             state: Mutex::new(self.state),
             tree: self.tree,
             capability: attach_capability(self.nonce),
@@ -455,28 +540,31 @@ pub(super) const LOCK_POLL: std::time::Duration = std::time::Duration::from_mill
 /// flock, then re-reads the holder; acquisition wins over whatever stale record
 /// is on disk (a dead ancestor's flock is gone with it - the descriptor is
 /// close-on-exec). A shutdown requested while waiting ends the wait.
-pub(super) fn wait_for_flock(fd: RawFd, inherited: Option<&AuthHash>) -> Result<(), DevError> {
-    let mut announced = false;
+///
+/// # The queue
+///
+/// The first failed attempt joins the lock queue in `queue` with the record
+/// `record` builds, before the wait line is printed, so every waiter that has
+/// announced itself is one `brokkr kill` can see and cancel
+/// (`super::queue`). A join that fails refuses: no waiter waits unrecorded.
+/// Each round checks whether a kill cancelled it. On winning the flock the
+/// ticket is returned, unclaimed, for the caller to claim once its holder
+/// record is published; `None` means the flock was free at once, and the
+/// fixed acquired line is the caller's to print only for a ticket.
+pub(super) fn wait_for_flock(
+    fd: RawFd,
+    inherited: Option<&AuthHash>,
+    queue: &Path,
+    record: &dyn Fn() -> super::queue::WaiterRecord,
+) -> Result<Option<super::queue::Ticket>, DevError> {
+    let mut ticket: Option<super::queue::Ticket> = None;
     loop {
         // This is acquisition, not observation: it must establish exclusive
         // ownership. The shared probe used by status and the rustc guard would
         // allow two brokkr commands to proceed together.
         let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
         if ret == 0 {
-            if announced {
-                // Wording fixed on purpose - do not shorten or "improve" it.
-                // These two lines have been revised many times, and every
-                // terser version was misread by agents: without "you now hold
-                // the global brokkr lock for the duration of this command",
-                // an agent concludes its runs are contested and that other
-                // projects' brokkr commands are loading the machine during
-                // its benchmarks. They are not - the lock excludes them.
-                crate::output::lock_msg(
-                    "acquired - you now hold the global brokkr lock for the duration of this \
-                     command",
-                );
-            }
-            return Ok(());
+            return Ok(ticket);
         }
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
@@ -494,20 +582,72 @@ pub(super) fn wait_for_flock(fd: RawFd, inherited: Option<&AuthHash>) -> Result<
         {
             return Err(DevError::Lock(LockError::acquisition(nested_refusal(info))));
         }
-        if !announced {
-            announced = true;
-            // Deliberately terse, and fixed wording (see the acquired line
-            // above): who holds the lock and how busy it is lives in
-            // `brokkr lock`, which re-samples on every invocation.
-            crate::output::lock_msg("waiting for the brokkr lock ...");
-            if let Some(hint) = holder.as_ref().and_then(same_agent_hint) {
-                crate::output::lock_msg(&hint);
+        match &ticket {
+            None => {
+                let joined = super::queue::Ticket::join(queue, &record()).map_err(|source| {
+                    DevError::Lock(LockError::acquisition(AcquireRefusal::QueueJoin { source }))
+                })?;
+                ticket = Some(joined);
+                // Deliberately terse, and fixed wording (see the acquired line
+                // in `Gated::drain`): who holds the lock and how busy it is
+                // lives in `brokkr lock`, which re-samples on every invocation.
+                crate::output::lock_msg("waiting for the brokkr lock ...");
+                if let Some(hint) = holder.as_ref().and_then(same_agent_hint) {
+                    crate::output::lock_msg(&hint);
+                }
             }
+            Some(waiting) => match waiting.cancelled() {
+                Ok(false) => {}
+                Ok(true) => {
+                    announce_cancelled();
+                    return Err(DevError::Interrupted);
+                }
+                Err(source) => {
+                    return Err(DevError::Lock(LockError::acquisition(
+                        AcquireRefusal::QueueClaim { source },
+                    )));
+                }
+            },
         }
         if crate::shutdown::should_unwind() {
             return Err(DevError::Interrupted);
         }
         std::thread::sleep(LOCK_POLL);
+    }
+}
+
+/// Say why a waiter is giving up: the exit status alone (130) does not tell an
+/// agent that never read the wait line that a kill cancelled it.
+fn announce_cancelled() {
+    crate::output::lock_msg(
+        "cancelled by `brokkr kill` while waiting for the brokkr lock; this command did not run",
+    );
+}
+
+/// The queue record a waiter publishes: who it is, in its own namespace, and
+/// what it was asked to do.
+fn waiter_record(ctx: &LockContext<'_>) -> super::queue::WaiterRecord {
+    let identity = identity_of(ctx);
+    let starttime = crate::process::ProcStat::read_self()
+        .map(|stat| stat.identity().start().get().to_string())
+        .unwrap_or_default();
+    let boot_id = HostScope::current()
+        .map(|scope| scope.boot().as_str().to_owned())
+        .unwrap_or_default();
+    super::queue::WaiterRecord {
+        pid: std::process::id(),
+        starttime,
+        boot_id,
+        pid_ns: identity.pid_ns,
+        time_ns: identity.time_ns,
+        configured: identity.configured,
+        project: identity.project,
+        root: identity.root,
+        command: identity.command,
+        args: identity.args,
+        joined: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
     }
 }
 
@@ -643,6 +783,11 @@ fn drain_compile_leases_at(
                 )));
             }
         }
+        // A stop accepted over the control socket while draining: the record
+        // is published, so a kill can reach this hold before it does any work.
+        if crate::shutdown::should_unwind() {
+            return Err(DevError::Interrupted);
+        }
         // Silent wait: an IDE check in flight at acquisition is the ordinary
         // case, and the reap below reports anything it kills on its own.
         let waited = start.elapsed();
@@ -672,6 +817,7 @@ fn build_state(ctx: &LockContext<'_>, acq_id: Option<&AcqId>) -> LockState {
         .ok()
         .map(|stat| stat.identity());
     LockState {
+        configured: identity.configured,
         project: identity.project,
         command: identity.command,
         args: identity.args,
@@ -698,7 +844,8 @@ fn identity_of(ctx: &LockContext<'_>) -> crate::lock_service::Identity {
             .unwrap_or_default()
     };
     crate::lock_service::Identity {
-        project: ctx.project.to_owned(),
+        configured: ctx.project.is_some(),
+        project: ctx.project.unwrap_or_default().to_owned(),
         command: ctx.command.spec().name.to_owned(),
         args: current_invocation_args(),
         root: ctx.project_root.as_path().display().to_string(),

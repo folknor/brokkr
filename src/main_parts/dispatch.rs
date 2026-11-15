@@ -74,7 +74,7 @@ pub(super) fn run(
         cli::LockPolicy::None => None,
         cli::LockPolicy::Blocking | cli::LockPolicy::NonBlocking => {
             let ctx = lockfile::LockContext {
-                project: project.as_ref().map_or("brokkr", Project::name),
+                project: project.as_ref().map(Project::name),
                 command: cli::invocation(),
                 project_root: state_root.expect("locking commands resolve a state root"),
                 build_root: detection
@@ -138,7 +138,14 @@ pub(super) fn run(
             full,
         } => run_man(topic.as_deref(), sections, *full, detection),
         Command::Lock => cmd_lock(),
-        Command::Kill { hard } => cmd_kill(*hard),
+        Command::Kill {
+            hard,
+            project: named,
+            all,
+        } => cmd_kill(
+            &crate::lock_cmd::KillScope::resolve(named.as_deref(), *all, detection)?,
+            *hard,
+        ),
         Command::Strays { kill } => crate::stray::cmd_strays(*kill),
         Command::Guard { install, remove } => crate::guard::cmd_guard(*install, *remove),
         Command::History {

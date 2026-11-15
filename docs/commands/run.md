@@ -49,7 +49,9 @@ under `--commit`, brokkr reports the signal and exits 1. An accepted interrupt
 or graceful stop exits 130. A failing `cargo install` ends with a one-line `[error]` naming
 the package and cargo's exit code, and exits 1.
 
-`brokkr kill` asks the lock holder to stop via SIGTERM. During `run`,
+`brokkr kill`, run in the holder's own project (or with `--project NAME` or
+`--all`; see `brokkr man hygiene`), asks the lock holder to stop via SIGTERM,
+and cancels that project's queued commands first. During `run`,
 brokkr forwards SIGTERM to its direct child and waits up to 1.5 seconds for
 that child to exit before sending it SIGKILL. With `--commit` or `--with`,
 the child is the program itself, so a program that handles SIGTERM has that
@@ -68,8 +70,8 @@ separate from a bench's `stop_at` marker grace and wall deadline.
 and its descendants.
 
 A server started by `brokkr serve` is stopped differently: once its start has
-returned it is no lock holder, so `kill` does not reach it, and `brokkr serve
---stop` sends its process group SIGTERM, waits the serve's grace (5 seconds
+returned it is no lock holder, so `kill` does not stop it (it lists the
+project's live serves as left running), and `brokkr serve --stop` sends its process group SIGTERM, waits the serve's grace (5 seconds
 unless `--grace` said otherwise at the start), then sends the group SIGKILL.
 See `brokkr man serve`.
 

@@ -70,6 +70,9 @@ const CLIENT_DEADLINE: Duration = Duration::from_secs(2);
 /// What the holder states about itself that never changes over the hold.
 #[derive(Clone, Default)]
 pub struct Identity {
+    /// Whether the holder found a `brokkr.toml`: `project` is its key then,
+    /// and empty otherwise.
+    pub configured: bool,
     pub project: String,
     pub command: String,
     pub args: String,
@@ -455,6 +458,8 @@ fn write_all(mut stream: &UnixStream, mut bytes: &[u8], deadline: Instant) -> bo
 // ---------------------------------------------------------------------------
 
 const STATUS_PROJECT: &str = "project";
+/// Optional: an older holder sends none, read as configured.
+const STATUS_CONFIGURED: &str = "configured";
 const STATUS_COMMAND: &str = "command";
 const STATUS_ARGS: &str = "args";
 const STATUS_ROOT: &str = "root";
@@ -498,6 +503,10 @@ impl HolderStatus {
             out.push('\n');
         };
         field(STATUS_PROJECT, &self.identity.project);
+        field(
+            STATUS_CONFIGURED,
+            if self.identity.configured { "1" } else { "0" },
+        );
         field(STATUS_COMMAND, &self.identity.command);
         field(STATUS_ARGS, &self.identity.args);
         field(STATUS_ROOT, &self.identity.root);
@@ -585,6 +594,7 @@ impl HolderStatus {
         Some(Self {
             identity: Identity {
                 project: value(STATUS_PROJECT)?.to_owned(),
+                configured: value(STATUS_CONFIGURED) != Some("0"),
                 command: value(STATUS_COMMAND)?.to_owned(),
                 args: value(STATUS_ARGS)?.to_owned(),
                 root: value(STATUS_ROOT)?.to_owned(),

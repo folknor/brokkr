@@ -26,6 +26,9 @@ pub struct LockInfo {
     /// it drains or when unrecorded. What a waiting descendant compares its
     /// inherited nonce against.
     pub auth: Option<AuthHash>,
+    /// Whether the holder found a `brokkr.toml`: `project` is its key when it
+    /// did. A record without the key (an older brokkr) reads as configured.
+    pub configured: bool,
     pub project: String,
     pub command: String,
     pub args: String,
@@ -86,6 +89,7 @@ pub(super) fn publish(fd: RawFd, state: &LockState) {
 /// is worse than a build that stops.
 fn invalidate_mutable_metadata(fd: RawFd, state: &LockState) {
     let cleared = LockState {
+        configured: state.configured,
         project: state.project.clone(),
         command: state.command.clone(),
         args: state.args.clone(),
@@ -174,6 +178,7 @@ pub(super) fn rewrite_from_state(fd: RawFd, state: &LockState) -> std::io::Resul
             .map(super::TrackedProcess::wire)
             .collect(),
         progress: state.progress,
+        configured: state.configured,
         project: state.project.clone(),
         command: state.command.clone(),
         root: state.project_root.clone(),
@@ -287,6 +292,7 @@ pub(super) fn parse_lock_contents(text: &str) -> Option<LockInfo> {
         time_ns: record.time_ns,
         codex_thread: record.codex_thread,
         auth: AuthHash::parse(&record.auth),
+        configured: record.configured,
         project: record.project,
         command: record.command,
         args: record.args,

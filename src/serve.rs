@@ -303,6 +303,36 @@ pub(crate) fn lock_report() -> Vec<String> {
     }
 }
 
+/// The outstanding generations `brokkr kill` reports as left running: those
+/// whose intent `in_scope` accepts (configured, project, state root), one
+/// line each naming the full token, since a stop by a listed short id refuses
+/// when two tokens share it. Looks only, like [`lock_report`]. A kill never
+/// stops an established serve: it cancels commands, and a serve whose start
+/// returned is no command in flight.
+pub(crate) fn kill_report(in_scope: &dyn Fn(bool, &str, &Path) -> bool) -> Vec<String> {
+    let Some(dir) = registry::dir() else {
+        return Vec::new();
+    };
+    match collect(&dir, Reconcile::Look) {
+        Ok(live) => live
+            .iter()
+            .filter(|o| {
+                o.intent
+                    .as_ref()
+                    .is_some_and(|i| in_scope(i.configured, &i.project, &i.root))
+            })
+            .map(|o| {
+                format!(
+                    "{} left running; `brokkr serve --stop {}` stops it",
+                    o.describe(),
+                    o.token.as_str()
+                )
+            })
+            .collect(),
+        Err(e) => vec![format!("serves: {e}")],
+    }
+}
+
 /// Bare `brokkr serve`: every outstanding generation, all projects.
 pub(crate) fn cmd_list() -> Result<(), DevError> {
     let dir = registry_dir()?;
@@ -542,6 +572,8 @@ fn wait_free(dir: &Path, token: &RunToken, budget: Duration) -> Result<bool, Dev
 /// What `brokkr serve TARGET` starts.
 pub(crate) struct StartRequest<'a> {
     pub(crate) project: &'a str,
+    /// Whether `project` is a `brokkr.toml` key ([`Intent::configured`]).
+    pub(crate) configured: bool,
     /// The state root: with the name, the identity a start replaces.
     pub(crate) root: &'a Path,
     /// The program's working directory, as for `run`.
@@ -638,6 +670,7 @@ pub(crate) fn start(req: &StartRequest<'_>) -> Result<(), DevError> {
     let intent = Intent {
         token: token.clone(),
         project: req.project.to_owned(),
+        configured: req.configured,
         root: req.root.to_owned(),
         name: name.clone(),
         target,
@@ -951,6 +984,7 @@ mod tests {
         Intent {
             token: RunToken::mint().unwrap(),
             project: "demo".into(),
+            configured: true,
             root: "/r".into(),
             name: "srv".into(),
             target: "srv".into(),

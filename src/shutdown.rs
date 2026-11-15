@@ -4,7 +4,8 @@
 //!
 //! The protocol:
 //!
-//! 1. `brokkr kill` reads the lockfile and asks the holder to stop over its
+//! 1. `brokkr kill` reads the lockfile and, when the holder is in its scope
+//!    (`crate::lock_cmd::KillScope`), asks it to stop over its
 //!    control socket (`crate::lock_service`): the holder commits a sticky stop
 //!    ([`commit_stop`]) and sends itself `SIGTERM`. Only when the socket does
 //!    not answer, and the holder's identity verifies from the caller's own

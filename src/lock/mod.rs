@@ -12,6 +12,7 @@ pub(crate) mod collector;
 mod hold_protocol;
 pub(crate) mod observe;
 pub(super) mod presentation;
+pub(crate) mod queue;
 mod record;
 pub(crate) mod report;
 use self::hold_protocol::{HOST_EFFECTS, HOST_EFFECTS_WITHOUT_TREE, acquire_at};
@@ -46,6 +47,9 @@ pub(crate) use lock_record::{Record as LockRecord, escape_value, unescape_value}
 /// `brokkr lock` (from another invocation) can see the current child PID
 /// and bench-run progress.
 struct LockState {
+    /// Whether the holder found a `brokkr.toml`; `project` is its key when it
+    /// did and empty when not.
+    configured: bool,
     project: String,
     command: String,
     /// Full brokkr invocation minus `argv[0]` (e.g. `add-locations-to-ways
@@ -387,7 +391,11 @@ impl LockGuard {
 
 /// Context written to the lock file so `brokkr lock` can explain who holds it.
 pub struct LockContext<'a> {
-    pub project: &'a str,
+    /// The `brokkr.toml` project key, `None` without a `brokkr.toml`. The
+    /// lock record keeps the two apart (`configured`), since `brokkr kill`
+    /// scopes a configured hold by its key and an unconfigured one by its
+    /// state root, and any string, the empty one included, is a valid key.
+    pub project: Option<&'a str>,
     /// The parsed command; its spec decides the disk-gate exemption and its
     /// name is what the lock file records.
     pub command: crate::cli::CommandId,
@@ -464,6 +472,12 @@ fn lock_path() -> Result<PathBuf, DevError> {
     Ok(path)
 }
 
+/// The lock queue's directory ([`queue`]), under the same home as the lock,
+/// so unit tests stay on their scratch queue.
+pub(crate) fn queue_dir() -> Option<PathBuf> {
+    crate::user_dirs::queue_dir_at(lock_home().as_deref())
+}
+
 /// The home both lock files live under: `$HOME`. Under `cfg(test)` it is one
 /// scratch directory per test process instead, so no test takes, reads or
 /// drains the real lock or compile lease through this module, as
@@ -498,7 +512,7 @@ pub(crate) fn test_hold(
     acquire_at(
         &path,
         &LockContext {
-            project: "test",
+            project: Some("test"),
             command: crate::cli::CommandId::Bench,
             project_root,
             build_root,
@@ -747,6 +761,7 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
             time_ns: String::new(),
             codex_thread: String::new(),
             auth: None,
+            configured: false,
             project: "unknown".into(),
             command: "unknown".into(),
             args: String::new(),
@@ -852,6 +867,67 @@ mod tests {
         unsafe { OwnedFd::from_raw_fd(fd) }
     }
 
+    fn waiter_record() -> queue::WaiterRecord {
+        queue::WaiterRecord {
+            pid: std::process::id(),
+            starttime: String::new(),
+            boot_id: String::new(),
+            pid_ns: String::new(),
+            time_ns: String::new(),
+            configured: true,
+            project: "test".into(),
+            root: "/test".into(),
+            command: "check".into(),
+            args: "check".into(),
+            joined: 0,
+        }
+    }
+
+    /// [`wait_for_flock`] on `fd` with a scratch queue of its own.
+    fn wait(
+        fd: &OwnedFd,
+        inherited: Option<&AuthHash>,
+        queue: &Path,
+    ) -> Result<Option<queue::Ticket>, DevError> {
+        wait_for_flock(fd.as_raw_fd(), inherited, queue, &waiter_record)
+    }
+
+    // A waiter joins the queue before it announces itself, and a cancel
+    // committed while it waits ends the wait as interrupted, without the lock.
+    #[test]
+    fn a_waiter_is_queued_and_a_cancel_ends_its_wait() {
+        let path = tmp_lock("cancelled_wait");
+        let dir = crate::test_scratch::scratch("lockfile", "cancelled-wait-queue");
+        let _holder = foreign_holder(&path, None);
+        let me = waiter(&path);
+        let queue_dir = dir.clone();
+        let waiting = std::thread::spawn(move || wait(&me, None, &queue_dir).map(|_| ()));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let entry = loop {
+            if let Some(entry) = queue::list(&dir).unwrap().into_iter().next() {
+                break entry;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the waiter never queued"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(entry.record.unwrap().project, "test");
+        assert!(matches!(
+            queue::cancel(&dir, &entry.token).unwrap(),
+            queue::Cancel::Committed(_)
+        ));
+        assert!(matches!(
+            waiting.join().unwrap(),
+            Err(DevError::Interrupted)
+        ));
+        assert!(
+            queue::list(&dir).unwrap().is_empty(),
+            "the waiter left the queue"
+        );
+    }
+
     // The deadlock this exists for: a brokkr whose inherited nonce is the
     // live holder's would wait on its own ancestor forever. It refuses at
     // once instead, naming the holder.
@@ -862,7 +938,9 @@ mod tests {
         let _holder = foreign_holder(&path, Some(&auth));
         let me = waiter(&path);
         let started = std::time::Instant::now();
-        let err = wait_for_flock(me.as_raw_fd(), Some(&auth))
+        let dir = crate::test_scratch::scratch("lockfile", "nested-queue");
+        let err = wait(&me, Some(&auth), &dir)
+            .map(|_| ())
             .unwrap_err()
             .to_string();
         assert!(
@@ -889,7 +967,9 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(250));
             drop(holder);
         });
-        wait_for_flock(me.as_raw_fd(), Some(&my_auth)).unwrap();
+        let dir = crate::test_scratch::scratch("lockfile", "unrelated-queue");
+        let ticket = wait(&me, Some(&my_auth), &dir).unwrap();
+        assert!(ticket.is_some(), "a waiter that waited holds a ticket");
         release.join().unwrap();
     }
 
@@ -905,7 +985,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(150));
             drop(holder);
         });
-        wait_for_flock(me.as_raw_fd(), Some(&inherited)).unwrap();
+        let dir = crate::test_scratch::scratch("lockfile", "empty-auth-queue");
+        wait(&me, Some(&inherited), &dir).unwrap();
         release.join().unwrap();
         drop(me);
         let _holder = foreign_holder(&path, None);
@@ -916,7 +997,7 @@ mod tests {
             drop(_holder);
             path_t
         });
-        wait_for_flock(me.as_raw_fd(), None).unwrap();
+        wait(&me, None, &dir).unwrap();
         release.join().unwrap();
     }
 
@@ -1024,7 +1105,7 @@ mod tests {
         let roots =
             ROOTS.get_or_init(|| crate::project::detect_roots().expect("test cwd resolves"));
         LockContext {
-            project: "test",
+            project: Some("test"),
             command: crate::cli::CommandId::Lock,
             project_root: &roots.0,
             build_root: &roots.1,

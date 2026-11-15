@@ -222,6 +222,12 @@ fn clone_lock_refusal(refusal: &crate::error::AcquireRefusal) -> crate::error::A
         AcquireRefusal::ServiceThread { source } => AcquireRefusal::ServiceThread {
             source: clone_io(source),
         },
+        AcquireRefusal::QueueJoin { source } => AcquireRefusal::QueueJoin {
+            source: clone_io(source),
+        },
+        AcquireRefusal::QueueClaim { source } => AcquireRefusal::QueueClaim {
+            source: clone_io(source),
+        },
     }
 }
 

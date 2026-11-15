@@ -107,6 +107,16 @@ pub enum AcquireRefusal {
     ServiceThread {
         source: io::Error,
     },
+    /// A waiter could not publish its queue record, so `brokkr kill` could
+    /// neither see nor cancel it: it refuses to wait unrecorded.
+    QueueJoin {
+        source: io::Error,
+    },
+    /// A waiter that won the flock could not establish whether its queue
+    /// record was cancelled (an error other than "no such file").
+    QueueClaim {
+        source: io::Error,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -201,6 +211,16 @@ impl fmt::Display for AcquireRefusal {
             Self::ServiceThread { source } => {
                 write!(f, "cannot start the lock service thread: {source}")
             }
+            Self::QueueJoin { source } => write!(
+                f,
+                "cannot record this command in the brokkr lock queue ({source}); it does not wait \
+                 unrecorded, since `brokkr kill` could neither see nor cancel it"
+            ),
+            Self::QueueClaim { source } => write!(
+                f,
+                "cannot claim this command's place in the brokkr lock queue ({source}); it does not \
+                 proceed without knowing whether `brokkr kill` cancelled it"
+            ),
         }
     }
 }
@@ -214,7 +234,9 @@ impl std::error::Error for AcquireRefusal {
             | Self::CompileLeaseFlock { source, .. }
             | Self::MetadataPublish { source, .. }
             | Self::SocketBind { source, .. }
-            | Self::ServiceThread { source } => Some(source),
+            | Self::ServiceThread { source }
+            | Self::QueueJoin { source }
+            | Self::QueueClaim { source } => Some(source),
             Self::NestedDescendant { .. }
             | Self::Busy { .. }
             | Self::InsideCompilation { .. }

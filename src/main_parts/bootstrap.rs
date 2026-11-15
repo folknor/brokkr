@@ -537,6 +537,7 @@ pub(super) fn run_serve(req: &ServeRequest<'_>) -> Result<(), DevError> {
     };
     crate::serve::start(&crate::serve::StartRequest {
         project: &project,
+        configured: req.detection.is_some(),
         root,
         cwd,
         name: req.name,

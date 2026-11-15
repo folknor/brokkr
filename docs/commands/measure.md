@@ -677,7 +677,10 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`, `--comp
   ratatoskr sync bench uses the script's `ceiling:`. Paths with no deadline
   run until the child
   exits or `brokkr kill`.
-- **`brokkr kill` asks the holder over its control socket.** Every fresh
+- **`brokkr kill` asks the holder over its control socket**, when the holder
+  is in the kill's scope (the caller's project unless `--project NAME` or
+  `--all` says otherwise; queued commands in scope are cancelled first - see
+  `brokkr man hygiene`). Every fresh
   hold binds `~/.brokkr/lock/<acquisition id>.sock` (`src/lock_service.rs`),
   the id recorded in the lock file. A stop request naming the live
   acquisition is accepted by the holder itself: it sets a sticky stop flag
@@ -722,13 +725,14 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`, `--comp
   data is flushed under a fresh UUID + the `dirty` alias, and the run returns
   `Interrupted`; the runner discards the attempt's own scratch output and
   brokkr exits 130 (`brokkr man clean after-an-interrupt`).
-- **`brokkr kill --hard`** runs no handler: it SIGKILLs the recorded child,
+- **`brokkr kill --hard`** runs no handler: it SIGKILLs an in-scope holder's recorded child,
   mock servers and every identity-checked descendant of brokkr, then brokkr.
   Nothing is flushed; follow up with `brokkr clean`. It signals by PID, so it
   refuses unless the holder shares the caller's PID and time namespaces (the
   same check as the fallback above); against a sandboxed holder, use the
   graceful `kill` or stop the session that owns it. Delivery failures (EPERM)
-  are reported, never counted as sent. Known gaps, unchanged: a process
+  are reported, never counted as sent, and fail the kill once every other
+  target has had its signal. Known gaps, unchanged: a process
   group is signalled with `kill(-pid)` after a starttime re-check, and
   starttime is a clock-tick token, not a unique generation number. A brokkr SIGKILLed by
   anything else (the OOM killer) gets no walk at all; only the test runners'

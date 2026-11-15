@@ -26,6 +26,12 @@ pub(crate) fn socket_dir() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("lock"))
 }
 
+/// The lock queue under `home`: one record per brokkr waiting for the global
+/// lock, which `brokkr kill` cancels and `brokkr lock` lists.
+pub(crate) fn queue_dir_at(home: Option<&Path>) -> Option<PathBuf> {
+    paths::brokkr_state_dir_at(home).map(|dir| dir.join("queue"))
+}
+
 /// Liveness files used to identify orphaned test processes.
 pub(crate) fn test_runs_dir() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("test-runs"))

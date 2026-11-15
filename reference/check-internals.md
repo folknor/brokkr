@@ -758,6 +758,51 @@ the stale-record refusal described above. The admitted path is covered end to en
 by `brokkr check` compiling anything at all while brokkr holds its own lock; if
 it were broken, no build on the machine would work.
 
+## The lock queue
+
+A waiting acquisition joins the lock queue (`src/lock/queue.rs`) on its first
+failed flock attempt, before it prints the wait line, so every waiter that has
+announced itself is recorded: its pid with starttime and boot, its namespaces,
+its project key or its having no `brokkr.toml`, its state root and its command
+line, published as `~/.brokkr/queue/<token>.queued` under an exclusive flock
+that is its liveness proof, as for the test-run tokens. A join that cannot
+complete refuses the acquisition: a waiter never waits unrecorded, since a
+kill could neither see nor cancel it.
+
+A cancel sends no signal. `brokkr kill` renames `<token>.queued` to
+`<token>.cancel`; the waiter looks for its `.queued` name every poll round and
+gives up (exit 130) when it is gone; and the waiter that wins the flock claims
+its place by unlinking `.queued`. A rename and an unlink of one name are atomic
+against each other, so exactly one side wins, from any PID namespace that shares
+the filesystem, and a waiter that is stopped when its cancel commits can never
+run. Only "no such file" is a verdict on either side; any other error refuses
+the acquisition, or is reported by the kill.
+
+The claim comes after the draining holder record is published and the control
+socket is up, and before the compile-lease drain or anything else the hold
+does. A kill that loses the race therefore reads a holder it can address and
+stop; a cancel that wins makes the claim fail, and the acquisition ends with
+its published record invalidated, its socket gone and the flock released, all
+before any work. The pre-live owner invalidates whatever record it wrote, so
+an acquisition refused at any later step (a drain timeout, a cancel) leaves no
+record naming itself for a reader to take for the next acquirer's. The fixed
+acquired line is printed after the claim, so a waiter never says it holds a
+lock it then gives up. The drain polls the shutdown flag, so a stop accepted
+over the socket after the claim ends the acquisition there too.
+
+A kill covers every waiter that had printed its wait line before the kill read
+the queue, plus the holder it reads afterwards. A command still starting, or
+one between its first failed attempt and its join, is concurrent with the kill
+and may survive it. The holder is stopped by the holder policy whatever it is,
+an acquisition whose cancel just committed included: a cancel guarantees the
+waiter does no work, not that it has released the lock.
+
+Scope is recorded, not inferred: the lock record, the control-socket status
+and the queue record carry `configured` beside `project`, since every string,
+the empty one included, is a valid project key, and the unconfigured commands
+used to record the brokkr project's own key. A serve's registry intent carries
+the same flag. A record without it, from an older brokkr, reads as configured.
+
 ## Platform tunables index
 
 The constants stay with the subsystem whose behavior they shape. This index

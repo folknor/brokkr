@@ -1815,38 +1815,63 @@ Enrollment invalidates cargo's compile fingerprint once per target dir."
         #[arg(long)]
         remove: bool,
     },
-    /// Gracefully stop the active command (SIGTERM, then a clean unwind)
+    /// Stop this project's brokkr commands: the queued ones and the lock holder
     #[command(
         display_order = 6,
         long_about = "\
-Ask the brokkr process holding the lock to wrap up cleanly.
+Stop this project's brokkr commands: cancel the ones queued for the lock,
+then ask the lock holder to wrap up cleanly when it is this project's.
 
-Default: sends SIGTERM to the brokkr process. Brokkr catches it,
-forwards SIGTERM to the run child (cargo for plain run, the
-program with --commit or --with), and waits up to 1.5s before
-SIGKILLing that child. Run descendants receive no direct signal
-from brokkr. Bench children receive SIGTERM as a process group;
-after the leader exits or 1.5s, the group receives SIGKILL.
-This gives a directly run program a bounded graceful stop;
-completion of shutdown output is not guaranteed.
+The scope is the project key in brokkr.toml, so another checkout or a
+--commit worktree of the same project is the same scope. Without a
+brokkr.toml the scope is this state root's unconfigured commands; with a
+brokkr.toml that does not load, bare kill refuses. --project NAME takes
+another project's commands, --all every project's. A holder outside the
+scope is left alone, and kill names it and the form that would stop it.
+
+A queued command is cancelled through its queue record, without a
+signal: it gives up its wait, never runs, and exits 130. It covers every
+command that had printed its wait line before kill started.
+
+Default for the holder: it is asked over its control socket and sends
+itself SIGTERM. Brokkr catches it, forwards SIGTERM to the run child
+(cargo for plain run, the program with --commit or --with), and waits
+up to 1.5s before SIGKILLing that child. Run descendants receive no
+direct signal from brokkr. Bench children receive SIGTERM as a process
+group; after the leader exits or 1.5s, the group receives SIGKILL.
+This gives a directly run program a bounded graceful stop; completion
+of shutdown output is not guaranteed.
 
 Brokkr flushes partial sidecar data (reachable via
 `brokkr sidecar dirty`), discards the stopped
 attempt's own scratch output, and releases the lock. No project
 clean follows; diagnostics and kept run directories stay.
 
---hard: sends SIGKILL to brokkr and its descendants without any
-cleanup. Use when the default path is
-wedged; follow up with `brokkr clean` manually.
+--hard: sends SIGKILL to an in-scope holder and its descendants
+without any cleanup. Use when the default path is wedged; follow up
+with `brokkr clean` manually. Queued commands are cancelled the same
+way with or without it.
 
 A `brokkr serve` server is not the lock holder once its start has
-returned, so kill does not reach it; `brokkr serve --stop` stops it
-(SIGTERM to its process group, its grace, then SIGKILL)."
+returned, so kill does not stop it; it lists the scope's live serves
+as left running, each with the `brokkr serve --stop` that stops it
+(SIGTERM to its process group, its grace, then SIGKILL). A serve
+still starting holds the lock and is stopped like any holder.
+
+Exits 0 when everything in scope was stopped or cancelled, including
+when nothing was; 1 when a stop failed, or a holder or queued command
+could not be placed in or out of the scope."
     )]
     Kill {
-        /// SIGKILL immediately (brokkr + child) without graceful cleanup.
+        /// SIGKILL an in-scope holder immediately (brokkr + child) without graceful cleanup.
         #[arg(long)]
         hard: bool,
+        /// Stop the commands of the project with this brokkr.toml key instead.
+        #[arg(long, value_name = "NAME", conflicts_with = "all")]
+        project: Option<String>,
+        /// Stop every project's commands.
+        #[arg(long)]
+        all: bool,
     },
     /// Browse command history
     #[command(

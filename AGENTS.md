@@ -21,7 +21,7 @@ The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bar
 - `docs/brokkr.toml.elivagar.md`, `docs/brokkr.toml.datasets.md`, `docs/brokkr.toml.piners.md` - project config blocks.
 - `docs/commands/check.md` - using `brokkr check`.
 - `docs/commands/check.test-lanes.md` - check's test phase and its lanes.
-- `docs/commands/check.hygiene.md` - time ceilings, `brokkr lock`, strays and orphans, the rustc guard.
+- `docs/commands/check.hygiene.md` - time ceilings, `brokkr lock` and the lock queue, `brokkr kill`'s scope, strays and orphans, the rustc guard.
 - `reference/check-internals.md` - how the check/test pipeline is built. Read before changing it.
 - `docs/commands/test.md`, `clippy.md`, `deps.md`, `crit.md`, `run.md` (also `build`, `install`), `serve.md`, `clean.md`, `results.md` - those commands.
 - `docs/commands/bench.md` - `brokkr bench NAME`: running a script bench, its builtins, what a run stores.
@@ -54,7 +54,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `env` - host facts, tool versions, datasets, and brokkr's own store sizes.
 - `wc [threshold]` - tracked `.rs` files over `threshold` lines (default 800).
 - `history` - global command history.
-- `lock`, `strays [--kill]`, `guard [--install|--remove]`, `kill [--hard]` - lock status and process hygiene.
+- `lock`, `strays [--kill]`, `guard [--install|--remove]`, `kill [--hard] [--project NAME | --all]` - lock status and queue, process hygiene, and stopping this project's commands (another project's only when named).
 - `sidecar <uuid>` - sidecar profiler data.
 - `fmt` - locked `cargo fmt` wrapper.
 - Project-specific: `corpus-results`, `mogwai`, `hotpath`, `pmtiles-stats`, `pmtiles-corpus`, `ocean-build` - see the project docs.

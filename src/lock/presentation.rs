@@ -13,7 +13,8 @@ pub fn same_agent_hint(info: &LockInfo) -> Option<String> {
     Some(format!(
         "the holder reports the same codex thread as this shell ({mine}): it is very likely one of \
          your own earlier commands, still running in another exec session. Wait for it, stop that \
-         session, or run `brokkr kill`"
+         session, or run `brokkr kill` in its project (which cancels that project's queued \
+         commands too)"
     ))
 }
 

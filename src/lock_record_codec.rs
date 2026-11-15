@@ -17,6 +17,7 @@ const CHILD_STARTTIME: &str = "child_starttime";
 const CHILD_PIDS: &str = "child_pids";
 const MOCK_PIDS: &str = "mock_pids";
 const PROGRESS: &str = "progress";
+const CONFIGURED: &str = "configured";
 const PROJECT: &str = "project";
 const COMMAND: &str = "command";
 const ROOT: &str = "root";
@@ -40,6 +41,9 @@ pub struct Record {
     pub children: Vec<(u32, String)>,
     pub mocks: Vec<(u32, String)>,
     pub progress: Option<(u32, u32)>,
+    /// Whether `project` is a `brokkr.toml` key; empty project and `false`
+    /// is a hold with no `brokkr.toml`. Absent reads as configured.
+    pub configured: bool,
     pub project: String,
     pub command: String,
     pub root: String,
@@ -84,7 +88,8 @@ impl Record {
             None => contents.push_str(&format!("{PROGRESS}=\n")),
         }
         contents.push_str(&format!(
-            "{PROJECT}={}\n{COMMAND}={}\n{ROOT}={}\n{ARGS}={}\n",
+            "{CONFIGURED}={}\n{PROJECT}={}\n{COMMAND}={}\n{ROOT}={}\n{ARGS}={}\n",
+            u8::from(self.configured),
             escape_value(&self.project),
             escape_value(&self.command),
             escape_value(&self.root),
@@ -143,6 +148,7 @@ impl Record {
             children,
             mocks,
             progress,
+            configured: raw(CONFIGURED) != "0",
             project,
             command: decoded(COMMAND),
             root: decoded(ROOT),

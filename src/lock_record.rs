@@ -10,14 +10,17 @@ use std::collections::HashMap;
 /// everything a holder rewrites, so a torn read cannot blend two holders'.
 pub const AUTH: &str = super::lock_probe::protocol::AUTH_KEY;
 
-/// Split a record into `key -> trimmed raw value`, first occurrence winning.
-/// `None` when the bytes are not UTF-8.
+/// Split a record into `key -> raw value`, first occurrence winning: a value
+/// is exactly what follows the first `=`, untrimmed. Every value a writer
+/// emits is unpadded, and a project key or a root may itself begin or end with
+/// whitespace, which `brokkr kill`'s scope compares as written. `None` when
+/// the bytes are not UTF-8.
 pub fn fields(bytes: &[u8]) -> Option<HashMap<&str, &str>> {
     let text = std::str::from_utf8(bytes).ok()?;
     let mut out: HashMap<&str, &str> = HashMap::new();
     for line in text.lines() {
         if let Some((key, value)) = line.split_once('=') {
-            out.entry(key).or_insert(value.trim());
+            out.entry(key).or_insert(value);
         }
     }
     Some(out)

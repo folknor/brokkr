@@ -55,6 +55,11 @@ pub(crate) struct Intent {
     pub(crate) token: RunToken,
     /// The brokkr project name, or `brokkr` outside a configured project.
     pub(crate) project: String,
+    /// Whether a `brokkr.toml` was found, so `project` is its key and not the
+    /// unconfigured stand-in, which is also the brokkr project's own key.
+    /// `brokkr kill` lists a serve under the caller's scope by it. A record
+    /// without the key reads as configured.
+    pub(crate) configured: bool,
     /// The state root (the directory holding `brokkr.toml`): with `name`, the
     /// identity a start replaces.
     pub(crate) root: PathBuf,
@@ -99,6 +104,7 @@ impl Intent {
         };
         line("token", self.token.as_str().to_owned());
         line("project", escape_value(&self.project));
+        line("configured", u8::from(self.configured).to_string());
         line("root", path(&self.root));
         line("name", escape_value(&self.name));
         line("target", escape_value(&self.target));
@@ -138,6 +144,7 @@ impl Intent {
         Some(Self {
             token: RunToken::parse(&take("token")?)?,
             project: take("project")?,
+            configured: take("configured").as_deref() != Some("0"),
             root: PathBuf::from(take("root")?),
             name: take("name").filter(|n| !n.is_empty())?,
             target: take("target")?,
@@ -491,6 +498,7 @@ mod tests {
         Intent {
             token: RunToken::mint().unwrap(),
             project: "demo".into(),
+            configured: false,
             root: "/r".into(),
             name: name.into(),
             target: "srv".into(),

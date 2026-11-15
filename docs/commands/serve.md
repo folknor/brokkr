@@ -50,7 +50,7 @@ bound - for up to `--ready-timeout` seconds (60 by default). A server that
 exits first, or a wait that runs out, fails the start, prints the end of the
 log, and stops what was started. A server that buffers its output may print
 its ready line late or never; that is the server's to fix. A stop (`brokkr
-kill`, Ctrl-C) while the start still holds the lock takes the starting server
+kill` in the serve's project, Ctrl-C) while the start still holds the lock takes the starting server
 down; `brokkr kill --hard` then does too, since the supervisor is still a
 descendant of the command.
 
@@ -104,8 +104,10 @@ group SIGKILL - at once if the server exited sooner - reaps it, SIGKILLs any
 process still carrying the serve's token, and exits. A supervisor that has not
 finished within the grace plus a margin is SIGKILLed, which takes the server
 with it. A repeated SIGTERM to a supervisor is ignored, so two stops never turn
-a server's graceful shutdown into a kill. `brokkr kill` does not reach a serve:
-a serve is not the lock holder once its start has returned.
+a server's graceful shutdown into a kill. `brokkr kill` does not stop a serve:
+a serve is not the lock holder once its start has returned, and kill cancels
+commands. It lists its scope's live serves as left running, each with the
+`brokkr serve --stop TOKEN` that stops it (`brokkr man hygiene`).
 
 ## What is guaranteed
 

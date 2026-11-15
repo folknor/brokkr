@@ -6,6 +6,7 @@ use crate::output;
 
 pub(crate) fn cmd_lock() -> Result<(), DevError> {
     let holder = holder_status();
+    queue_status();
     // The serves hold no lock but are the other thing a measurement waits
     // on: they make it refuse (`crate::serve`).
     for line in crate::serve::lock_report() {
@@ -14,17 +15,76 @@ pub(crate) fn cmd_lock() -> Result<(), DevError> {
     holder
 }
 
+/// What a holder or a queued command was asked to do, as `brokkr lock` and
+/// `brokkr kill` name it: the project key and the invocation, or the
+/// invocation marked as having no `brokkr.toml`.
+fn invocation_label(configured: bool, project: &str, command: &str, args: &str) -> String {
+    let what = if args.is_empty() { command } else { args };
+    if configured {
+        format!("{project} {what}")
+    } else {
+        format!("(no brokkr.toml) {what}")
+    }
+}
+
+/// One queued command, as `brokkr lock` and `brokkr kill` name it. Its PID
+/// only where it means the same thing here as to the waiter.
+fn waiter_label(record: &lockfile::queue::WaiterRecord) -> String {
+    let mut label = invocation_label(
+        record.configured,
+        &record.project,
+        &record.command,
+        &record.args,
+    );
+    let waited = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        .saturating_sub(record.joined);
+    let pid = if crate::process::shares_namespace_tokens(&record.pid_ns, &record.time_ns) {
+        format!("PID {}, ", record.pid)
+    } else {
+        String::new()
+    };
+    label.push_str(&format!(
+        " ({pid}waiting {}, root {})",
+        output::format_duration(std::time::Duration::from_secs(waited)),
+        record.root
+    ));
+    label
+}
+
+/// `brokkr lock`'s queue lines, oldest first. Reads only: a dead waiter's
+/// leftover is not listed, and is swept by the next waiter or kill.
+fn queue_status() {
+    let Some(dir) = lockfile::queue_dir() else {
+        return;
+    };
+    match lockfile::queue::list(&dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let state = match entry.standing {
+                    lockfile::queue::Standing::Waiting => "queued",
+                    lockfile::queue::Standing::Cancelling => "queued, cancelled",
+                };
+                match &entry.record {
+                    Ok(record) => output::lock_msg(&format!("{state}: {}", waiter_label(record))),
+                    Err(why) => output::lock_msg(&format!(
+                        "{state}: a waiter whose record cannot be read ({why})"
+                    )),
+                }
+            }
+        }
+        Err(e) => output::lock_msg(&format!("the lock queue cannot be read: {e}")),
+    }
+}
+
 fn holder_status() -> Result<(), DevError> {
     let Some(info) = lockfile::status()? else {
         output::lock_msg("no active lock");
         return Ok(());
     };
 
-    let invocation = if info.args.is_empty() {
-        format!("{} {}", info.project, info.command)
-    } else {
-        format!("{} {}", info.project, info.args)
-    };
+    let invocation = invocation_label(info.configured, &info.project, &info.command, &info.args);
 
     // First ask the holder itself, over its control socket. It answers about
     // its own process, so no PID crosses a namespace boundary - this works
@@ -194,11 +254,12 @@ fn fresher_status(
 /// about itself; process PIDs are printed only when they mean the same thing
 /// here as they did to the holder.
 fn print_holder_status(info: &lockfile::LockInfo, s: &crate::lock_service::HolderStatus) {
-    let invocation = if s.identity.args.is_empty() {
-        format!("{} {}", s.identity.project, s.identity.command)
-    } else {
-        format!("{} {}", s.identity.project, s.identity.args)
-    };
+    let invocation = invocation_label(
+        s.identity.configured,
+        &s.identity.project,
+        &s.identity.command,
+        &s.identity.args,
+    );
     let mut facts = Vec::new();
     facts.push(format!("holding {}", output::format_duration(s.held)));
     // The holder's own figures: brokkr itself, which mostly waits on its
@@ -247,8 +308,8 @@ fn print_holder_status(info: &lockfile::LockInfo, s: &crate::lock_service::Holde
     if crate::process::foreign_pid_namespace(&info.pid_ns).is_some() {
         output::lock_msg(
             "the holder runs in another PID namespace than this command (one of them is \
-             sandboxed), so its PIDs are not shown; `brokkr kill` asks it \
-             to stop over its control socket, `brokkr kill --hard` cannot reach it from here",
+             sandboxed), so its PIDs are not shown; `brokkr kill` in its scope asks \
+             it to stop over its control socket, `brokkr kill --hard` cannot reach it from here",
         );
     }
     if let Some(hint) = lockfile::same_agent_hint(info) {
@@ -256,11 +317,274 @@ fn print_holder_status(info: &lockfile::LockInfo, s: &crate::lock_service::Holde
     }
 }
 
-/// Ask the brokkr process holding the lock to shut down. Default sends
-/// SIGTERM (cooperative - brokkr handles cleanup itself). `--hard`
-/// SIGSTOPs brokkr, then SIGKILLs the recorded child PID, every mock, every
-/// other process beneath brokkr (each starttime-checked, see
-/// `shutdown::kill_descendants`), and brokkr.
+/// Whose brokkr commands a `brokkr kill` stops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KillScope {
+    /// The commands of one `brokkr.toml` project key, whatever checkout or
+    /// worktree they run in.
+    Project(String),
+    /// The commands run with no `brokkr.toml` under one state root: such a
+    /// command has no key, and its root is the only identity it records.
+    Unconfigured(String),
+    /// Every project's.
+    All,
+}
+
+impl KillScope {
+    /// The scope a kill runs in: `--all`, `--project NAME`, or the caller's
+    /// own. A `brokkr.toml` that is present but did not load names no key, so
+    /// the bare form refuses there rather than guess one.
+    pub(crate) fn resolve(
+        named: Option<&str>,
+        all: bool,
+        detection: Option<&crate::project::Detection>,
+    ) -> Result<Self, DevError> {
+        if all {
+            return Ok(Self::All);
+        }
+        if let Some(name) = named {
+            return Ok(Self::Project(name.to_owned()));
+        }
+        if let Some(d) = detection {
+            return Ok(Self::Project(d.project.name().to_owned()));
+        }
+        let cwd = std::env::current_dir()?;
+        if let Some(dir) = crate::project::find_config_dir(&cwd) {
+            return Err(DevError::Refused(format!(
+                "{}/brokkr.toml does not load, so a bare `brokkr kill` cannot know this project's \
+                 key; name it with `brokkr kill --project NAME`, or stop every project's commands \
+                 with `brokkr kill --all`",
+                dir.display()
+            )));
+        }
+        let (root, _) = crate::project::detect_roots()?;
+        Ok(Self::Unconfigured(root.as_path().display().to_string()))
+    }
+
+    /// Whether a holder or waiter recording this identity is in the scope.
+    fn covers(&self, configured: bool, project: &str, root: &str) -> bool {
+        match self {
+            Self::Project(key) => configured && project == key,
+            Self::Unconfigured(here) => !configured && root == here,
+            Self::All => true,
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Self::Project(key) => format!("project {key}"),
+            Self::Unconfigured(root) => format!("the commands with no brokkr.toml under {root}"),
+            Self::All => "any project".into(),
+        }
+    }
+}
+
+/// The explicit form that reaches a command recorded with this identity.
+fn reaching_form(configured: bool, project: &str) -> String {
+    if configured {
+        format!("`brokkr kill --project {project}` or `brokkr kill --all`")
+    } else {
+        "`brokkr kill --all`, or a bare `brokkr kill` from its root".into()
+    }
+}
+
+/// How long a kill waits, once, for its cancelled waiters to let go.
+const CANCEL_CONFIRM: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How often, and how far apart, a kill re-reads a holder record it could not
+/// parse: a holder rewrites or releases it in a moment.
+const UNREADABLE_RETRIES: usize = 3;
+const UNREADABLE_RETRY_GAP: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// `brokkr kill`: cancel the scope's queued commands, then stop the lock
+/// holder when it is in the scope, and report what was left alone.
+///
+/// Waiters go first, so none of the scope's takes the lock the holder is
+/// about to release. A waiter that took the lock between the queue read and
+/// its cancel is the holder by the time the holder is read, and is stopped as
+/// one. The holder is read fresh after the cancels and stopped by the holder
+/// policy whatever it is, a just-cancelled acquisition included: the cancel
+/// and the release of the lock are separate outcomes. Serves are never
+/// stopped (`crate::serve::kill_report`).
+///
+/// Anything in the scope that fails, and anything live that cannot be placed
+/// in or out of it (an unreadable record), fails the command after every
+/// other action was taken.
+pub(crate) fn cmd_kill(scope: &KillScope, hard: bool) -> Result<(), DevError> {
+    let mut report = KillReport::default();
+    cancel_queued(scope, &mut report)?;
+    stop_scoped_holder(scope, hard, &mut report)?;
+    let KillReport {
+        acted,
+        failures,
+        elsewhere,
+    } = report;
+
+    if !elsewhere.is_empty() {
+        output::lock_msg(&format!(
+            "left {} outside the scope waiting:",
+            output::count(elsewhere.len(), "queued command")
+        ));
+        for label in &elsewhere {
+            output::lock_msg(&format!("  {label}"));
+        }
+    }
+    for line in crate::serve::kill_report(&|configured, project, root| {
+        scope.covers(configured, project, &root.display().to_string())
+    }) {
+        output::lock_msg(&format!("serve: {line}"));
+    }
+    if !acted {
+        output::lock_msg(&format!(
+            "nothing of {} to stop: no queued command and not the lock holder",
+            scope.describe()
+        ));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(DevError::Lock(LockError::from(failures.join("; "))))
+    }
+}
+
+/// What a kill did so far, for its closing lines and its exit.
+#[derive(Default)]
+struct KillReport {
+    /// Something in the scope was found (stopped, cancelled or failed).
+    acted: bool,
+    failures: Vec<String>,
+    /// Queued commands outside the scope, left waiting.
+    elsewhere: Vec<String>,
+}
+
+/// Cancel every in-scope queued command, then confirm them together under
+/// one deadline.
+fn cancel_queued(scope: &KillScope, report: &mut KillReport) -> Result<(), DevError> {
+    let dir = lockfile::queue_dir().ok_or_else(|| {
+        DevError::Lock(LockError::from(
+            "$HOME is not set or is empty - cannot locate the lock queue",
+        ))
+    })?;
+    let entries = lockfile::queue::list(&dir).map_err(|e| {
+        DevError::Lock(LockError::from(format!(
+            "cannot read the lock queue {}: {e}",
+            dir.display()
+        )))
+    })?;
+    let mut committed = Vec::new();
+    for entry in &entries {
+        let (label, in_scope) = match &entry.record {
+            Ok(record) => (
+                waiter_label(record),
+                scope.covers(record.configured, &record.project, &record.root),
+            ),
+            Err(why) => (
+                format!("a queued command whose record cannot be read ({why})"),
+                *scope == KillScope::All,
+            ),
+        };
+        if !in_scope {
+            match &entry.record {
+                Ok(_) if entry.standing == lockfile::queue::Standing::Waiting => {
+                    report.elsewhere.push(label);
+                }
+                Ok(_) => {}
+                Err(_) => report.failures.push(format!(
+                    "{label} could not be placed in or out of {}",
+                    scope.describe()
+                )),
+            }
+            continue;
+        }
+        report.acted = true;
+        if entry.standing == lockfile::queue::Standing::Cancelling {
+            output::lock_msg(&format!("already cancelled, still letting go: {label}"));
+            continue;
+        }
+        match lockfile::queue::cancel(&dir, &entry.token) {
+            Ok(lockfile::queue::Cancel::Committed(handle)) => committed.push((label, handle)),
+            Ok(lockfile::queue::Cancel::AlreadyCancelled) => {
+                output::lock_msg(&format!("already cancelled by another kill: {label}"));
+            }
+            Ok(lockfile::queue::Cancel::Left) => output::lock_msg(&format!(
+                "left the queue before the cancel landed (it took the lock or exited): {label}"
+            )),
+            Err(e) => report
+                .failures
+                .push(format!("could not cancel {label}: {e}")),
+        }
+    }
+    let handles: Vec<_> = committed.iter().map(|(_, h)| h).collect();
+    let released = lockfile::queue::confirm(&handles, CANCEL_CONFIRM);
+    // A committed cancel is the outcome; the confirmation only says whether
+    // the waiter has let go yet.
+    for ((label, _), done) in committed.iter().zip(released) {
+        match done {
+            Ok(true) => output::lock_msg(&format!("cancelled, will not run: {label}")),
+            Ok(false) => output::lock_msg(&format!(
+                "cancelled, will not run, but it has not let go yet (it may be stopped): {label}"
+            )),
+            Err(e) => output::lock_msg(&format!(
+                "cancelled, will not run; whether it has let go could not be checked ({e}): \
+                 {label}"
+            )),
+        }
+    }
+    Ok(())
+}
+
+/// Stop the lock holder when it is in the scope; name it when it is not.
+fn stop_scoped_holder(
+    scope: &KillScope,
+    hard: bool,
+    report: &mut KillReport,
+) -> Result<(), DevError> {
+    match read_holder()? {
+        None => {}
+        Some(info) if info.pid == 0 => {
+            report.acted = true;
+            report.failures.push(format!(
+                "the lock is held, but its holder's record cannot be read, so it {}",
+                if *scope == KillScope::All {
+                    "cannot be addressed; nothing was sent to it"
+                } else {
+                    "cannot be placed in or out of the scope; it was left alone"
+                }
+            ));
+        }
+        Some(info) if scope.covers(info.configured, &info.project, &info.project_root) => {
+            report.acted = true;
+            if let Err(e) = stop_holder(&info, hard) {
+                report.failures.push(e.to_string());
+            }
+        }
+        Some(info) => output::lock_msg(&format!(
+            "left the lock holder alone: {} is not {}; {} stops it",
+            invocation_label(info.configured, &info.project, &info.command, &info.args),
+            scope.describe(),
+            reaching_form(info.configured, &info.project),
+        )),
+    }
+    Ok(())
+}
+
+/// The holder, re-read a few times while its record does not parse (it is
+/// rewritten or released in a moment), so a transition is not mistaken for
+/// an unreadable holder.
+fn read_holder() -> Result<Option<lockfile::LockInfo>, DevError> {
+    let mut info = lockfile::status()?;
+    for _ in 0..UNREADABLE_RETRIES {
+        if !info.as_ref().is_some_and(|i| i.pid == 0) {
+            break;
+        }
+        std::thread::sleep(UNREADABLE_RETRY_GAP);
+        info = lockfile::status()?;
+    }
+    Ok(info)
+}
+
+/// Stop an in-scope holder: the cooperative stop, or with `hard` the
+/// all-or-nothing SIGKILL.
 ///
 /// Every recorded PID was written in the HOLDER's PID namespace, which may
 /// not be ours (a sandboxed holder writes pid=2 - kthreadd here), and any
@@ -274,18 +598,9 @@ fn print_holder_status(info: &lockfile::LockInfo, s: &crate::lock_service::Holde
 /// evidence that its generation is gone is skipped rather than refused (see
 /// `provably_gone`); a merely unverifiable one still refuses. Delivery itself is not transactional - a
 /// target can exit naturally after preflight.
-pub(crate) fn cmd_kill(hard: bool) -> Result<(), DevError> {
-    let Some(info) = lockfile::status()? else {
-        output::lock_msg("no active lock");
-        return Ok(());
-    };
-    if info.pid == 0 {
-        output::lock_msg("lock held by unknown process; nothing to kill");
-        return Ok(());
-    }
-
+fn stop_holder(info: &lockfile::LockInfo, hard: bool) -> Result<(), DevError> {
     if !hard {
-        return kill_graceful(&info);
+        return kill_graceful(info);
     }
 
     // Hard kill signals by number, so every recorded PID must mean the same
@@ -297,7 +612,7 @@ pub(crate) fn cmd_kill(hard: bool) -> Result<(), DevError> {
              it",
         ));
     }
-    hard_kill(&info)
+    hard_kill(info)
 }
 
 /// The cooperative stop. The control socket first: the holder validates the
@@ -429,7 +744,11 @@ fn hard_kill(info: &lockfile::LockInfo) -> Result<(), DevError> {
 
     // Freeze brokkr first, so it cannot start anything new (the next sweep,
     // a respawned mock) while its tree is being taken down.
+    // A failed delivery is reported as it happens and fails the command once
+    // every other target has had its signal.
+    let mut failed = Vec::new();
     if let Err(e) = signal_target(&holder, libc::SIGSTOP) {
+        failed.push(format!("SIGSTOP brokkr PID {}: {e}", info.pid));
         output::lock_msg(&format!("SIGSTOP brokkr PID {}: failed ({e})", info.pid));
     }
 
@@ -438,12 +757,19 @@ fn hard_kill(info: &lockfile::LockInfo) -> Result<(), DevError> {
     // (and anyone peeking at `brokkr lock` sees stale state pointing at a
     // live child with no owner).
     for target in &targets {
+        let delivery = signal_target(target, libc::SIGKILL);
+        let kind = if target.pg_leader { "PG" } else { "PID" };
+        if let Err(e) = &delivery {
+            failed.push(format!(
+                "SIGKILL {} {kind} {}: {e}",
+                target.role, target.pid
+            ));
+        }
         output::lock_msg(&format!(
-            "SIGKILL {} {} {}: {}",
+            "SIGKILL {} {kind} {}: {}",
             target.role,
-            if target.pg_leader { "PG" } else { "PID" },
             target.pid,
-            describe_delivery(&signal_target(target, libc::SIGKILL)),
+            describe_delivery(&delivery),
         ));
     }
     // Then everything else beneath brokkr. The recorded child is only the
@@ -461,13 +787,24 @@ fn hard_kill(info: &lockfile::LockInfo) -> Result<(), DevError> {
             output::count(swept, "process")
         ));
     }
+    let delivery = signal_target(&holder, libc::SIGKILL);
+    if let Err(e) = &delivery {
+        failed.push(format!("SIGKILL brokkr PID {}: {e}", info.pid));
+    }
     output::lock_msg(&format!(
         "SIGKILL brokkr PID {}: {}",
         info.pid,
-        describe_delivery(&signal_target(&holder, libc::SIGKILL)),
+        describe_delivery(&delivery),
     ));
     output::lock_msg("follow up with `brokkr clean` to wipe scratch");
-    Ok(())
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(DevError::Lock(LockError::from(format!(
+            "the hard kill could not deliver every signal: {}",
+            failed.join("; ")
+        ))))
+    }
 }
 
 /// The all-or-nothing refusal: name the unverifiable target and state that
@@ -626,5 +963,31 @@ fn describe_delivery(result: &std::io::Result<bool>) -> String {
         Ok(true) => "sent".into(),
         Ok(false) => "not running".into(),
         Err(e) => format!("FAILED ({e})"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KillScope;
+
+    /// A project scope is the key alone, across roots; an unconfigured scope
+    /// is its root alone; neither takes the other's commands, even where an
+    /// unconfigured command and a configured one share a root or the key is
+    /// the empty string.
+    #[test]
+    fn a_scope_takes_its_own_commands_only() {
+        let project = KillScope::Project("nidhogg".into());
+        assert!(project.covers(true, "nidhogg", "/a"));
+        assert!(project.covers(true, "nidhogg", "/worktree"));
+        assert!(!project.covers(true, "pbfhogg", "/a"));
+        assert!(!project.covers(false, "nidhogg", "/a"));
+
+        let unconfigured = KillScope::Unconfigured("/a".into());
+        assert!(unconfigured.covers(false, "", "/a"));
+        assert!(!unconfigured.covers(false, "", "/b"));
+        assert!(!unconfigured.covers(true, "", "/a"));
+
+        assert!(!KillScope::Project(String::new()).covers(false, "", "/a"));
+        assert!(KillScope::All.covers(false, "", "/b"));
     }
 }
