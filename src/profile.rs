@@ -301,6 +301,9 @@ impl Default for LaneExec {
 }
 
 impl LaneExec {
+    /// `threads_from` names the `extends` parent that declared
+    /// `configured_threads` when it is not the profile being resolved, so a
+    /// refusal sends the reader to the block holding the key.
     fn resolve(
         label: &str,
         harness: Harness,
@@ -308,6 +311,7 @@ impl LaneExec {
         parallel_budget: Option<u32>,
         process_isolation: bool,
         configured_threads: Option<u32>,
+        threads_from: Option<&str>,
     ) -> Result<Self, DevError> {
         if doc_only
             && (parallel_budget.is_some() || process_isolation || harness == Harness::Nextest)
@@ -332,12 +336,30 @@ impl LaneExec {
                 "sweep '{label}' combines process isolation with a parallel-binaries budget"
             )));
         }
+        // `test_threads = 1` reads as a promise of serial execution, and on a
+        // parallel entry the budget alone decides concurrency: the profile's
+        // count is never consulted there. Keyed on the presence of `parallel`,
+        // not the resolved budget - an unset budget resolves from the host's
+        // topology and cgroup quota, and whether a config loads must not
+        // depend on the machine. Other counts on a parallel entry are inert
+        // too, but only `1` claims serialness, and only `1` is refused.
+        let inherited = threads_from
+            .map(|parent| format!(" (inherited from [test.profiles.{parent}])"))
+            .unwrap_or_default();
+        if parallel_budget.is_some() && configured_threads == Some(1) {
+            return Err(DevError::Config(format!(
+                "sweep '{label}' carries `parallel`, whose budget controls the lane's \
+                 concurrency, so the profile's `test_threads = 1`{inherited} is not \
+                 consulted there. Reference a non-parallel twin of '{label}' instead: a \
+                 [[check]] entry with the same build shape and no `parallel` key."
+            )));
+        }
 
         let threads = Threads::from_config(configured_threads);
         if process_isolation && threads.is_cargo_mediated() {
             return Err(DevError::Config(format!(
-                "sweep '{label}' combines `isolation = \"process\"` with `test_threads = {}`, \
-                 but isolated execution is serial by construction",
+                "sweep '{label}' combines `isolation = \"process\"` with `test_threads = \
+                 {}`{inherited}, but isolated execution is serial by construction",
                 configured_threads.unwrap_or_default()
             )));
         }
@@ -901,6 +923,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> SweepDecl {
         entry.parallel.map(ParallelBinaries::resolved_budget),
         false,
         None,
+        None,
     )
     .expect("parsed check entries have a valid execution mode");
 
@@ -975,8 +998,21 @@ struct ResolvedProfile {
     skip_from: Option<String>,
     include_ignored: bool,
     test_threads: Option<u32>,
+    /// Which profile in the chain declared `test_threads`, for the same
+    /// reason as `only_from`.
+    test_threads_from: Option<String>,
     isolation: Option<Isolation>,
     env: BTreeMap<String, String>,
+}
+
+impl ResolvedProfile {
+    /// The `extends` parent that declared `test_threads`, when it is not
+    /// `profile_name` itself.
+    fn test_threads_parent(&self, profile_name: &str) -> Option<&str> {
+        self.test_threads_from
+            .as_deref()
+            .filter(|from| *from != profile_name)
+    }
 }
 
 /// Resolve `name` into a list of `SweepDecl`s ready to execute.
@@ -1128,6 +1164,7 @@ fn resolve_profile_chain(
         }
         if let Some(v) = def.test_threads {
             out.test_threads = Some(v);
+            out.test_threads_from = Some((*def_name).to_owned());
         }
 
         if let Some(v) = def.isolation {
@@ -1229,7 +1266,8 @@ pub fn run_shaping(cfg: &TestConfig, name: &str) -> Result<RunShaping, DevError>
     if cfg.profiles.get(name).is_some_and(|d| d.lanes.is_some()) {
         return Ok(RunShaping::default());
     }
-    let mut shaping = shaping_from(&resolve_profile_chain(&cfg.profiles, name)?, name);
+    let merged = resolve_profile_chain(&cfg.profiles, name)?;
+    let mut shaping = shaping_from(&merged, name);
     let lane_exec = LaneExec::resolve(
         name,
         Harness::Libtest,
@@ -1237,6 +1275,7 @@ pub fn run_shaping(cfg: &TestConfig, name: &str) -> Result<RunShaping, DevError>
         None,
         shaping.process_isolated,
         shaping.configured_threads,
+        merged.test_threads_parent(name),
     )?;
     if shaping
         .filters
@@ -1360,8 +1399,16 @@ fn build_sweep_decl(
         parallel_budget,
         process_isolation,
         profile.test_threads,
+        profile.test_threads_parent(profile_name),
     )
-    .map_err(|error| DevError::Config(format!("[test.profiles.{profile_name}]: {error}")))?;
+    // Prefix the bare message: formatting the error itself would repeat the
+    // `config:` its Display already carries.
+    .map_err(|error| match error {
+        DevError::Config(message) => {
+            DevError::Config(format!("[test.profiles.{profile_name}]: {message}"))
+        }
+        other => other,
+    })?;
 
     Ok(sweep_decl_from_entry(entry, filters, env, lane_exec))
 }
@@ -2165,8 +2212,181 @@ test_exclude_packages = ["nautilus-pyo3", "nautilus-python"]
         assert!(s.packages.is_empty());
     }
 
+    /// A profile's `test_threads = 1` over a `parallel` entry is refused
+    /// wherever it reaches the entry - directly, through `extends`, or inside
+    /// a lane - and whatever the budget, even one: the key is never consulted
+    /// on that lane, so the serialness it claims is not its to deliver.
     #[test]
-    fn resolve_carries_parallel_test_threads() {
+    fn serial_test_threads_over_a_parallel_entry_is_refused() {
+        let (checks, cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "all"
+parallel = {}
+
+[[check]]
+name = "one"
+parallel = { budget = 1 }
+
+[[check]]
+name = "all-serial"
+
+[test.profiles.direct]
+sweeps = ["all-serial", "all"]
+test_threads = 1
+
+[test.profiles.budget-one]
+sweeps = ["one"]
+test_threads = 1
+
+[test.profiles.base]
+test_threads = 1
+
+[test.profiles.child]
+extends = "base"
+sweeps = ["all"]
+
+[test.profiles.gate]
+lanes = ["child"]
+"#,
+        );
+        let err = resolve(&cfg, &checks, "direct").unwrap_err().to_string();
+        assert!(err.contains("[test.profiles.direct]:"), "got: {err}");
+        assert!(err.contains("sweep 'all' carries `parallel`"), "got: {err}");
+        assert!(err.contains("non-parallel twin of 'all'"), "got: {err}");
+        assert!(!err.contains("inherited"), "got: {err}");
+        // One `config:` prefix: the profile wrap prefixes the bare message.
+        assert_eq!(err.matches("config:").count(), 1, "got: {err}");
+
+        let err = resolve(&cfg, &checks, "budget-one")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sweep 'one'"), "got: {err}");
+
+        // A lanes profile names the lane that resolved, not itself.
+        for name in ["child", "gate"] {
+            let err = resolve(&cfg, &checks, name).unwrap_err().to_string();
+            assert!(err.contains("[test.profiles.child]:"), "got: {err}");
+            assert!(
+                err.contains("(inherited from [test.profiles.base])"),
+                "got: {err}"
+            );
+        }
+    }
+
+    /// Provenance follows the winning value: a profile that sets the key
+    /// itself is not told it inherited it, and a grandparent's value names
+    /// the grandparent. The isolation refusal carries the same note.
+    #[test]
+    fn test_threads_refusals_name_the_declaring_profile() {
+        let (checks, cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "all"
+parallel = {}
+
+[[check]]
+name = "plain"
+
+[test.profiles.base]
+test_threads = 1
+
+[test.profiles.own]
+extends = "base"
+sweeps = ["all"]
+test_threads = 1
+
+[test.profiles.mid]
+extends = "base"
+
+[test.profiles.leaf]
+extends = "mid"
+sweeps = ["all"]
+
+[test.profiles.threaded]
+test_threads = 4
+
+[test.profiles.isolated]
+extends = "threaded"
+sweeps = ["plain"]
+isolation = "process"
+"#,
+        );
+        let err = resolve(&cfg, &checks, "own").unwrap_err().to_string();
+        assert!(!err.contains("inherited"), "got: {err}");
+
+        let err = resolve(&cfg, &checks, "leaf").unwrap_err().to_string();
+        assert!(
+            err.contains("(inherited from [test.profiles.base])"),
+            "got: {err}"
+        );
+
+        let err = resolve(&cfg, &checks, "isolated").unwrap_err().to_string();
+        assert!(
+            err.contains("`test_threads = 4` (inherited from [test.profiles.threaded])"),
+            "got: {err}"
+        );
+    }
+
+    /// The refusal is exactly the approved one: unset, zero and counts above
+    /// one stay legal on a parallel entry (inert there, owned by the budget),
+    /// a child overriding an inherited `1` is accepted, a sweep-less base
+    /// carrying `1` is not itself a run, and `1` over a plain entry is the
+    /// serial lane it always was.
+    #[test]
+    fn other_test_threads_over_a_parallel_entry_still_load() {
+        let (checks, cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "all"
+parallel = { budget = 4 }
+
+[[check]]
+name = "all-serial"
+
+[test.profiles.unset]
+sweeps = ["all"]
+
+[test.profiles.zero]
+sweeps = ["all"]
+test_threads = 0
+
+[test.profiles.eight]
+sweeps = ["all"]
+test_threads = 8
+
+[test.profiles.base]
+test_threads = 1
+
+[test.profiles.override]
+extends = "base"
+sweeps = ["all"]
+test_threads = 0
+
+[test.profiles.serial]
+extends = "base"
+sweeps = ["all-serial"]
+"#,
+        );
+        let resolved = resolve_profiles_for_validation(&cfg, &checks).unwrap();
+        for name in ["unset", "zero", "eight", "override"] {
+            assert_eq!(
+                resolved[name][0].lane_exec,
+                LaneExec::Parallel { budget: 4 },
+                "{name}"
+            );
+        }
+        assert!(resolved["base"].is_empty());
+        assert_eq!(
+            resolved["serial"][0].lane_exec,
+            LaneExec::Serial {
+                threads: Threads::Watchdogged
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_carries_cargo_test_threads() {
         let (checks, cfg) = parse_fragment(
             r#"
 [[check]]

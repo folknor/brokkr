@@ -1800,8 +1800,13 @@ pub struct ProfileDef {
     pub skip: Option<Vec<SkipSpec>>,
     /// `--include-ignored` (run `#[ignore]`d tests too).
     pub include_ignored: Option<bool>,
-    /// `--test-threads=N`. Required for serial-only tests that touch
-    /// process-global state (fault-injection hooks, etc.).
+    /// libtest thread count for the profile's plain libtest sweeps: unset or
+    /// 1 is serial under the per-test watchdog, 0 is libtest's default, N is
+    /// `--test-threads=N`. A nextest sweep maps it onto the engine's in-flight
+    /// count. A `parallel` entry never consults it - its budget decides - so
+    /// `1` over a parallel entry is a load-time error (it would promise a
+    /// serial run the key does not control) and other values there are
+    /// inert. Merges through `extends`.
     pub test_threads: Option<u32>,
     /// Extra environment variables exported to the test process.
     pub env: Option<BTreeMap<String, String>>,

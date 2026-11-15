@@ -71,13 +71,24 @@ real error, and brokkr can't tell the two apart.
 
 By default the test phase runs each sweep serial (`--test-threads=1`) under
 the per-test hang watchdog, attributing a stall from libtest's JSON events.
-Parallel execution uses the same tracker and watchdog. A profile can opt a sweep into
-parallel execution with `test_threads`:
+Parallel execution uses the same tracker and watchdog. A profile can opt a
+plain libtest sweep (an entry with no `parallel` key, under a profile without
+process isolation, which takes only unset or 1) into parallel execution with
+`test_threads`:
 
 - unset or `test_threads = 1` - serial, per-test watchdog (the default; nothing
   changes for existing projects).
 - `test_threads = 0` - libtest's default parallelism (num_cpus).
 - `test_threads = N` (>= 2) - `--test-threads=N`.
+
+On an entry carrying `parallel = { budget = N }` (below) the budget alone
+decides concurrency, and the profile's `test_threads` is not consulted. A
+profile with `test_threads = 1` that references such an entry is a load-time
+error, whatever the budget: the key reads as a promise of serial execution
+that it does not control there. The remedy is a non-parallel twin, a second
+`[[check]]` entry with the same build shape and no `parallel` key, for the
+serial profile to reference. Other counts on a parallel entry load and are
+inert.
 
 A parallel sweep enforces the same 20s per-test cap as the serial path, by the
 same means: **every lane drives libtest's JSON event stream**
@@ -96,9 +107,10 @@ multi-second tests off the parallel lane. Every lane reserves `--format` for
 the runner's JSON protocol. `brokkr test`
 is unaffected - it is always serial regardless of the profile's `test_threads`.
 
-A `certifies = "complete"` profile refuses this cargo-mediated parallelism
-during `prepare`: many tests and harnesses share one stream with no harness
-isolation, so its executions cannot be attributed. `parallel = { budget = N }`
+A `certifies = "complete"` profile refuses this cargo-mediated parallelism at
+config load, with `prepare` refusing the same lane as a backstop: many tests
+and harnesses share one stream with no harness isolation, so its executions
+cannot be attributed. `parallel = { budget = N }`
 (below) runs the binaries concurrently with each one on its own stream, and is
 the lane to use there. Its worker count is bounded by the in-flight budget;
 queued binaries do not each reserve an OS thread.

@@ -816,6 +816,17 @@ include_ignored = true
   without `test_threads`. Parallel, nextest and doc-only entries are exempt.
   Either fix keeps the entries' doctests in the claim, which runs them in a
   doctest carrier of each tested build (see [Doctests](#doctests)).
+- **`test_threads = 1` over a `parallel` entry** is a load-time error for
+  every profile, claimed or not, whether it sets the key or inherits it
+  through `extends` (the error then names the parent). On a parallel entry
+  the budget alone decides concurrency and the profile's count is never
+  consulted, so a profile asking for serial execution there would get the
+  budget's instead. Refused whatever the budget, including one, because an
+  unset budget resolves from the host and whether a config loads must not.
+  The error names the profile and the entry; reference a non-parallel twin
+  instead, a `[[check]]` entry with the same build shape and no `parallel`
+  key. Other `test_threads` values over a parallel entry load and are inert.
+  Breaking change for configs that carried the pairing.
 - `lanes = ["tier1", "serial"]` composes profiles as a *list of runs*:
   each lane resolves independently and the test
   phase runs every lane's sweeps in order (labels lane-qualified,

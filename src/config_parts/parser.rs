@@ -3102,6 +3102,34 @@ sweeps = ["doc-carrier"]
         validate_check_against_test(&check, Some(&cfg)).unwrap();
     }
 
+    /// Load-time, not only at invocation, and with no claim in play: a
+    /// profile whose `test_threads = 1` meets a `parallel` entry - set on it
+    /// or inherited through `extends` - fails the config load.
+    #[test]
+    fn serial_test_threads_over_parallel_entry_fails_load() {
+        for (fixture, named) in [
+            (
+                "[profiles.serial]\nsweeps = [\"all\"]\ntest_threads = 1\n",
+                "[test.profiles.serial]:",
+            ),
+            (
+                "[profiles.base]\ntest_threads = 1\n\
+                 [profiles.child]\nextends = \"base\"\nsweeps = [\"all\"]\n",
+                "[test.profiles.child]:",
+            ),
+        ] {
+            let cfg: TestConfig = toml::from_str(fixture).unwrap();
+            let mut check = check_entries(&["all"]);
+            validate_check_against_test(&check, Some(&cfg)).unwrap();
+            check[0].parallel = Some(ParallelBinaries { budget: None });
+            let err = validate_check_against_test(&check, Some(&cfg))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(named), "got: {err}");
+            assert!(err.contains("non-parallel twin of 'all'"), "got: {err}");
+        }
+    }
+
     #[test]
     fn partial_claim_may_thread_libtest_entries() {
         let cfg: TestConfig = toml::from_str(
