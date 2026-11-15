@@ -131,7 +131,6 @@ pub fn run(
                         elapsed_us: None,
                         kv: result.kv.clone(),
                         iterations: Vec::new(),
-                        distribution: None,
                         hotpath: None,
                     })
                 })

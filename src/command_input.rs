@@ -523,9 +523,6 @@ impl Command {
             | Self::NodeStore { .. }
             | Self::ElivPlanetiler { .. }
             | Self::ElivTilemaker { .. }
-            | Self::RunApi { .. }
-            | Self::RunNidIngest { .. }
-            | Self::RunTiles { .. }
             | Self::GenericHotpath { .. }
             | Self::Suite { .. }
             | Self::Passthrough { .. }
@@ -549,13 +546,6 @@ impl Command {
             | Self::Regress { .. }
             | Self::PmtilesCorpus { .. }
             | Self::PmtilesStats { .. }
-            | Self::Serve { .. }
-            | Self::Stop
-            | Self::Status
-            | Self::Ingest { .. }
-            | Self::Update { .. }
-            | Self::Query { .. }
-            | Self::Geocode { .. }
             | Self::Visual { .. }
             | Self::Test { .. }
             | Self::List

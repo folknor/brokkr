@@ -86,14 +86,13 @@ No flag removes these either. What keeps each in check, where anything does:
 | `.brokkr/pbfhogg-capabilities` | capped at 512 lines |
 | `.brokkr/worktrees.toml` | cutting a new `--commit` worktree drops the vanished records of that checkout only; nothing else does |
 | `.brokkr/parallel-timings.toml` | nothing: measured costs merge in per sweep and binary, and a sweep or binary that stops existing keeps its entries; advisory, and safe to delete |
-| `.brokkr/nidhogg.pid` | removed when brokkr stops the server; a server that exits on its own leaves it |
 | `.brokkr/.sidecar.lock`, `.gitignore` | one small file each; the lock persists, and an existing `.gitignore` is never rewritten |
 
 Some files exist only while their writer runs, and a writer killed with
 SIGKILL leaves them behind. These, made only by commands that hold the brokkr
 lock, are removed by store maintenance (`src/maintenance.rs`) the next time
 dispatch takes a fresh hold for a command whose spec locks (`check`, `test`,
-`build`, `run`, `clean`, `verify` (elivagar and nidhogg) and the measured commands; not `crit`,
+`build`, `run`, `clean`, `verify` and the measured commands; not `crit`,
 `fmt` or `env`, which lock inside their own handler), before that command
 does anything, with one line saying how many went and the allocated bytes
 observed. `clean --dry-run` only lists them:
@@ -139,7 +138,9 @@ Bare `brokkr clean`, in order:
 - **Scratch**, whose shape differs per project: elivagar's scratch dir (the
   host `scratch`, where tilegen writes before the rename into the durable
   store) is wiped and recreated, and `<data>/tilegen_tmp` (the `--tmp-dir`
-  brokkr hands elivagar) is removed. Nidhogg's constructed `bench-ingest-output/` directory is removed. Those
+  brokkr hands elivagar) is removed. In nidhogg, the `run-ingest-output/`,
+  `bench-ingest-output/` and `hotpath-ingest-output/` directories the retired
+  nidhogg commands left in scratch are removed. Those
   removals go through the reservation gate, since a configured directory
   can enclose a script-bench iteration a surviving child still holds: such
   a directory is named and kept. Pbfhogg removes its known

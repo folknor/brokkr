@@ -206,7 +206,7 @@ free owner (`reference/bench-resources.md`). Every recursive removal of a
 configured directory, in any project, goes through the gate without the
 backup walk, since a script-bench iteration can sit under one: the measured
 runner's scratch trees, elivagar's scratch, `tilegen_tmp` and calibrands,
-nidhogg's ingest output. brokkr's own state and config files (brokkr.toml,
+the ingest outputs the retired nidhogg commands left. brokkr's own state and config files (brokkr.toml,
 journals, caches) are staged plainly, and its fixed-name `brokkr clean`
 targets are removed plainly, so a lease store problem never stops them.
 

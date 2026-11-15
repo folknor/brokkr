@@ -31,14 +31,15 @@ mod pmtiles_stats_gate_tests {
     use super::*;
 
     // The gate must agree with `visibility.rs`'s catalogue entry, which scopes
-    // pmtiles-stats to elivagar + nidhogg. Wrong projects get the real
-    // `require`-shaped error; allowed projects fall through (empty file list
-    // makes the call a pure no-op, so no disk I/O).
+    // pmtiles-stats to elivagar. Wrong projects get the real `require`-shaped
+    // error; the allowed project falls through (empty file list makes the
+    // call a pure no-op, so no disk I/O).
 
     #[test]
-    fn rejects_projects_without_pmtiles() {
+    fn rejects_projects_other_than_elivagar() {
         for project in [
             Project::Pbfhogg,
+            Project::Nidhogg,
             Project::Litehtml,
             Project::Piners,
             Project::Other("mystery".into()),
@@ -50,15 +51,13 @@ mod pmtiles_stats_gate_tests {
             let msg = err.to_string();
             assert!(msg.contains("pmtiles-stats"), "message: {msg}");
             assert!(msg.contains("elivagar"), "message: {msg}");
-            assert!(msg.contains("nidhogg"), "message: {msg}");
         }
     }
 
     #[test]
-    fn allows_elivagar_and_nidhogg() {
-        // Empty file list => the loop body never runs, so an allowed project
+    fn allows_elivagar() {
+        // Empty file list => the loop body never runs, so the allowed project
         // returns Ok without opening any archive.
         assert!(cmd_pmtiles_stats(&Project::Elivagar, &[]).is_ok());
-        assert!(cmd_pmtiles_stats(&Project::Nidhogg, &[]).is_ok());
     }
 }

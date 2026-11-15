@@ -995,7 +995,6 @@ mod equivalence {
             &point_tile(&[(10, 10), (0, 0)]),
             false,
         );
-
     }
 
     /// Both decoders refuse every command stream the spec 4.3.4 grammar
@@ -1027,10 +1026,7 @@ mod equivalence {
             // A zero-count command.
             (GeomType::LineString, vec![mv(0)]),
             // Two point MoveTos.
-            (
-                GeomType::Point,
-                vec![mv(1), z(0), z(0), mv(1), z(2), z(2)],
-            ),
+            (GeomType::Point, vec![mv(1), z(0), z(0), mv(1), z(2), z(2)]),
             // A polygon ring without its ClosePath.
             (
                 GeomType::Polygon,
@@ -1044,7 +1040,19 @@ mod equivalence {
             // A repeated-count polygon MoveTo.
             (
                 GeomType::Polygon,
-                vec![mv(2), z(0), z(0), z(5), z(5), lt(2), z(10), z(0), z(0), z(10), close],
+                vec![
+                    mv(2),
+                    z(0),
+                    z(0),
+                    z(5),
+                    z(5),
+                    lt(2),
+                    z(10),
+                    z(0),
+                    z(0),
+                    z(10),
+                    close,
+                ],
             ),
             // An empty command stream.
             (GeomType::Polygon, Vec::new()),

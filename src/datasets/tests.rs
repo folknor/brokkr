@@ -22,11 +22,10 @@ mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
-    use crate::config::{Dataset, OscEntry, PbfEntry, PmtilesEntry, ResolvedPaths};
+    use crate::config::{Dataset, OscEntry, PbfEntry, ResolvedPaths};
     use crate::elivagar::archive_store::{ArchiveKey, ArchiveStore};
 
     use crate::datasets::resolve::*;
-    use crate::nidhogg::data_dir::resolve_nidhogg_data_dir;
 
     fn unique_test_dir(name: &str) -> PathBuf {
         crate::test_scratch::scratch("resolve-parts", name)
@@ -61,87 +60,6 @@ mod tests {
             path: None,
             xxh128: None,
         }
-    }
-
-    #[test]
-    fn resolve_default_osc_path_errors_when_multiple_variants_exist() {
-        let mut ds = empty_dataset();
-        ds.osc.insert(
-            String::from("4706"),
-            OscEntry {
-                file: String::from("b.osc.gz"),
-                xxhash: None,
-            },
-        );
-        ds.osc.insert(
-            String::from("4705"),
-            OscEntry {
-                file: String::from("a.osc.gz"),
-                xxhash: None,
-            },
-        );
-        let mut datasets = HashMap::new();
-        datasets.insert(String::from("denmark"), ds);
-
-        let paths = mk_paths(Path::new("/irrelevant"), datasets);
-        let err = resolve_default_osc_path("denmark", &paths, Path::new("."))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("multiple osc entries"));
-        assert!(err.contains("4705, 4706"));
-    }
-
-    #[test]
-    fn resolve_default_osc_path_uses_single_entry() {
-        let dir = unique_test_dir("single-osc");
-        let osc = dir.join("one.osc.gz");
-        std::fs::write(&osc, "x").expect("write");
-
-        let mut ds = empty_dataset();
-        ds.osc.insert(
-            String::from("4705"),
-            OscEntry {
-                file: String::from("one.osc.gz"),
-                xxhash: None,
-            },
-        );
-        let mut datasets = HashMap::new();
-        datasets.insert(String::from("denmark"), ds);
-        let paths = mk_paths(&dir, datasets);
-
-        let resolved =
-            resolve_default_osc_path("denmark", &paths, Path::new(".")).expect("resolve");
-        assert_eq!(resolved, osc);
-
-        drop(std::fs::remove_dir_all(&dir));
-    }
-
-    #[test]
-    fn resolve_default_pmtiles_path_errors_when_multiple_variants_exist() {
-        let mut ds = empty_dataset();
-        ds.pmtiles.insert(
-            String::from("z"),
-            PmtilesEntry {
-                file: String::from("z.pmtiles"),
-                xxhash: None,
-            },
-        );
-        ds.pmtiles.insert(
-            String::from("a"),
-            PmtilesEntry {
-                file: String::from("a.pmtiles"),
-                xxhash: None,
-            },
-        );
-        let mut datasets = HashMap::new();
-        datasets.insert(String::from("denmark"), ds);
-
-        let paths = mk_paths(Path::new("/irrelevant"), datasets);
-        let err = resolve_default_pmtiles_path("denmark", &paths, Path::new("."))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("multiple pmtiles entries"));
-        assert!(err.contains("a, z"));
     }
 
     #[test]
@@ -667,26 +585,6 @@ mod tests {
         assert!(err.contains("missing osc.4915"), "got: {err}");
 
         drop(std::fs::remove_dir_all(&dir));
-    }
-
-    #[test]
-    fn resolve_nidhogg_data_dir_requires_configured_data_dir() {
-        let mut ds = empty_dataset();
-        ds.pbf.insert(
-            String::from("raw"),
-            PbfEntry {
-                file: String::from("raw.osm.pbf"),
-                ..Default::default()
-            },
-        );
-        let mut datasets = HashMap::new();
-        datasets.insert(String::from("denmark"), ds);
-        let paths = mk_paths(Path::new("/data-root"), datasets);
-
-        let err = resolve_nidhogg_data_dir("denmark", &paths)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("has no data_dir configured"));
     }
 
     #[test]

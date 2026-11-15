@@ -70,11 +70,11 @@ knobs. CLI defaults are still spelled in the command schema.
 - `--variant <name>` defaults to `raw` (vs pbfhogg's `indexed`, or
   `locations` for its `check-locations`), except on
   `pmtiles-corpus`, where it is required (see the corpus section).
-- The shared `--tiles <variant>` flag (the `pmtiles.<variant>` config entry)
-  has **no elivagar consumer**. Elivagar produces archives rather than reading
-  configured ones, so every archive-consuming command addresses the durable
-  output store through `--dataset`/`--variant`/`--commit`/`--file` instead -
-  see the resolver section below. `--tiles` survives on nidhogg's `serve`.
+- The `pmtiles.<variant>` config entry has **no elivagar consumer**.
+  Elivagar produces archives rather than reading configured ones, so every
+  archive-consuming command addresses the durable output store through
+  `--dataset`/`--variant`/`--commit`/`--file` instead - see the resolver
+  section below.
 
 See `docs/brokkr.toml.md` for the dataset structure and shared variant flags.
 
@@ -197,8 +197,8 @@ used to log the failure and exit 0). The durable
 store survives a routine `brokkr clean`; only the deep clean (`brokkr clean
 --worktrees`) reclaims it. These subcommands only read the file - the current
 release binary can inspect output built by any commit, so `--commit` picks
-which file to open, not which binary to build (no historical worktree rebuild,
-unlike `brokkr verify --commit` on nidhogg's checks). All four
+which file to open, not which binary to build (no historical worktree
+rebuild). All four
 take the blocking brokkr command lock, as `regress` does, because each
 wrapper builds elivagar with Cargo and the lock serializes those build
 shapes. Tilegen writes to scratch and then promotes its finished archive,
@@ -226,11 +226,9 @@ denmark` failed with `dataset 'denmark' has no pmtiles configured`, and there
 was no `--file` escape hatch to reach an archive that isn't dataset output
 (the world artifact `data/ocean-tiles.pmtiles` is exactly that case). It also
 sat under the `Command::Verify` worktree wrapper, where `--commit` meant
-"rebuild that binary" rather than "open that archive". `run()` in
-`src/main_parts/dispatch.rs` now dispatches this one variant *before*
-`with_worktree` and rejects the outer `brokkr verify --commit` with a message
-pointing at the subcommand flag; the rest of `VerifyCommand` (nidhogg's
-checks) still runs inside the worktree.
+"rebuild that binary" rather than "open that archive". `brokkr verify` now
+has no outer `--commit` and no worktree: `pmtiles` is its one subcommand
+since the nidhogg checks retired, and its own `--commit` is the only one.
 
 ## Output regression: regress (tier-3 attribution)
 

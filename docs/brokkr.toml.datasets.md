@@ -62,10 +62,14 @@ paths still resolve against each including project's root.
   pin check; an existing file with no `xxhash` prints the computed digest
   (`no hash configured, actual: ...`) to copy into the config.
 - `pmtiles.<variant>` - PMTiles archive entries keyed by variant name (e.g.
-  `elivagar`). Each has `file`, optional `xxhash` (XXH128).
-  Used by nidhogg `serve` and `tiles`.
-- Top-level dataset fields: `origin`, `download_date`, `bbox`, `data_dir`
-  (nidhogg only). `bbox` is parsed at config load as four finite
+  `elivagar`). Each has `file`, optional `xxhash` (XXH128). Validated at
+  load and listed by `brokkr env`; no built-in command opens one. A
+  project's own tools read them from the composed config (nidhogg's server
+  wrapper does), and a script bench sees them in the resolved view.
+- Top-level dataset fields: `origin`, `download_date`, `bbox`, and the
+  retired `data_dir`, still accepted so a config that sets it loads, read by
+  no built-in command, and present in a script bench's resolved view. `bbox`
+  is parsed at config load as four finite
   `lon_min,lat_min,lon_max,lat_max` coordinates; longitude must be within
   -180..180, latitude within -90..90, and each minimum must not exceed its
   maximum. A pbfhogg extract row that took its bbox from here carries it as
@@ -109,7 +113,6 @@ paths still resolve against each including project's root.
 origin = "Geofabrik"
 download_date = "2026-02-20"
 bbox = "12.4,55.6,12.7,55.8"
-data_dir = "denmark-data"          # nidhogg only
 getid_ids = ["n115722", "w2080", "r174"]    # pbfhogg only
 
 [plantasjen.datasets.denmark.pbf.indexed]
@@ -137,14 +140,13 @@ Every measurable command on a project that uses datasets accepts:
 
 - `--variant <name>` - selects from `pbf.<name>`. Default: `indexed`
   (pbfhogg, except `check-locations`, which defaults to `altw-keep-untagged`,
-  or `altw` with `--agreement`), `raw` (elivagar/nidhogg).
+  or `altw` with `--agreement`), `raw` (elivagar).
 - `--osc-seq <seq>` - selects from `osc.<seq>`. Auto-selects if exactly one
   OSC is configured.
-- `--tiles <variant>` - selects from `pmtiles.<variant>`. Auto-selects if
-  exactly one PMTiles entry is configured. Only nidhogg's `serve` consumes it:
-  elivagar's archive readers address the durable output store by
-  `--dataset`/`--variant`/`--commit`/`--file` instead (see
-  `docs/projects/elivagar.md`).
+
+No command selects a `pmtiles.<variant>` entry: elivagar's archive readers
+address the durable output store by `--dataset`/`--variant`/`--commit`/`--file`
+instead (see `docs/projects/elivagar.md`).
 
 pbfhogg has additional flags for snapshots, I/O backends, and compression -
 see `docs/projects/pbfhogg.md`.

@@ -250,7 +250,6 @@ fn run_example(
             elapsed_us: None,
             kv: example.observations(internal_runs),
             iterations: Vec::new(),
-            distribution: None,
             hotpath: None,
         })
     })?;

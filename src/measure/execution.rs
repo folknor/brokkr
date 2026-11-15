@@ -278,7 +278,6 @@ mod tests {
             elapsed_us: Some(9_000_000),
             kv: vec![KvPair::int("blocks", 42), KvPair::int("meta.exit_code", 0)],
             iterations: Vec::new(),
-            distribution: None,
             hotpath: Some(crate::db::HotpathData {
                 functions: Vec::new(),
                 threads: Vec::new(),

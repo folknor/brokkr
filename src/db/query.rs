@@ -1536,7 +1536,7 @@ mod tests {
 
     #[test]
     fn load_children_hydrates_all_child_data() {
-        use crate::db::{Distribution, HotpathData, HotpathFunction, HotpathThread, KvPair};
+        use crate::db::{HotpathData, HotpathFunction, HotpathThread, KvPair};
 
         let (dir, db_path) = test_db("hydration");
         let db = ResultsDb::open(&db_path).expect("open");
@@ -1558,13 +1558,6 @@ mod tests {
                     Wall::from_micros(699_600),
                     Wall::from_micros(600_049),
                 ];
-                row.distribution = Some(Distribution {
-                    samples: 5,
-                    min: Wall::from_micros(100_312),
-                    p50: Wall::from_micros(110_000),
-                    p95: Wall::from_micros(129_501),
-                    max: Wall::from_micros(150_499),
-                });
                 row.hotpath = Some(HotpathData {
                     functions: vec![HotpathFunction {
                         section: String::from("timing"),
@@ -1593,6 +1586,17 @@ mod tests {
             .build();
 
         let (full, _) = db.insert(&row).expect("insert");
+        // Nothing writes a distribution any more; the stored rows the retired
+        // nidhogg `api` bench left still hydrate, so seed one by hand.
+        db.conn
+            .execute(
+                "INSERT INTO run_distribution \
+                 (run_id, samples, min_ms, p50_ms, p95_ms, max_ms, min_us, p50_us, p95_us, max_us) \
+                 SELECT id, 5, 100, 110, 130, 150, 100312, 110000, 129501, 150499 \
+                 FROM runs WHERE uuid = ?1",
+                rusqlite::params![full],
+            )
+            .expect("seed distribution");
 
         // query_by_run_ids triggers load_children for each row.
         let (rows, omitted) = db

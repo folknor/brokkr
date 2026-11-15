@@ -21,8 +21,9 @@ use std::path::{Path, PathBuf};
 
 use super::super::constants::mvt;
 use super::super::eliv::{
-    LonLatBbox, MapCenter, PmtilesConfig, PmtilesWriter, WIRE_32BIT, WIRE_64BIT, encode_bytes_field_always, encode_tag,
-    encode_varint, encode_varint_field_always, xy_to_tile_id,
+    LonLatBbox, MapCenter, PmtilesConfig, PmtilesWriter, WIRE_32BIT, WIRE_64BIT,
+    encode_bytes_field_always, encode_tag, encode_varint, encode_varint_field_always,
+    xy_to_tile_id,
 };
 use flate2::Compression;
 use flate2::write::GzEncoder;

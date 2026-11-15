@@ -135,4 +135,5 @@ Elivagar's argv construction creates no directories.
 
 Tilegen moved from self-reported stderr timing to external wall-clock timing.
 The remaining dispatch loops then moved to the shared command-plan runner,
-including external tools, cargo examples and nidhogg's HTTP/server lifecycles.
+including external tools, cargo examples and the since-retired nidhogg
+HTTP/server lifecycles.

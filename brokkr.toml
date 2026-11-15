@@ -108,7 +108,7 @@ message = "query the toolchain through crate::cargo::rustc::load, not a fresh ru
 name = "elivagar-crates-through-the-seam"
 pattern = '(?:^|[^:\w])(?:elivagar|protohoggr)::'
 paths = ["src/**/*.rs"]
-exclude = ["src/elivagar/eliv.rs", "src/main.rs", "src/main_parts/bootstrap.rs", "src/main_parts/dispatch.rs", "src/verify_cmd.rs"]
+exclude = ["src/elivagar/eliv.rs", "src/main.rs", "src/main_parts/bootstrap.rs", "src/main_parts/dispatch.rs"]
 region = "code"
 message = "reach the elivagar and protohoggr crates through src/elivagar/eliv.rs"
 

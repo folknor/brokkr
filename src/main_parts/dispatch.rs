@@ -18,12 +18,11 @@ use crate::passthrough_cmd::{RunOptions, cmd_run};
 use crate::pmtiles_stats_cmd::cmd_pmtiles_stats;
 use crate::project::Project;
 use crate::request::{CorpusQuery, ResultsQuery, SidecarQuery};
-use crate::verify_cmd::cmd_verify;
 use crate::visual_approve_cmd::cmd_approve;
 use crate::{
     check_cmd, cli, command_input, context, crit_cmd, elivagar, history_cmd, invalidate_cmd,
-    litehtml, lockfile, measure, mogwai, nidhogg, output, pbfhogg, piners, project, ratatoskr,
-    results_cmd, runnables, sidecar_cmd, sluggrs, test_cmd,
+    litehtml, lockfile, measure, mogwai, output, pbfhogg, piners, project, ratatoskr, results_cmd,
+    runnables, sidecar_cmd, sluggrs, test_cmd,
 };
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
@@ -733,52 +732,6 @@ fn run_project(
             })
         }
 
-        // ----- nidhogg commands -----
-        Command::RunApi {
-            mode,
-            dataset,
-            query,
-        } => {
-            let cmd = nidhogg::commands::NidhoggCommand::Api { query };
-            run_measured(
-                &mode,
-                detection,
-                &dataset,
-                cli::DEFAULT_RAW_VARIANT,
-                invocation,
-                |req| measure::runner::run(req, &nidhogg::plan::NidhoggPlan(&cmd)),
-            )
-        }
-        Command::RunNidIngest {
-            mode,
-            dataset,
-            variant,
-        } => {
-            let cmd = nidhogg::commands::NidhoggCommand::Ingest;
-            run_measured(&mode, detection, &dataset, &variant, invocation, |req| {
-                measure::runner::run(req, &nidhogg::plan::NidhoggPlan(&cmd))
-            })
-        }
-        Command::RunTiles {
-            mode,
-            dataset,
-            tiles,
-            uring,
-        } => {
-            let cmd = nidhogg::commands::NidhoggCommand::Tiles {
-                tiles_variant: tiles,
-                uring,
-            };
-            run_measured(
-                &mode,
-                detection,
-                &dataset,
-                cli::DEFAULT_RAW_VARIANT,
-                invocation,
-                |req| measure::runner::run(req, &nidhogg::plan::NidhoggPlan(&cmd)),
-            )
-        }
-
         // ----- mogwai commands -----
         // Dataset/variant stay empty: brokkr does not know what a mogwai
         // surface reads. An input the argv names is captured verbatim with it;
@@ -838,21 +791,8 @@ fn run_project(
                     project::require(project, &Project::Elivagar, "suite elivagar")?;
                     elivagar::cmd::bench_all(req)
                 }
-                "nidhogg" => {
-                    project::require(project, &Project::Nidhogg, "suite nidhogg")?;
-                    measure::runner::run(
-                        req,
-                        &nidhogg::plan::NidhoggPlan(&nidhogg::commands::NidhoggCommand::Api {
-                            query: None,
-                        }),
-                    )?;
-                    measure::runner::run(
-                        req,
-                        &nidhogg::plan::NidhoggPlan(&nidhogg::commands::NidhoggCommand::Ingest),
-                    )
-                }
                 other => Err(DevError::Usage(format!(
-                    "unknown suite: {other} (expected: pbfhogg, elivagar, nidhogg)"
+                    "unknown suite: {other} (expected: pbfhogg, elivagar)"
                 ))),
             }
         }),
@@ -1129,57 +1069,37 @@ fn run_project(
         }
         Command::Verify {
             verbose,
-            commit,
-            verify,
+            verify:
+                VerifyCommand::ElivVerify {
+                    dataset,
+                    variant,
+                    commit,
+                    file,
+                    geometry_stats,
+                    unique_payloads,
+                },
         } => {
             let features = resolve_features(dev_config, &[]);
             output::set_quiet(!verbose);
             // `verify pmtiles` only reads an archive, with the current binary,
             // so it belongs to the resolver family (pmtiles-inspect/diag/svg/
             // regress): no historical worktree, and its own `--commit` picks
-            // the file. It
-            // takes the same non-blocking lock they do, so it cannot read an
-            // archive a concurrent `tilegen` is mid-write.
-            if matches!(verify, VerifyCommand::ElivVerify { .. }) {
-                if commit.is_some() {
-                    return Err(DevError::Usage(
-                        "'brokkr verify --commit' rebuilds a historical binary, which \
-                         'verify pmtiles' never needs - it reads the archive with the \
-                         current one. Use 'brokkr verify pmtiles --commit <hash>' to \
-                         choose which archive to open."
-                            .to_string(),
-                    ));
-                }
-                let _lock = context::reenter_command_lock()?;
-                return cmd_verify(
-                    dev_config,
-                    project,
-                    &detection.project_root,
-                    &detection.build_root,
-                    detection.config_sources.included(),
-                    verify,
-                    &features,
-                );
-            }
-            with_worktree(
-                Some(project),
+            // the file. It builds elivagar, so it takes the command lock.
+            let _lock = context::reenter_command_lock()?;
+            // The build and the verifier child both poll the shutdown flag.
+            let _interrupts = crate::shutdown::SigtermGuard::install();
+            elivagar::cmd::verify(
+                dev_config,
                 &detection.project_root,
                 &detection.build_root,
+                detection.config_sources.included(),
+                &dataset,
+                &variant,
                 commit.as_deref(),
-                false,
-                &crate::tree_policy::TreePolicy::of(dev_config),
-                context::worktree_keep(dev_config)?,
-                |build_root| {
-                    cmd_verify(
-                        dev_config,
-                        project,
-                        &detection.project_root,
-                        build_root,
-                        detection.config_sources.included(),
-                        verify,
-                        &features,
-                    )
-                },
+                file.as_deref(),
+                &features,
+                geometry_stats,
+                unique_payloads,
             )
         }
         Command::CompareTiles {
@@ -1348,46 +1268,6 @@ fn run_project(
             elivagar::cmd::download_natural_earth(dev_config, &detection.project_root)
         }
         Command::PmtilesStats { files } => cmd_pmtiles_stats(project, &files),
-        Command::Serve {
-            data_dir,
-            dataset,
-            tiles,
-        } => {
-            let _lock = context::reenter_command_lock()?;
-            let features = resolve_features(dev_config, &[]);
-            nidhogg::cmd::serve(
-                dev_config,
-                &detection.project_root,
-                &detection.build_root,
-                data_dir.as_deref(),
-                &dataset,
-                tiles.as_deref(),
-                &features,
-            )
-        }
-        Command::Stop => nidhogg::cmd::stop(project_root),
-        Command::Status => nidhogg::cmd::status(dev_config),
-        Command::Ingest { variant, dataset } => {
-            let _lock = context::reenter_command_lock()?;
-            let _interrupts = crate::shutdown::SigtermGuard::install();
-            let features = resolve_features(dev_config, &[]);
-            nidhogg::cmd::ingest(
-                dev_config,
-                &detection.project_root,
-                &detection.build_root,
-                &variant,
-                &dataset,
-                &features,
-            )
-        }
-        Command::Update { args } => {
-            let _lock = context::reenter_command_lock()?;
-            let _interrupts = crate::shutdown::SigtermGuard::install();
-            let features = resolve_features(dev_config, &[]);
-            nidhogg::cmd::update(project_root, build_root, &args, &features)
-        }
-        Command::Query { json } => nidhogg::cmd::query(dev_config, json.as_deref()),
-        Command::Geocode { term } => nidhogg::cmd::geocode(dev_config, &term),
         // ----- visual testing commands (litehtml + sluggrs) -----
         Command::Visual { args, litehtml } => {
             // `visual` builds the renderer with cargo, so it takes the global

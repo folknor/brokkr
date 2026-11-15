@@ -374,11 +374,17 @@ fn clean_scratch(
     }
 
     if *project == Project::Nidhogg {
-        // This is the ingest output path declared by NidhoggLayout. The
-        // similarly named project-root tmp directories are not created by brokkr.
-        let ingest_output = layout::NidhoggLayout::new(paths).bench_ingest_output();
-        if c.reserved_dir(&ingest_output)? {
-            output::run_msg(&format!("{} nidhogg ingest output", c.past()));
+        // The ingest outputs the retired nidhogg commands left, by the names
+        // NidhoggLayout constructs. The similarly named project-root tmp
+        // directories were never created by brokkr.
+        for ingest_output in layout::NidhoggLayout::new(paths).ingest_outputs() {
+            if c.reserved_dir(&ingest_output)? {
+                output::run_msg(&format!(
+                    "{} nidhogg {}",
+                    c.past(),
+                    output::path(&ingest_output)
+                ));
+            }
         }
     }
 

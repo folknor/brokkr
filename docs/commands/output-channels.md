@@ -76,9 +76,8 @@ output keep it absolute. Allocation-profile notes have one owner in
 
 Captured and passthrough subprocesses run through `src/output/child.rs`, which
 owns child polling, typed endings, deadlines, signal forwarding, and bounded
-stdout/stderr drains. Nidhogg ingest progress is replayed live on stderr
-(stdout stays captured); update replays both streams live. The replay keeps
-pipe bytes unchanged, including chunks split inside a UTF-8 sequence.
+stdout/stderr drains. A captured stream is not replayed while the child
+runs; a caller that wants it shown replays the captured bytes afterwards.
 
 ## The three transport channels
 
@@ -88,7 +87,7 @@ A running binary can hand data to brokkr three ways:
    the terminal) or captured (drained into a buffer and dropped). Never
    parsed, never stored.
 2. **stderr `key=value` lines** - structured metrics, parsed by
-   `parse_kv_lines` (`src/measure/kv.rs`) on every path that scrapes
+   `parse_kv_lines_us` (`src/measure/kv.rs`) on every path that scrapes
    stderr. A line counts only if the text before its first `=`, trimmed,
    is a **field name**: an ASCII letter or `_`, then ASCII letters, digits,
    `_`, `.` or `-` (`rows`, `cold_prepare_us`, `cache.hit-rate`). Any other
@@ -148,10 +147,6 @@ computes itself, on top of the raw kv pairs:
 - `write_mbs` - appears additionally when the run reported an `output_bytes`
   kv pair (so this one *does* depend on the binary emitting it): computed as
   `output_bytes/1e6 / secs`.
-- `samples`/`min_ms`/`p50_ms`/`p95_ms`/`max_ms` - only for `run_distribution`
-  results, with three decimals from the microsecond summary (`min_ms=0.298`).
-  The same values land in results.db's `run_distribution` table, both as
-  microseconds (`*_us`) and rounded (`*_ms`).
 
 So a metric can reach the `[result]` line three ways: a raw stderr kv pair, a
 brokkr-derived throughput field, or (for `write_mbs`) a kv pair that feeds a
@@ -245,8 +240,8 @@ self-reported.
 | repack | run_external_ok | yes | counters |
 | degrade | run_external_ok | yes | counters |
 
-(`brokkr verify`, for elivagar and nidhogg, is a correctness check, not a
-benchmark, and records to neither DB.)
+(`brokkr verify`, elivagar's, is a correctness check, not a benchmark, and
+records to neither DB.)
 
 ### elivagar
 
@@ -270,17 +265,6 @@ to FIFO counters on the elivagar side (54f9b07). The example micro-benches recor
 brokkr's wall-clock `elapsed_ms`; they don't scrape stderr into result KV, but
 replay their captured stdout and stderr to the terminal.
 The external baselines build no Rust binary at all.
-
-### nidhogg
-
-The `tiles` lifecycle benchmark measures the server's start-to-shutdown wall
-with brokkr. After the readiness message, it parses the remaining stderr
-`key=value` lines into result KV pairs; `elapsed_ms`/`total_ms` are reserved
-timing names and are not stored as counters. This path uses no sidecar FIFO.
-
-| Command | Bench path | sidecar | stderr kv |
-|---|---|---|---|
-| tiles | `run_internal` + server lifecycle | no | shutdown counters |
 
 ## Quick decision guide
 

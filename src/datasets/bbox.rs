@@ -75,12 +75,6 @@ impl Bbox {
         })
     }
 
-    /// Convert to the nidhogg API's `[lat_min,lon_min,lat_max,lon_max]` order.
-    pub fn to_nidhogg_api(&self) -> String {
-        let [lon_min, lat_min, lon_max, lat_max] = self.coordinates;
-        format!("[{lat_min},{lon_min},{lat_max},{lon_max}]")
-    }
-
     /// Split into equal-width longitude strips for multi-extract.
     #[allow(clippy::cast_precision_loss)]
     pub fn strips(&self, regions: usize) -> Result<Vec<Self>, crate::error::DevError> {
@@ -102,23 +96,6 @@ impl Bbox {
                 Self::from_coordinates([strip_min, min_lat, strip_max, max_lat])
             })
             .collect()
-    }
-
-    /// Shrink to the center quarter, preserving the existing coordinate
-    /// calculation used by nidhogg's smaller-area queries.
-    pub fn shrink_quarter(&self) -> Result<Self, crate::error::DevError> {
-        let [lon_min, lat_min, lon_max, lat_max] = self.coordinates;
-        let lon_mid = (lon_min + lon_max) / 2.0;
-        let lat_mid = (lat_min + lat_max) / 2.0;
-        let lon_q = (lon_max - lon_min) / 4.0;
-        let lat_q = (lat_max - lat_min) / 4.0;
-        let coordinates = [
-            lon_mid - lon_q,
-            lat_mid - lat_q,
-            lon_mid + lon_q,
-            lat_mid + lat_q,
-        ];
-        Self::from_coordinates(coordinates)
     }
 }
 

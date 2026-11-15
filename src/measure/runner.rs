@@ -655,7 +655,6 @@ pub(crate) fn execute_example(
                     elapsed_us: None,
                     kv: observations(),
                     iterations: vec![],
-                    distribution: None,
                     hotpath: None,
                 })
             })?;

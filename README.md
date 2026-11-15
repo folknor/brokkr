@@ -25,10 +25,6 @@ cd ~/Programs/elivagar
 brokkr tilegen --dataset denmark --bench            # full pipeline benchmark
 brokkr pmtiles-writer --hotpath                     # micro-benchmark hotpath
 
-cd ~/Programs/nidhogg
-brokkr serve                                       # start the nidhogg server
-brokkr api --dataset denmark --bench                # API query benchmark
-
 cd ~/Programs/litehtml-rs
 brokkr visual --all                                 # visual reference tests
 ```
@@ -65,7 +61,6 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 | `results` | Query the results database (`.brokkr/results.db`) |
 | `invalidate` | Hard-delete results + sidecar rows by UUID or commit prefix (dry-run unless `-f`) |
 | `clean [--worktrees]` | Remove scratch/temp files; `--worktrees` also purges persistent benchmark worktrees |
-| `pmtiles-stats` | PMTiles v3 file statistics |
 | `history` | Browse global command history |
 | `lock` | Show who holds the benchmark lock |
 
@@ -132,7 +127,7 @@ brokkr diff-snapshots --dataset planet --from 20260411 --to 20260418 --format os
 
 `suite pbfhogg` runs the full benchmark suite.
 
-Cross-validation against osmium, dataset download and snapshot promotion, and library verification are not brokkr commands. They live in pbfhogg's own binaries and run through brokkr's generic `run`: `brokkr run --with pbfhogg pbfhogg-verify -- CHECK`, `brokkr run --with pbfhogg pbfhogg-datasets -- download ...` (and `-- promote ...`), `brokkr run --with pbfhogg-harness pbfhogg-library -- ...`. Library measurement is the `library-scenario` script bench. `brokkr verify` remains for elivagar (`verify pmtiles`) and nidhogg (`batch`, `geocode`, `readonly`).
+Cross-validation against osmium, dataset download and snapshot promotion, and library verification are not brokkr commands. They live in pbfhogg's own binaries and run through brokkr's generic `run`: `brokkr run --with pbfhogg pbfhogg-verify -- CHECK`, `brokkr run --with pbfhogg pbfhogg-datasets -- download ...` (and `-- promote ...`), `brokkr run --with pbfhogg-harness pbfhogg-library -- ...`. Library measurement is the `library-scenario` script bench. `brokkr verify` remains for elivagar (`verify pmtiles`).
 
 Every measurable pbfhogg command accepts `--snapshot <key>` to read its input from a historical snapshot rather than the dataset's primary tables. Producers (`apply-changes`, `merge-changes`, `tags-filter --input-kind osc`, `diff` including `--format osc`, `repack`, `degrade`) consume both PBF and OSC from the snapshot's tables; read-side consumers (`sort`, `cat`, `inspect`, `add-locations-to-ways`, `getid`, `getparents`, `renumber`, `check-refs`, `check-ids`, `check-index`, `check-locations`, `digest`, `time-filter`, `tags-filter`, `extract`, `multi-extract`, `build-geocode-index`) read their PBF input from the snapshot's `pbf.<variant>` table. `--snapshot base` (or omitting the flag) preserves the existing behavior - script-friendly when parameterizing over snapshot keys. The `--snapshot` flag lands verbatim in `cli_args`, so `brokkr results --grep 'snapshot 20260411'` (or just `--grep 20260411`) finds every command run against that snapshot.
 
@@ -148,17 +143,11 @@ Every measurable pbfhogg command accepts `--snapshot <key>` to read its input fr
 
 `suite elivagar` runs the full benchmark suite.
 
-**Other**: `compare-tiles`, `download-ocean`, `download-natural-earth`.
+**Other**: `compare-tiles`, `download-ocean`, `download-natural-earth`, `pmtiles-stats` (PMTiles v3 file statistics).
 
 ### nidhogg
 
-**Server**: `serve`, `stop`, `status`.
-
-**Operations**: `ingest`, `update`, `query`, `geocode`.
-
-**Benchmarks**: `api` (query performance), `nid-ingest` (ingest), `tiles` (tile serving).
-
-**Verification**: `batch`, `nid-geocode`, `readonly`.
+brokkr has no nidhogg commands. nidhogg serves, ingests, updates and pokes through its own binaries run by the generic `run` (`brokkr run --with nidhogg nidhogg-serve -- ...`, `brokkr run nidhogg-update -- ...`), measures through script benches (`brokkr bench`), and validates with `brokkr check`.
 
 ### litehtml-rs
 
@@ -194,7 +183,7 @@ All benchmarks run through `BenchHarness`, which provides:
 
 - **Exclusive lock** - prevents parallel bench/hotpath runs via lockfile
 - **SQLite storage** - results stored in `.brokkr/results.db` per project with git commit, hostname, and full environment snapshot
-- **Multiple timing modes** - in-process (N runs, best-of-N), subprocess (external binary), and distribution (min/p50/p95/max)
+- **Multiple timing modes** - in-process (N runs, best-of-N) and subprocess (external binary)
 - **Retroactive benchmarking** - `--commit <hash>` builds and benchmarks old commits via a persistent git worktree (sibling `.brokkr-worktree-<project>-<short>/`). Reused on subsequent runs at the same commit so cargo `target/` survives. Run `brokkr clean --worktrees` to garbage collect.
 - **OOM protection** - memory availability checks before large-scale runs
 
@@ -271,9 +260,9 @@ brokkr results --compare a65a 911c                  # compare two commits side-b
 
 Columns that drive the filters:
 
-- `command` - the bare subcommand id (`read`, `cat`, `diff-snapshots`, `api`, …); no `bench `/`hotpath ` prefix.
+- `command` - the bare subcommand id (`read`, `cat`, `diff-snapshots`, `tilegen`, …); no `bench `/`hotpath ` prefix.
 - `mode` - the measurement mode only (`bench` / `hotpath` / `alloc`).
-- `cli_args` - literal subprocess argv (pbfhogg/elivagar/nidhogg). Every flag and axis the user passed is here verbatim.
+- `cli_args` - literal subprocess argv (pbfhogg/elivagar). Every flag and axis the user passed is here verbatim.
 - `brokkr_args` - literal `brokkr <...>` invocation the user typed. Same-column-dual-view, recorded so `--grep` can find either.
 - `meta.*` (via `--meta KEY=VALUE`) - runtime observations only: resolved paths, detected modes, cache hit/miss. Anything derivable from `cli_args` or `brokkr_args` is NOT duplicated here. `meta.` prefix is implicit; multiple `--meta` flags AND together; rows missing the requested key are silently excluded. Available keys depend on the command - e.g. `diff` emits `meta.merged_cache` + `meta.merged_cache_age_s`; elivagar's `tilegen` emits `meta.locations_on_ways_detected`; historical `meta.format`/`meta.index_type`/`meta.start_stage` keys were migrated out in v13 (they live in `cli_args` now).
 
@@ -335,7 +324,6 @@ project = "pbfhogg"
 data = "data"
 scratch = "data/scratch"
 target = "target"
-port = 3033
 drives.source = "nvme"
 drives.data = "ssd"
 features = ["linux-direct-io", "linux-io-uring"]

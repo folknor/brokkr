@@ -116,7 +116,6 @@ impl BenchHarness {
                 elapsed_us: Some(elapsed_to_us(&capture.elapsed)),
                 kv,
                 iterations: Vec::new(),
-                distribution: None,
                 hotpath: None,
             }),
             wall: Some(capture.elapsed),

@@ -1,4 +1,4 @@
-//! PMTiles statistics and tile-coordinate sampling over elivagar's reader.
+//! PMTiles statistics over elivagar's reader.
 //!
 //! Header decoding and directory validation belong to elivagar's reader; this
 //! adapter reads the typed header and the validated runs.
@@ -115,31 +115,6 @@ pub fn run(path: &str) -> Result<(), DevError> {
     Ok(())
 }
 
-/// Sample up to 20 tile coordinates from the linked reader's directory runs.
-/// Zoom levels and coordinates use elivagar's shared PMTiles addressing math.
-pub fn sample_tile_coords(path: &Path) -> Result<Vec<(u32, u32, u32)>, DevError> {
-    let (_, entries) = read_all_entries(path)?;
-    let mut by_zoom: HashMap<u8, Vec<u64>> = HashMap::new();
-    for entry in entries {
-        let (zoom, _, _) = tile_id_to_zxy(entry.tile_id);
-        by_zoom.entry(zoom).or_default().push(entry.tile_id);
-    }
-
-    let mut zooms: Vec<u8> = by_zoom.keys().copied().collect();
-    zooms.sort_unstable();
-    let selected_zooms = pick_spread(&zooms, 5);
-    let mut coords = Vec::new();
-    for zoom in selected_zooms {
-        if let Some(ids) = by_zoom.get(&zoom) {
-            for tile_id in pick_spread(ids, 4) {
-                let (_, x, y) = tile_id_to_zxy(tile_id);
-                coords.push((u32::from(zoom), x, y));
-            }
-        }
-    }
-    Ok(coords)
-}
-
 /// The header and every run. elivagar's reader refuses an unsupported
 /// directory compression and any section, leaf pointer, blob or run outside
 /// its bounds.
@@ -153,19 +128,6 @@ fn read_all_entries(path: &Path) -> Result<(Header, Vec<RawDirEntry>), DevError>
 
 fn archive_error(path: &Path, error: &std::io::Error) -> DevError {
     DevError::Config(format!("{}: {error}", path.display()))
-}
-
-fn pick_spread<T: Copy>(items: &[T], count: usize) -> Vec<T> {
-    let len = items.len();
-    if len == 0 || count == 0 {
-        return Vec::new();
-    }
-    if count >= len {
-        return items.to_vec();
-    }
-    (0..count)
-        .map(|index| items[index * (len - 1) / (count - 1)])
-        .collect()
 }
 
 fn fmt_int(number: u64) -> String {

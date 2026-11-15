@@ -1364,47 +1364,6 @@ Examples:
         variant: String,
     },
 
-    // ----- nidhogg commands (display_order = 4) -----
-    /// API query benchmark
-    #[command(name = "api", display_order = 4)]
-    RunApi {
-        #[command(flatten)]
-        mode: ModeArgs,
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
-        /// Specific query name to benchmark
-        #[arg(long)]
-        query: Option<String>,
-    },
-    /// Ingest benchmark
-    #[command(name = "nid-ingest", display_order = 4)]
-    RunNidIngest {
-        #[command(flatten)]
-        mode: ModeArgs,
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
-        /// PBF variant to use
-        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
-        variant: String,
-    },
-    /// Tile serving benchmark
-    #[command(name = "tiles", display_order = 4)]
-    RunTiles {
-        #[command(flatten)]
-        mode: ModeArgs,
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
-        /// PMTiles variant from config
-        #[arg(long)]
-        tiles: Option<String>,
-        /// Use io_uring for tile serving
-        #[arg(long)]
-        uring: bool,
-    },
-
     // ----- generic commands (display_order = 5) -----
     /// Generic hotpath for projects without dedicated modules
     #[command(name = "generic-hotpath", display_order = 5)]
@@ -1420,12 +1379,12 @@ Examples:
     },
 
     // ----- suites (display_order = 6) -----
-    /// Run a full benchmark suite (pbfhogg, elivagar, or nidhogg)
+    /// Run a full benchmark suite (pbfhogg or elivagar)
     #[command(name = "suite", display_order = 6)]
     Suite {
         #[command(flatten)]
         mode: ModeArgs,
-        /// Suite name: pbfhogg, elivagar, or nidhogg
+        /// Suite name: pbfhogg or elivagar
         name: String,
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = DEFAULT_DATASET)]
@@ -1977,7 +1936,7 @@ Examples:
         #[arg(short = 'f', long)]
         force: bool,
     },
-    /// Verify elivagar or nidhogg output.
+    /// Verify elivagar output.
     #[command(display_order = 11)]
     Verify {
         /// Stream every check's full detail. Default is quiet on pass (one
@@ -1985,10 +1944,6 @@ Examples:
         /// detail is replayed). `-v` also shows build output.
         #[arg(long, short = 'v')]
         verbose: bool,
-
-        /// Build and verify an old commit via git worktree
-        #[arg(long)]
-        commit: Option<String>,
 
         #[command(subcommand)]
         verify: VerifyCommand,
@@ -2183,104 +2138,6 @@ In depth: `brokkr man elivagar`.",
         /// PMTiles file(s) to analyze
         #[arg(required = true)]
         files: Vec<String>,
-    },
-    /// Start the server
-    #[command(
-        display_order = 40,
-        long_about = "\
-Start the nidhogg server. Builds the binary, kills any existing instance, \
-spawns a background process, and waits for the health endpoint. \
-Stop it with `brokkr stop`.
-
-Use --dataset to select which dataset from brokkr.toml to serve. The \
-dataset determines what features are available:
-
-  brokkr serve --dataset denmark    query + geocode + tiles (has both)
-  brokkr serve --dataset norway     tiles only (has pmtiles, no data_dir)
-
-The other flags (--data-dir, --tiles) override or supplement what the \
-dataset provides. You almost always just need --dataset.
-
-Tiles (--tiles):
-  Omitted        Auto-selects if the dataset has exactly one pmtiles \
-entry, skipped if none configured
-  <variant>      Looks up pmtiles.<variant> in the dataset's config \
-(e.g. \"elivagar\")
-  <path>         Direct file path (detected by / or .pmtiles extension)
-  none           Explicitly disables tile serving even if dataset has pmtiles
-
-Data directory (--data-dir):
-  Omitted        Resolved from the dataset's data_dir field in brokkr.toml
-  <dir>          Override with an explicit directory path
-
-If neither data_dir nor tiles are available (from the dataset or overrides), \
-the server has nothing to serve and will error.
-
-Examples:
-  brokkr serve                                  # denmark (default), auto-detect
-  brokkr serve --dataset norway                 # tiles only (no data_dir)
-  brokkr serve --dataset denmark --tiles none   # query + geocode, no tiles
-  brokkr serve --tiles elivagar                 # explicit pmtiles variant
-  brokkr serve --tiles ./data/custom.pmtiles    # direct file path
-  brokkr serve --data-dir /mnt/fast/nidhogg     # override data directory
-
-In depth: `brokkr man nidhogg`."
-    )]
-    Serve {
-        /// Override data directory path (ingested disk format).
-        /// If omitted, resolved from the dataset's data_dir in brokkr.toml.
-        /// When the dataset has no data_dir, the server starts without a
-        /// disk store (tiles-only mode).
-        #[arg(long, value_name = "DIR")]
-        data_dir: Option<String>,
-
-        /// Dataset name from brokkr.toml
-        #[arg(long, value_name = "NAME", default_value = DEFAULT_DATASET)]
-        dataset: String,
-
-        /// PMTiles to serve: a variant name from config, a file path, or
-        /// "none" to disable. Auto-selects if the dataset has exactly one
-        /// pmtiles entry; skipped if none are configured.
-        #[arg(long, value_name = "VARIANT|PATH|none")]
-        tiles: Option<String>,
-    },
-    /// Stop the server
-    #[command(display_order = 41)]
-    Stop,
-    /// Check server status
-    #[command(display_order = 42)]
-    Status,
-    /// Ingest a PBF into disk format
-    #[command(display_order = 43)]
-    Ingest {
-        /// PBF variant to use (e.g. raw, indexed, altw)
-        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
-        variant: String,
-
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
-    },
-    /// Run diff application
-    #[command(display_order = 44)]
-    Update {
-        /// Arguments passed to nidhogg-update
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Send a test query
-    #[command(display_order = 45)]
-    Query {
-        /// JSON query body, including a bbox inside the served dataset
-        #[arg(required = true)]
-        json: Option<String>,
-    },
-    /// Test geocoding
-    #[command(display_order = 46)]
-    Geocode {
-        /// Search term (default: Kobenhavn)
-        #[arg(default_value = "København")]
-        term: String,
     },
     // ----- visual testing commands (litehtml + sluggrs, display_order = 50) -----
     /// Run visual tests against reference artifacts.
@@ -3160,9 +3017,8 @@ pub(crate) enum VerifyCommand {
     /// `[--dataset D] [--variant V] [--commit H | --file P]` resolver as
     /// `pmtiles-inspect`/`diag`/`svg`/`regress`. It reads the archive with the
     /// current binary, so `--commit` picks which file to open, not which
-    /// toolchain to build - unlike `brokkr verify --commit` on the nidhogg
-    /// subcommands. `--file` is the escape hatch for archives that are not
-    /// dataset output at all, such as the world artifact
+    /// toolchain to build. `--file` is the escape hatch for archives that are
+    /// not dataset output at all, such as the world artifact
     /// `data/ocean-tiles.pmtiles`.
     #[command(name = "pmtiles", display_order = 15)]
     ElivVerify {
@@ -3186,28 +3042,6 @@ pub(crate) enum VerifyCommand {
         /// artifact addresses ~23x more tiles than it stores payloads).
         #[arg(long)]
         unique_payloads: bool,
-    },
-
-    /// Batch query verification
-    #[command(display_order = 20)]
-    Batch {
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
-    },
-    /// Geocode verification
-    #[command(display_order = 21)]
-    NidGeocode {
-        /// Search terms to test (at least one, known to the served dataset)
-        #[arg(trailing_var_arg = true, required = true)]
-        queries: Vec<String>,
-    },
-    /// Read-only filesystem verification
-    #[command(display_order = 22)]
-    Readonly {
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
     },
 }
 

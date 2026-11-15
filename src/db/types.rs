@@ -380,9 +380,10 @@ impl Wall {
     }
 }
 
-/// Distribution statistics from `harness.run_distribution()`.
-/// Historical rows without microsecond columns retain millisecond-only
-/// precision in each value.
+/// The min/p50/p95/max summary a stored `run_distribution` child row holds.
+/// Nothing writes one now: the retired nidhogg `api` bench was the only
+/// producer, and its rows keep reading. Historical rows without microsecond
+/// columns retain millisecond-only precision in each value.
 #[derive(Clone)]
 pub struct Distribution {
     pub samples: i64,
@@ -702,7 +703,6 @@ pub struct RunRow {
     /// summary, which is a different question. `elapsed` is the best of these;
     /// keeping them lets a reader see drift *within* one row.
     pub iterations: Vec<Wall>,
-    pub distribution: Option<Distribution>,
     pub hotpath: Option<HotpathData>,
 }
 
@@ -906,7 +906,6 @@ impl RunRowBuilder {
                 stop_marker: None,
                 kv: Vec::new(),
                 iterations: Vec::new(),
-                distribution: None,
                 hotpath: None,
             },
         }

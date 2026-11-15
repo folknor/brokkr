@@ -129,7 +129,7 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
     )?;
     let run_id = conn.last_insert_rowid();
 
-    insert_timings(conn, run_id, row)?;
+    insert_iterations(conn, run_id, row)?;
 
     // Key-value pairs. Last one wins: `build_row` appends its sources in
     // increasing precedence (metadata, env capture, `prev.*`, then the run's
@@ -147,30 +147,13 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
     Ok(short_uuid(uuid))
 }
 
-/// The `run_distribution` and `run_iterations` child rows.
-fn insert_timings(conn: &rusqlite::Connection, run_id: i64, row: &RunRow) -> Result<(), DevError> {
-    // Distribution child row. The microsecond columns stay NULL when the
-    // distribution never measured them.
-    if let Some(ref dist) = row.distribution {
-        conn.execute(
-            "INSERT INTO run_distribution \
-             (run_id, samples, min_ms, p50_ms, p95_ms, max_ms, min_us, p50_us, p95_us, max_us) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            rusqlite::params![
-                run_id,
-                dist.samples,
-                dist.min.ms(),
-                dist.p50.ms(),
-                dist.p95.ms(),
-                dist.max.ms(),
-                dist.min.micros(),
-                dist.p50.micros(),
-                dist.p95.micros(),
-                dist.max.micros(),
-            ],
-        )?;
-    }
-
+/// The `run_iterations` child rows. No row carries a `run_distribution`
+/// summary any more; the stored ones keep reading and deleting.
+fn insert_iterations(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+    row: &RunRow,
+) -> Result<(), DevError> {
     // Each per-iteration wall keeps its own precision until this SQL boundary.
     for (run_idx, wall) in row.iterations.iter().enumerate() {
         conn.execute(

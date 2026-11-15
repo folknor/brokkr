@@ -47,8 +47,8 @@
 //! iterations of a script bench of any project, and the recursive removals
 //! of every configured directory such an iteration can sit under (any
 //! project's measured scratch trees, elivagar's scratch, `tilegen_tmp` and
-//! calibrands, nidhogg's ingest output). brokkr's own fixed-name state files
-//! stay outside it, so a lease store problem never stops them; a broken
+//! calibrands, the ingest outputs the retired nidhogg commands left).
+//! brokkr's own fixed-name state files stay outside it, so a lease store problem never stops them; a broken
 //! store does keep those configured trees, which is the safe direction.
 //!
 //! The guarantee is for cooperating brokkr processes of one user on one host

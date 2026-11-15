@@ -5,15 +5,12 @@
 
 use crate::build::BuildKind;
 use std::path::Path;
-use std::time::Duration;
 
 use self::execution::{Iteration, Measurement};
 use self::record::format_storage_notes;
-use self::wall::{
-    WallSource, bench_ordering_key, elapsed_to_ms, elapsed_to_us, summarize_distribution,
-};
+use self::wall::WallSource;
 use crate::config;
-use crate::db::{Distribution, HotpathData, KvPair, ResultsDb};
+use crate::db::{HotpathData, KvPair, ResultsDb};
 use crate::error::DevError;
 use crate::git::GitInfo;
 use crate::lockfile::LockGuard;
@@ -243,9 +240,8 @@ pub struct BenchResult {
     /// 100-200us, which integer milliseconds flatten to nothing. Filled by
     /// the stderr-kv path (from a fractional `elapsed_ms=6.847` line) and by
     /// the paths brokkr times itself from an exact `Duration`
-    /// (`run_external`/`run_external_ok`, `BenchHarness::capture_hotpath`, and
-    /// `run_distribution`, whose closures hand back a `Duration` and which
-    /// records the fastest sample here). `run_internal` carries whatever its
+    /// (`run_external`/`run_external_ok`, `BenchHarness::capture_hotpath`).
+    /// `run_internal` carries whatever its
     /// closure returned; a closure that only had milliseconds leaves it
     /// `None`, and `elapsed_ms` remains the only timing available.
     ///
@@ -265,7 +261,6 @@ pub struct BenchResult {
     /// whether the run drifted (iteration 3 slowest) or started cold
     /// (iteration 1 slowest). Never sort this.
     pub iterations: Vec<i64>,
-    pub distribution: Option<Distribution>,
     pub hotpath: Option<HotpathData>,
 }
 
@@ -653,35 +648,6 @@ impl BenchHarness {
         })
     }
 
-    /// Collect all closure durations and summarize the same ordered iterations.
-    pub fn run_distribution<F>(&self, config: &BenchConfig, f: F) -> Result<BenchResult, DevError>
-    where
-        F: Fn(usize) -> Result<Duration, DevError>,
-    {
-        let mut measurement = self.measure(config, None, WallSource::Closure, false, |i, _| {
-            let wall = f(i)?;
-            Ok(Iteration::from_result(BenchResult {
-                elapsed_ms: elapsed_to_ms(&wall),
-                elapsed_us: Some(elapsed_to_us(&wall)),
-                kv: Vec::new(),
-                iterations: Vec::new(),
-                distribution: None,
-                hotpath: None,
-            }))
-        })?;
-        self.record(config, &mut measurement, |result, iterations| {
-            let mut samples: Vec<i64> = iterations
-                .iter()
-                .filter_map(|i| i.result.as_ref())
-                .map(bench_ordering_key)
-                .collect();
-            samples.push(bench_ordering_key(result));
-            result.distribution =
-                summarize_distribution(&samples).map(|(distribution, _)| distribution);
-            Ok(())
-        })
-    }
-
     pub(crate) fn run_external_with_kv(
         &self,
         config: &BenchConfig,
@@ -747,9 +713,7 @@ fn config_for(config: &BenchConfig, invocation: &Invocation<'_>) -> BenchConfig 
 
 mod argv;
 pub use argv::format_cli_args;
-pub(crate) use argv::{
-    Executable, ExternalTool, Invocation, ResolvedExecutable,
-};
+pub(crate) use argv::{Executable, ExternalTool, Invocation, ResolvedExecutable};
 pub(crate) mod capture;
 pub(crate) mod execution;
 pub(crate) mod kv;

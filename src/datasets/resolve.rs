@@ -207,20 +207,6 @@ fn select_one<'a, E>(
     Ok(entries.iter().next().expect("exactly one entry"))
 }
 
-/// Generic default resolver: auto-select if exactly one entry, error if zero or multiple.
-fn resolve_default_entry_path<E: FileEntry>(
-    entries: &HashMap<String, E>,
-    dataset: &str,
-    kind: &str,
-    flag: &str,
-    data_dir: &Path,
-    origin: Option<&str>,
-    project_root: &Path,
-) -> Result<PathBuf, ResolveError> {
-    let (key, _) = select_one(entries, &format!("dataset '{dataset}'"), kind, flag)?;
-    resolve_entry_path(entries, key, dataset, kind, data_dir, origin, project_root)
-}
-
 /// Look up a dataset by name, returning it and its origin.
 ///
 /// This resolved table is authoritative for both paths and entry metadata.
@@ -529,28 +515,6 @@ pub(crate) fn resolve_osc_range(
     Ok(resolved)
 }
 
-/// Resolve the default OSC path when no --osc-seq is specified.
-///
-/// If exactly one OSC is configured, returns it. If multiple exist, errors
-/// with a message listing available sequence numbers.
-#[cfg(test)]
-pub(crate) fn resolve_default_osc_path(
-    dataset: &str,
-    paths: &config::ResolvedPaths,
-    project_root: &Path,
-) -> Result<PathBuf, ResolveError> {
-    let ds = get_dataset(dataset, paths)?;
-    resolve_default_entry_path(
-        &ds.osc,
-        dataset,
-        "osc",
-        "--osc-seq",
-        &paths.data_dir,
-        ds.origin.as_deref(),
-        project_root,
-    )
-}
-
 /// Resolve the already-parsed bbox from --bbox or dataset config.
 pub(crate) fn resolve_bbox(
     bbox: Option<&Bbox>,
@@ -567,69 +531,6 @@ pub(crate) fn resolve_bbox(
     ds.bbox
         .clone()
         .ok_or_else(|| ResolveError::MissingBbox(dataset.to_owned()))
-}
-
-/// Resolve the PMTiles path from --dataset + --tiles variant.
-pub(crate) fn resolve_pmtiles_path(
-    dataset: &str,
-    variant: &str,
-    paths: &config::ResolvedPaths,
-    project_root: &Path,
-) -> Result<PathBuf, ResolveError> {
-    let ds = get_dataset(dataset, paths)?;
-    resolve_entry_path(
-        &ds.pmtiles,
-        variant,
-        dataset,
-        "pmtiles variant",
-        &paths.data_dir,
-        ds.origin.as_deref(),
-        project_root,
-    )
-}
-
-/// Resolve the default PMTiles path when no variant is specified.
-///
-/// If exactly one PMTiles entry is configured, returns it. If multiple exist,
-/// errors with a message listing available variants.
-pub(crate) fn resolve_default_pmtiles_path(
-    dataset: &str,
-    paths: &config::ResolvedPaths,
-    project_root: &Path,
-) -> Result<PathBuf, ResolveError> {
-    let ds = get_dataset(dataset, paths)?;
-    resolve_default_entry_path(
-        &ds.pmtiles,
-        dataset,
-        "pmtiles",
-        "--tiles",
-        &paths.data_dir,
-        ds.origin.as_deref(),
-        project_root,
-    )
-}
-
-/// Resolve PMTiles path and its size in one call.
-pub(crate) fn resolve_pmtiles_with_size(
-    dataset: &str,
-    variant: &str,
-    paths: &config::ResolvedPaths,
-    project_root: &Path,
-) -> Result<(PathBuf, f64), ResolveError> {
-    let path = resolve_pmtiles_path(dataset, variant, paths, project_root)?;
-    let mb = file_size_mb(&path)?;
-    Ok((path, mb))
-}
-
-/// Resolve default PMTiles path and its size in one call.
-pub(crate) fn resolve_default_pmtiles_with_size(
-    dataset: &str,
-    paths: &config::ResolvedPaths,
-    project_root: &Path,
-) -> Result<(PathBuf, f64), ResolveError> {
-    let path = resolve_default_pmtiles_path(dataset, paths, project_root)?;
-    let mb = file_size_mb(&path)?;
-    Ok((path, mb))
 }
 
 /// Get file size in MB (decimal, consistent with bench scripts).

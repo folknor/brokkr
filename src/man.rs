@@ -159,7 +159,9 @@ const TOPICS: &[Topic] = &[
         name: "datasets",
         summary: "[<host>.datasets.*] pbf/osc/pmtiles entries and variant selection",
         content: include_str!("../docs/brokkr.toml.datasets.md"),
-        commands: &[CommandId::Verify],
+        // Dataset tables are read by `brokkr env` and the script-bench
+        // resolved view in every project, so the topic is everyone's.
+        commands: &[CommandId::Env],
     },
     Topic {
         name: "elivagar-config",
@@ -184,12 +186,6 @@ const TOPICS: &[Topic] = &[
         summary: "how pbfhogg and elivagar's dispatch layers differ",
         content: include_str!("../docs/projects/pbfhogg-vs-elivagar.md"),
         commands: &[CommandId::Read, CommandId::Tilegen],
-    },
-    Topic {
-        name: "nidhogg",
-        summary: "nidhogg commands, server lifecycle, the API client",
-        content: include_str!("../docs/projects/nidhogg.md"),
-        commands: &[CommandId::Serve],
     },
     Topic {
         name: "visual",

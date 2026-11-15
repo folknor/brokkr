@@ -40,7 +40,8 @@ were omitted so the cap is visible.
 Every row has an integer `elapsed_ms`. Most rows also have `elapsed_us`, the
 exact wall in microseconds: the external and hotpath paths time it
 themselves, the stderr-kv path takes it from a fractional `elapsed_ms=` line,
-and distribution runs (nidhogg `api`) record the fastest sample. Where
+and the stored distribution rows of the retired nidhogg `api` bench carry
+their fastest sample. Where
 `elapsed_us` exists, `elapsed_ms` is that value rounded to nearest.
 
 Every view - the table, a single run, `--compare` - prints the microsecond
@@ -51,7 +52,7 @@ same row. Rows recorded before a path learned microseconds have no
 `elapsed_us` and print as integers; that detail was never measured, so it is
 never invented from `elapsed_ms * 1000`.
 
-The same rule applies to each distribution statistic. Per-iteration walls keep
+The same rule applies to each statistic of a stored distribution row. Per-iteration walls keep
 their precision individually: exact samples print with three decimals and
 legacy samples print as integers. The list remains in execution order.
 
@@ -138,8 +139,8 @@ labelled block instead of a table row: full multi-line `cli_args`, the brokkr
 argv array, and the sidecar hint folded in as a field. For a `--bench N` row it
 adds the per-iteration walls, and the `prev.*` provenance of what ran
 immediately before it - the neighbouring run is often the explanation for an
-outlier. A distribution row (nidhogg `api`) also gets its `samples`, `min`,
-`p50`, `p95` and `max`.
+outlier. A stored distribution row (the retired nidhogg `api` bench's) also
+gets its `samples`, `min`, `p50`, `p95` and `max`.
 
 If `--stop` was configured, the block shows the requested marker separately
 from the marker that actually stopped the child. A request that never fired

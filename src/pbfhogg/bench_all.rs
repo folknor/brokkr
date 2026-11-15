@@ -429,7 +429,6 @@ fn run_osmpbf_baseline(
                         elapsed_us: None,
                         kv: kv.clone(),
                         iterations: Vec::new(),
-                        distribution: None,
                         hotpath: None,
                     })
                 })

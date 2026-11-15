@@ -223,33 +223,6 @@ pub fn run_captured(program: &str, args: &[&str], cwd: &Path) -> Result<Captured
     run_captured_with_env(program, args, cwd, &[])
 }
 
-/// Capture a plain child while replaying selected streams as pipe chunks arrive.
-/// Captured bytes and ending classification retain the ordinary capture contract.
-pub fn run_streamed(
-    program: &str,
-    args: &[&str],
-    cwd: &Path,
-    replay: Replay,
-) -> Result<CapturedOutput, DevError> {
-    let options = ChildOptions {
-        replay,
-        ..ChildOptions::DEFAULT
-    };
-    let dc = run_captured_limited(
-        program,
-        args,
-        cwd,
-        &[],
-        ChildLimit::None,
-        None,
-        ChildIsolation::Inherit,
-        SpawnProfile::Plain,
-        options,
-        false,
-    )?;
-    captured_without_incomplete_output(program, dc, options)
-}
-
 /// Run `cargo` with captured stdio. The spawn carries the cargo profile, so
 /// `[cargo_env]` is evaluated for it; `phase` is the `check` phase a recorded
 /// evaluation failure is attributed to, when there is one.
@@ -553,7 +526,6 @@ fn drain_stamped<R>(
     start: Instant,
     last_output_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
     cap: usize,
-    replay: Option<fn(&[u8])>,
 ) -> Drain
 where
     R: std::io::Read + std::os::fd::AsRawFd + Send + 'static,
@@ -572,9 +544,6 @@ where
         while let Some(n) =
             crate::fs_probe::read_unless_cancelled(&mut reader, &mut chunk, &cancel_t)
         {
-            if let Some(replay) = replay {
-                replay(&chunk[..n]);
-            }
             match buf_t.lock() {
                 Ok(mut b) => {
                     let room = cap.saturating_sub(b.len());
@@ -700,36 +669,11 @@ impl CaptureCap {
     };
 }
 
-/// Which captured child streams are also replayed live by the console channel.
-#[derive(Clone, Copy)]
-pub(crate) enum Replay {
-    None,
-    Stderr,
-    Both,
-}
-
-impl Replay {
-    fn stdout_printer(self) -> Option<fn(&[u8])> {
-        match self {
-            Self::Both => Some(super::console::raw_stdout_bytes),
-            Self::None | Self::Stderr => None,
-        }
-    }
-
-    fn stderr_printer(self) -> Option<fn(&[u8])> {
-        match self {
-            Self::Both | Self::Stderr => Some(super::console::raw_stderr_bytes),
-            Self::None => None,
-        }
-    }
-}
-
 /// Per-run capture and shutdown policy for the shared child supervisor.
 /// Callers that own a separate child-lifecycle budget can override the grace
 /// periods here instead of inheriting the shared defaults.
 #[derive(Clone, Copy)]
 pub(crate) struct ChildOptions {
-    pub replay: Replay,
     pub capture_cap: CaptureCap,
     pub poll_interval: Duration,
     pub sigterm_grace: Duration,
@@ -745,7 +689,6 @@ pub(crate) struct ChildOptions {
 
 impl ChildOptions {
     pub(crate) const DEFAULT: Self = Self {
-        replay: Replay::None,
         capture_cap: CaptureCap::DEFAULT,
         poll_interval: DEADLINE_POLL_INTERVAL,
         sigterm_grace: SIGTERM_FORWARD_BUDGET,
@@ -769,7 +712,7 @@ impl ChildOptions {
     };
 }
 
-/// Start the two captured pipe readers under one replay and capture policy.
+/// Start the two captured pipe readers under one capture policy.
 fn start_drains(
     child: &mut std::process::Child,
     start: Instant,
@@ -782,7 +725,6 @@ fn start_drains(
             start,
             std::sync::Arc::clone(last_output_ms),
             options.capture_cap.stdout,
-            options.replay.stdout_printer(),
         )
     });
     let stderr_thread = child.stderr.take().map(|pipe| {
@@ -791,7 +733,6 @@ fn start_drains(
             start,
             std::sync::Arc::clone(last_output_ms),
             options.capture_cap.stderr,
-            options.replay.stderr_printer(),
         )
     });
 

@@ -2141,7 +2141,12 @@ mod tests {
             .collect();
         assert_eq!(
             kept,
-            [("counter", 5), ("marker", 4), ("terminal", 7), ("marker", 9)],
+            [
+                ("counter", 5),
+                ("marker", 4),
+                ("terminal", 7),
+                ("marker", 9)
+            ],
             "the sealing emission and %b's counter went past the counter budget"
         );
         assert!(capture.loss.records_capped);

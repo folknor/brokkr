@@ -212,7 +212,6 @@ scratch = "data/scratch"
 output = "data/tilegen"   # durable tilegen output store (map-data projects)
 target = "target"
 worktree_keep = 6         # persistent --commit worktrees kept before LRU eviction
-port = 3033
 drives.source = "nvme"
 drives.data = "ssd"
 features = ["linux-direct-io", "linux-io-uring"]
@@ -267,18 +266,16 @@ swallowing `raw-fast`) and evict them. `brokkr clean --archives` uses the same
 store pruning operation with its configured keep count and dry-run policy.
 
 **Host feature policy.** Host `features` are added to measured-request builds
-through the shared build context, to the `passthrough`, `verify`, `serve`,
-`ingest`, and `update` paths, and to a script bench's build (`brokkr bench`,
-before the bench's own `features`). Standalone `run`, `install`, `check`, `clippy`,
+through the shared build context, to the `passthrough` and `verify` paths,
+and to a script bench's build (`brokkr bench`, before the bench's own
+`features`). Standalone `run`, `install`, `check`, `clippy`,
 `test`, and Criterion `crit` use their own cargo/default or sweep feature
 selection and do not inherit host features. CLI `--features` are additive to
 host features in paths that apply them, with duplicates removed. This is the
 complete policy for which Cargo builds inherit host features. Host `port` is
-the nidhogg server port (default 3033) that
-`serve`/`status`/`query`/`geocode`/`verify`/the benches
-target; brokkr passes it to the server it spawns as `PORT`, but never reads
-`PORT` from its own environment - an unrelated `PORT` in the shell must not
-retarget the commands.
+a port for the project's own tools, which read it from the composed config
+(nidhogg's do). No built-in command reads it; a script bench sees it in the
+resolved view's `host` table (`brokkr man bench-config`).
 Reserved top-level keys parsed as config sections, or consumed by composition:
 `project`, `include`, `host`,
 `litehtml`, `sluggrs`, `ratatoskr`, `piners`, `dellingr`, `mogwai`, `check`,

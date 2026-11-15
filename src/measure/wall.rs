@@ -1,8 +1,7 @@
-//! Timing conversions, ranking and distribution summaries.
+//! Timing conversions and ranking.
 
 use super::BenchResult;
-use crate::db::{Distribution, Wall};
-use crate::sidecar::linear_percentile as percentile;
+use crate::db::Wall;
 use std::time::Duration;
 
 /// The stored wall for a harness result: exact when the path measured
@@ -28,30 +27,6 @@ pub fn elapsed_to_ms(duration: &Duration) -> i64 {
 /// than millisecond ties.
 pub fn elapsed_to_us(duration: &Duration) -> i64 {
     i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
-}
-
-/// Summarise distribution samples, given in microseconds in any order, as
-/// min/p50/p95/max. Returns the summary and the fastest sample, or `None`
-/// when there are no samples.
-///
-/// The percentiles are taken over the microseconds and kept exact; the
-/// millisecond column is derived from them by [`Wall::ms`]'s nearest
-/// rounding, so the two columns of one row can never disagree.
-pub(super) fn summarize_distribution(samples_us: &[i64]) -> Option<(Distribution, i64)> {
-    if samples_us.is_empty() {
-        return None;
-    }
-    let mut sorted = samples_us.to_vec();
-    sorted.sort_unstable();
-    let min = percentile(&sorted, 0);
-    let dist = Distribution {
-        samples: i64::try_from(sorted.len()).unwrap_or(i64::MAX),
-        min: Wall::from_micros(min),
-        p50: Wall::from_micros(percentile(&sorted, 50)),
-        p95: Wall::from_micros(percentile(&sorted, 95)),
-        max: Wall::from_micros(percentile(&sorted, 100)),
-    };
-    Some((dist, min))
 }
 
 /// Keep the first minimum, comparing exact walls where available.

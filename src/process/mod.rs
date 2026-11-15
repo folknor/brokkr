@@ -13,7 +13,7 @@ pub use self::helpers::{signal_pid, signal_process_group, snapshot_proc};
 pub use self::identity::{BootId, HostScope, NsInode, Pid, ProcIdentity, StartTicks};
 pub use self::reap::{
     Delivery, Generation, PidfdRefusal, ReaperExemptions, VerifiedProcess, generation,
-    kill_verified, pidfd_send_signal,
+    kill_verified,
 };
 pub use self::table::{ProcStat, ProcTable};
 

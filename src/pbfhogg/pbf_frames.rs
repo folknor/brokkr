@@ -577,7 +577,11 @@ mod tests {
     #[test]
     fn claims_stream_per_blob_and_say_whether_each_is_indexed() {
         let bytes = file(
-            &[vec![index(3, 0, 5, 90, 10)], vec![], vec![index(1, 2, 3, 3, 1)]],
+            &[
+                vec![index(3, 0, 5, 90, 10)],
+                vec![],
+                vec![index(1, 2, 3, 3, 1)],
+            ],
             &["OsmSchema-V0.6", "DenseNodes"],
         );
         assert_eq!(run("stream", &bytes).unwrap(), [true, false, true]);
@@ -646,7 +650,10 @@ mod tests {
         assert!(run("twice", &twice).is_err(), "second header");
         let mut data_first = Vec::new();
         frame("OSMData", &[&index(3, 0, 1, 2, 2)], b"x", &mut data_first);
-        assert!(run("data-first", &data_first).is_err(), "data before header");
+        assert!(
+            run("data-first", &data_first).is_err(),
+            "data before header"
+        );
         let mut zero = vec![0u8; 4];
         zero.extend_from_slice(&bytes);
         assert!(run("zero", &zero).is_err(), "zero header length");

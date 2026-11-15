@@ -20,13 +20,14 @@ mod persistence {
         clippy::useless_vec
     )]
     use crate::bench_variants::*;
-    use crate::db::{KvPair, KvValue, Wall};
+    use crate::db::{KvPair, KvValue};
     use crate::git::GitInfo;
     use crate::measure::*;
     use crate::measure::{argv::*, execution::*, kv::*, record::*, wall::*};
     use crate::sidecar::linear_percentile as percentile;
     use crate::sidecar_backup::*;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     // -----------------------------------------------------------------------
     // run progress and sidecar summary lines
@@ -57,8 +58,8 @@ mod persistence {
 
     #[test]
     fn run_variants_refuses_an_empty_selection() {
-        // `brokkr api --query typo --bench` filtered the query list to nothing
-        // and used to record no rows and exit 0.
+        // The retired nidhogg `brokkr api --query typo --bench` filtered its
+        // query list to nothing and used to record no rows and exit 0.
         let mut calls = 0;
         let result = run_variants("query", &[], |_| {
             calls += 1;
@@ -125,8 +126,8 @@ mod persistence {
         // 6.847 ms is 7 ms, not 6. The rounded value is what every existing
         // query and historical row sees, so it must not read as faster than
         // the run was.
-        let (ms, _kv) = parse_kv_lines(b"elapsed_ms=6.847\n");
-        assert_eq!(ms, Some(7));
+        let (us, _kv) = parse_kv_lines_us(b"elapsed_ms=6.847\n");
+        assert_eq!(us.map(us_to_ms), Some(7));
     }
 
     #[test]
@@ -156,7 +157,6 @@ mod persistence {
             elapsed_us: Some(6947),
             kv: Vec::new(),
             iterations: Vec::new(),
-            distribution: None,
             hotpath: None,
         };
         let faster = BenchResult {
@@ -164,7 +164,6 @@ mod persistence {
             elapsed_us: Some(6847),
             kv: Vec::new(),
             iterations: Vec::new(),
-            distribution: None,
             hotpath: None,
         };
         assert_eq!(winning_index(Some((0, &slower)), 1, &faster), 1);
@@ -193,7 +192,6 @@ mod persistence {
             elapsed_us: None,
             kv: Vec::new(),
             iterations: Vec::new(),
-            distribution: None,
             hotpath: None,
         };
         let git = GitInfo {
@@ -205,78 +203,6 @@ mod persistence {
         assert!(line.contains("mode=bench"), "{line}");
         let line = format_result_line(&config, None, &result, &git);
         assert!(!line.contains("mode="), "{line}");
-    }
-
-    // -----------------------------------------------------------------------
-    // run_distribution's microsecond summary
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn distribution_keeps_sub_millisecond_samples() {
-        // The motivating bug: nidhogg API queries under half a millisecond
-        // recorded 0 at every percentile, because samples were rounded to
-        // whole milliseconds before the summary was taken.
-        let (dist, min_us) = summarize_distribution(&[312, 450, 298, 305]).unwrap();
-        assert_eq!(min_us, 298);
-        assert_eq!(dist.samples, 4);
-        assert_eq!(dist.min, Wall::from_micros(298));
-        // Sorted [298, 305, 312, 450]; pos 1.5 -> 308.5, rounded.
-        assert_eq!(dist.p50, Wall::from_micros(309));
-        // pos 2.85 -> 312 + 0.85 * 138 = 429.3.
-        assert_eq!(dist.p95, Wall::from_micros(429));
-        assert_eq!(dist.max, Wall::from_micros(450));
-        // The millisecond columns are the microseconds rounded - still 0 here,
-        // which is exactly why they cannot be the only record.
-        assert_eq!(
-            (dist.min.ms(), dist.p50.ms(), dist.p95.ms(), dist.max.ms()),
-            (0, 0, 0, 0)
-        );
-    }
-
-    #[test]
-    fn distribution_ms_fields_round_to_nearest() {
-        let (dist, _) = summarize_distribution(&[1_499, 1_500, 2_600]).unwrap();
-        assert_eq!(dist.min.ms(), 1);
-        assert_eq!(dist.p50.ms(), 2);
-        assert_eq!(dist.max.ms(), 3);
-    }
-
-    #[test]
-    fn distribution_of_nothing_is_refused() {
-        assert!(summarize_distribution(&[]).is_none());
-    }
-
-    #[test]
-    fn result_line_prints_fractional_distribution() {
-        let config = BenchConfig {
-            command: "api-bbox-small".into(),
-            input_file: None,
-            input_mb: None,
-            cargo_features: None,
-            external_build: None,
-            runs: 3,
-            cli_args: None,
-            metadata: Vec::new(),
-            arm_qualifier: None,
-        };
-        let (dist, min_us) = summarize_distribution(&[312, 298, 450]).unwrap();
-        let result = BenchResult {
-            elapsed_ms: dist.min.ms(),
-            elapsed_us: Some(min_us),
-            kv: Vec::new(),
-            iterations: vec![0, 0, 0],
-            distribution: Some(dist),
-            hotpath: None,
-        };
-        let git = GitInfo {
-            commit: "abc".parse().unwrap(),
-            subject: String::new(),
-            is_clean: true,
-        };
-        let line = format_result_line(&config, Some("bench"), &result, &git);
-        assert!(line.contains("elapsed_ms=0.298"), "{line}");
-        assert!(line.contains("min_ms=0.298"), "{line}");
-        assert!(line.contains("max_ms=0.450"), "{line}");
     }
 
     #[test]
@@ -595,7 +521,6 @@ mod persistence {
             elapsed_us: None,
             kv: vec![],
             iterations: vec![],
-            distribution: None,
             hotpath: None,
         };
         let winner = winning_index(None, 0, &candidate);
@@ -609,7 +534,6 @@ mod persistence {
             elapsed_us: None,
             kv: vec![],
             iterations: vec![],
-            distribution: None,
             hotpath: None,
         };
         let candidate = BenchResult {
@@ -617,7 +541,6 @@ mod persistence {
             elapsed_us: None,
             kv: vec![],
             iterations: vec![],
-            distribution: None,
             hotpath: None,
         };
         assert_eq!(
@@ -634,7 +557,6 @@ mod persistence {
             elapsed_us: None,
             kv: vec![],
             iterations: vec![],
-            distribution: None,
             hotpath: None,
         };
         let candidate = BenchResult {
@@ -642,7 +564,6 @@ mod persistence {
             elapsed_us: None,
             kv: vec![],
             iterations: vec![],
-            distribution: None,
             hotpath: None,
         };
         assert_eq!(
@@ -660,7 +581,6 @@ mod persistence {
             elapsed_us: None,
             kv: vec![KvPair::text("tag", "first")],
             iterations: vec![],
-            distribution: None,
             hotpath: None,
         };
         let candidate = BenchResult {
@@ -668,7 +588,6 @@ mod persistence {
             elapsed_us: None,
             kv: vec![KvPair::text("tag", "second")],
             iterations: vec![],
-            distribution: None,
             hotpath: None,
         };
         assert_eq!(

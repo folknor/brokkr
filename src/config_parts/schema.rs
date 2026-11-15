@@ -2038,6 +2038,10 @@ pub struct Dataset {
     /// IDs the pbfhogg getparents bench requests. Absent: the built-in list.
     #[serde(default)]
     pub getparents_ids: Option<ElementIdList>,
+    /// Retired: the ingested-store directory the retired nidhogg commands
+    /// served and ingested into. Still accepted so a config that sets it
+    /// loads; no built-in command reads it, and a script bench still sees it
+    /// in the resolved view.
     pub data_dir: Option<String>,
     /// PBF variants keyed by name (e.g. "raw", "indexed", "altw").
     /// These are the variants of the dataset's primary (legacy / `base`) snapshot.
@@ -2213,6 +2217,9 @@ pub struct HostConfig {
     /// command writes any more. Still accepted so a config that sets it loads;
     /// nothing reads it.
     pub verify_reference_budget: Option<crate::elivagar::tilegen_config::ByteSize>,
+    /// A port for the project's own tools: nidhogg's read it from the
+    /// composed config. No built-in command reads it; a script bench sees it
+    /// in the resolved view.
     pub port: Option<u16>,
     pub drives: Option<DriveConfig>,
     /// Cargo features to enable by default for all build commands on this host.

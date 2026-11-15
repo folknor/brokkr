@@ -32,8 +32,6 @@ pub(crate) enum ResolveError {
         seq: u64,
         range: crate::config::OscRange,
     },
-    MissingDataDir(String),
-    MissingDirectory(std::path::PathBuf),
     MissingFile {
         kind: String,
         path: std::path::PathBuf,
@@ -92,12 +90,6 @@ impl fmt::Display for ResolveError {
                 f,
                 "{scope} missing osc.{seq} (required by --osc-range {range})"
             ),
-            Self::MissingDataDir(dataset) => {
-                write!(f, "dataset '{dataset}' has no data_dir configured")
-            }
-            Self::MissingDirectory(path) => {
-                write!(f, "data directory not found: {}", path.display())
-            }
             Self::MissingFile { kind, path } => write!(
                 f,
                 "{} file not found: {}",

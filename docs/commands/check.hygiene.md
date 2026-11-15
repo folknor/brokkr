@@ -215,12 +215,12 @@ the holder itself over its control socket, so it works from the host against a
 sandboxed holder and between sandboxes:
 
 ```
-[lock]    brokkr (holding 29m24s, own CPU 1.2s, own RSS 19 MB): nidhogg verify batch ...
+[lock]    brokkr (holding 29m24s, own CPU 1.2s, own RSS 19 MB): elivagar verify pmtiles ...
 [lock]    root: ...
-[lock]    doing: verify batch (29m10s)
-[lock]      query (3m02s)
+[lock]    doing: verify pmtiles (29m10s)
+[lock]      verify (3m02s)
 [lock]    processes: 1 observed (sampled 248ms ago over 254ms): 0.98 cores, summed RSS 4.1 GB
-[lock]      PID 4242 nidhogg ... - 0.98 cores, CPU 2m55s, RSS 4.1 GB, up 3m02s, io r 2.1 GB w 800 MB [under verify batch]
+[lock]      PID 4242 elivagar ... - 0.98 cores, CPU 2m55s, RSS 4.1 GB, up 3m02s, io r 2.1 GB w 800 MB [under verify pmtiles]
 [lock]    cgroup brokkr-...: CPU 1h02m since entry 29m ago, now 1.01 cores, 3 member process(es)
 [lock]    last marker: STAGE2_START (12s ago)
 ```

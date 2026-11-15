@@ -20,7 +20,7 @@ brokkr <command> [--bench [N] | --hotpath [N] | --alloc [N]] [command options]
 
 Sidecar-enabled subprocess modes sample `/proc` metrics at 100ms and provide
 `BROKKR_MARKER_FIFO` for phase markers. Closure-only modes such as
-`run_internal` and `run_distribution` do not use a sidecar. Collected sidecar
+`run_internal` do not use a sidecar. Collected sidecar
 data is stored in `.brokkr/sidecar.db` (gitignored), including partial data
 when a measured child is OOM-killed.
 
@@ -29,16 +29,16 @@ the command name.
 
 ## Measurable commands per project
 
-The measurable commands are pbfhogg's data ops, elivagar's tilegen/etc., and
-nidhogg's query/ingest. Piners' `corpus` is **not** measurable: it takes no
+The measurable commands are pbfhogg's data ops and elivagar's tilegen/etc.
+Piners' `corpus` is **not** measurable: it takes no
 measurement flag, and its timing is the parity run row's `wall_ms` (why:
 `docs/commands/corpus.md`).
 
 ## Command plans
 
-Pbfhogg, elivagar and nidhogg use `src/measure/runner.rs`. Binary plans run a
+Pbfhogg and elivagar use `src/measure/runner.rs`. Binary plans run a
 built executable; external plans materialize tools outside the measured samples;
-HTTP/server lifecycle plans provide their own protocol operations. All use one
+lifecycle plans provide their own operations. All use one
 `MeasurementSession` for the lock, paths, optional build and request provenance.
 A binary plan's argv is resolved against the built executable before the
 first sample; that resolved invocation is what runs and what `cli_args`
@@ -46,25 +46,22 @@ records. Pbfhogg adds `--overwrite` there when the executable accepts it (see
 `docs/projects/pbfhogg.md`).
 
 Dry-run validates inputs and argv without acquiring a measurement session,
-building, downloading tools, starting servers, or creating run artifacts.
+building, downloading tools, or creating run artifacts.
 With nothing built, it prints the argv as planned, before any flag resolved
 against the executable. The planned argv is the one that runs: a lifecycle
-plan spawns its child with it (nidhogg's tiles server, elivagar's examples
-with the internal run count the mode gives them), and a plan with no single
-argv says what it will do instead (nidhogg's API bench prints its endpoint and
-selected queries; see `docs/projects/nidhogg.md`).
+plan spawns its child with it (elivagar's examples, with the internal run
+count the mode gives them).
 It still follows the command's lock policy, so a measured command can wait for
 the brokkr lock before it reports the plan.
 Input hash verification may refresh `.brokkr/hash_cache`; this validation cache
 is the sole permitted planning write. Elivagar's argv construction creates no
-directories. API dry-run derives queries without contacting the running
-server, and refuses a `--query` that selects none.
+directories.
 
 Run executes once without persisting result or sidecar records. Stored modes
 use the request's measurement mode and brokkr invocation; per-row fallback
 fields do not exist. Row command names and subprocess `cli_args` retain their
 previous spelling, except that pbfhogg rows gain `--overwrite` from builds that
-accept it (examples and HTTP/server lifecycles retain absent `cli_args`).
+accept it (example lifecycles retain absent `cli_args`).
 
 Declared sample scratch is reset before each sample and removed after success.
 A failed process, capture, or artifact promotion retains its current output.
@@ -116,10 +113,11 @@ from sample scratch. Tilegen's checkpoint directory remains available for
   features from `MeasureRequest::build_features`, which adds the mode's
   instrumentation feature.
 - `run_external(config, binary, args)` - subprocess timing
-- `run_distribution(config, closure)` - distribution timing
-  (min/p50/p95/max). The closure returns each sample as a `Duration`; the
-  summary is computed in microseconds and stored in both `run_distribution`'s
-  `*_us` columns and, rounded, its `*_ms` columns (see below).
+
+Nothing records a distribution (min/p50/p95/max) any more: the retired
+nidhogg `api` bench was its only producer. Its stored rows keep reading
+(`brokkr man results`), from `run_distribution`'s `*_us` columns where they
+exist and its `*_ms` columns otherwise.
 
 The mode a row records (`bench`/`hotpath`/`alloc`) comes from the harness,
 set once from the request; the same value prints as `mode=` on the `[result]`
@@ -128,18 +126,12 @@ line and lands in the sidecar provenance, so `brokkr sidecar` shows it.
 Where brokkr times the child itself (`run_external`, `capture_hotpath`) it
 keeps the exact wall as `elapsed_us` and picks best-of-N on it; `elapsed_ms`
 is that value rounded to the nearest millisecond, never floored - flooring
-reads every run as up to a millisecond faster than it was. `run_distribution`
-does the same with its samples: each is kept in microseconds, every percentile
-is taken over the microseconds, and the row's `elapsed_us` is the fastest
-sample. A sample under half a millisecond (a nidhogg API query) used to record
-0 ms at every percentile; the `*_ms` columns still read 0 for it, which is why
-they are not the only record. `run_internal` records whatever `elapsed_us` its
-closure returned, and integer milliseconds only when the closure had nothing
-finer.
+reads every run as up to a millisecond faster than it was. `run_internal`
+records whatever `elapsed_us` its closure returned, and integer milliseconds
+only when the closure had nothing finer.
 
-The `[result]` line prints `elapsed_ms=` and a distribution's `min_ms=`/
-`p50_ms=`/`p95_ms=`/`max_ms=` with three decimals whenever the microsecond
-reading exists (`min_ms=0.298`), and as integers otherwise.
+The `[result]` line prints `elapsed_ms=` with three decimals whenever the
+microsecond reading exists (`elapsed_ms=6.847`), and as an integer otherwise.
 
 A stored mode refuses a dirty measured tree unless `--force` is given, and
 then warns that results will not be stored. The tree is the build root, so a
@@ -237,7 +229,7 @@ elapsed  592200.412 ms (best of 3: 592200.412 / 611400.090 / 634100.733 ms)
 ```
 
 `elapsed_us` is NULL unless the loop measured every iteration in microseconds
-(`run_external_ok`, `run_distribution`, `measure_external` - from the
+(`run_external_ok`, `measure_external` - from the
 target's self-reported `elapsed_ms=`, the same clock its row records - and
 `run_internal`/`run_hotpath` when each iteration's result carried an
 `elapsed_us`). `Measurement` retains them until `record` writes the row and sidecar together. A list with a gap is not
@@ -253,11 +245,12 @@ is the signal:
 - iteration 1 slowest, 2/3 faster -> cold page cache on the first pass
 
 Those are opposite diagnoses. This is why the walls do **not** live in
-`run_distribution` (min/p50/p95/max): sorting the samples discards the ordering,
-and a p50 cannot tell the two apart.
+a min/p50/p95/max summary like the historical `run_distribution` rows:
+sorting the samples discards the ordering, and a p50 cannot tell the two
+apart.
 
 Collected by every harness loop (`run_internal`, `run_hotpath`,
-`run_external_ok`, `measure_external`, `run_distribution`) and attached
+`run_external_ok`, `measure_external`) and attached
 to the best-of-N `BenchResult` before recording. One-iteration measurements retain that one wall too; rows recorded before
 schema v16 have no iteration data - those walls
 were discarded at measure time and cannot be reconstructed from `elapsed_ms`.
@@ -292,8 +285,7 @@ Sidecar-enabled subprocess measurements sample `/proc/{pid}/stat`,
 `/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals and read phase
 markers from a FIFO. Their data is buffered in memory during the run and
 bulk-inserted to `.brokkr/sidecar.db` (gitignored) after the child exits.
-Closure-only measurements such as `run_internal` and `run_distribution` do not
-attach a sidecar.
+Closure-only measurements such as `run_internal` do not attach a sidecar.
 Results DB (`.brokkr/results.db`) stays small and gitignored.
 
 Key files: `src/sidecar.rs` (sampler and FIFO),
@@ -710,9 +702,8 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`, `--comp
   iterations), a measured command's whole run (build, tool materialization,
   prepare steps and every sample), the whole of `check`/`test`/`clippy`/`deps`,
   and the other commands that run captured children with no sidecar: the
-  downloads, `ingest`, `update`, the elivagar archive tools, `ocean-build`,
-  `verify`, `visual`, `prepare` and nidhogg `serve` from the spawn through
-  the readiness poll (an interrupt there stops the half-started server). A loop over such children stops at the
+  downloads, the elivagar archive tools, `ocean-build`, `verify`, `visual`
+  and `prepare`. A loop over such children stops at the
   first `Interrupted` rather than recording it as that step's failure. Guards
   nest: the outermost installs and
   restores the handlers, so an inner guard (the sidecar's, inside an

@@ -792,51 +792,6 @@ mod channel_tests {
         assert!(log.ends_with("raw stdout without newlineraw stderr without newline"));
     }
 
-    /// A stderr-only replay must arrive before child exit, preserve arbitrary
-    /// bytes, and keep captured stdout off the console (the ingest contract).
-    #[test]
-    fn streamed_progress_arrives_before_exit_without_byte_conversion() {
-        use std::io::Read;
-        const CHILD_LOG: &str = "BROKKR_STREAMED_CHANNEL_TEST_LOG";
-        if let Some(path) = std::env::var_os(CHILD_LOG) {
-            open_run_log(std::fs::File::create(path).unwrap());
-            let captured = crate::output::run_streamed(
-                "/bin/sh",
-                &["-c", "printf 'stdout suppressed'; printf '\\303' >&2; printf '\\251\\377progress\\n' >&2; sleep 2"],
-                std::path::Path::new("."),
-                crate::output::Replay::Stderr,
-            ).unwrap();
-            captured.check_success("streaming fixture").unwrap();
-            assert_eq!(captured.stdout, b"stdout suppressed");
-            assert_eq!(captured.stderr, b"\xc3\xa9\xffprogress\n");
-            close_run_log();
-            return;
-        }
-        let path = crate::test_scratch::scratch_path("output", "streamed-log");
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "output::console::channel_tests::streamed_progress_arrives_before_exit_without_byte_conversion", "--nocapture"])
-            .env(CHILD_LOG, &path)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn().unwrap();
-        let mut progress = [0; 12];
-        child
-            .stderr
-            .take()
-            .unwrap()
-            .read_exact(&mut progress)
-            .unwrap();
-        assert_eq!(&progress, b"\xc3\xa9\xffprogress\n");
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "progress was buffered until exit"
-        );
-        let captured = child.wait_with_output().unwrap();
-        assert!(captured.status.success());
-        assert!(!String::from_utf8_lossy(&captured.stdout).contains("stdout suppressed"));
-        assert_eq!(std::fs::read(path).unwrap(), progress);
-    }
-
     #[test]
     fn durations_share_precision_and_unit_boundaries() {
         for (duration, expected) in [

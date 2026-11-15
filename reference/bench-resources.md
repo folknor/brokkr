@@ -318,7 +318,8 @@ gate or cannot name it.
   configured directory goes through the gate, without the pbfhogg backup
   walk outside pbfhogg: the measured runner's scratch trees in every
   project; in `brokkr clean`, elivagar's scratch, `tilegen_tmp` and corpus
-  calibrands and nidhogg's ingest output; elivagar's tilegen removal of its
+  calibrands and the ingest outputs the retired nidhogg commands left;
+  elivagar's tilegen removal of its
   tmp dir. When that tmp dir is the scratch dir itself elivagar empties it
   in the child, so it is checked against the gate before the launch; a check
   suffices there because the global lock admits no new iteration between

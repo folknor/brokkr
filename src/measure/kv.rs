@@ -2,6 +2,7 @@
 
 #[cfg(test)]
 use super::BenchResult;
+#[cfg(test)]
 use super::wall::us_to_ms;
 use crate::db::KvPair;
 use crate::error::DevError;
@@ -63,18 +64,11 @@ fn field(line: &str) -> Option<(&str, &str)> {
     named.then_some((key, value.trim()))
 }
 
-/// Parse stderr `key=value` lines, returning the timing and non-timing pairs.
-/// Only lines [`kv_line`] accepts count; other lines are prose.
-/// `elapsed_ms`/`total_ms` are reserved timing names and are not added to the
-/// returned kv pairs; the last valid timing line wins.
-///
-/// `elapsed_ms` is `None` when no `elapsed_ms`/`total_ms` line is found.
-pub(crate) fn parse_kv_lines(stderr: &[u8]) -> (Option<i64>, Vec<KvPair>) {
-    let (us, kv) = parse_kv_lines_us(stderr);
-    (us.map(us_to_ms), kv)
-}
-
-/// As [`parse_kv_lines`], but returns the timing in microseconds.
+/// Parse stderr `key=value` lines, returning the timing in microseconds and
+/// the non-timing pairs. Only lines [`kv_line`] accepts count; other lines are
+/// prose. `elapsed_ms`/`total_ms` are reserved timing names and are not added
+/// to the returned kv pairs; the last valid timing line wins. The timing is
+/// `None` when no `elapsed_ms`/`total_ms` line is found.
 ///
 /// The timing line may be fractional (`elapsed_ms=6.847`). It used to be
 /// parsed as `i64`, so a fractional value failed to parse at all and the run
@@ -150,7 +144,6 @@ pub(super) fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
         kv,
         // One iteration's parse - the enclosing loop owns the list.
         iterations: Vec::new(),
-        distribution: None,
         hotpath: None,
     })
 }

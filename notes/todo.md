@@ -97,7 +97,7 @@ want distinct outputs within one suite run.
 
 #### `PbfhoggCommand::metadata` takes `&CommandContext`, others don't
 Pbfhogg's metadata reads runtime observations from `ctx.params`; elivagar
-and nidhogg don't have any. The signature difference reflects a real
+doesn't have any. The signature difference reflects a real
 semantic difference, not duplication.
 
 #### Harness builder methods split across types
@@ -109,7 +109,7 @@ dispatch.
 
 #### `cmd.rs` layouts differ per project
 pbfhogg: top-level cmd dispatch + per-bench helpers + verify dispatch.
-elivagar: small per-subcommand fns. nidhogg: mixes both. Each reflects
+elivagar: small per-subcommand fns. Each reflects
 that project's feature shape; no clean unification.
 
 ### Speculative - wait for the trigger
@@ -300,16 +300,6 @@ destination by hand. `run.md` states it. A fix needs an anchor outside the
 home that brokkr can justify - perhaps the nearest ancestor that existed
 before any install (recorded in the journal), or syncing up to the mount
 point of the destination's filesystem.
-
-### Nidhogg run and hotpath ingest outputs are outside `brokkr clean` (2026-11-02)
-
-The nidhogg ingest plan (`src/nidhogg/plan.rs`) writes to one of three
-scratch dirs by mode: `run-ingest-output`, `bench-ingest-output` or
-`hotpath-ingest-output`. A successful run removes its dir and an interrupted
-one discards it, but a failed run keeps it, and `clean_scratch` in
-`src/clean.rs` removes only `bench-ingest-output/`. The other two stay until
-the next run of that mode. Adding them to the nidhogg layout's clean list
-closes it; clean.md names only the bench dir today.
 
 ### `suite pbfhogg`'s dry-run branch is unreachable (2026-11-04)
 
@@ -574,7 +564,7 @@ measured command can cap child RSS.
 ## History command enhancements
 
 ### Capture brokkr's own output
-All brokkr output goes through `output::*` helpers (`build_msg`, `bench_msg`, `error`, etc.). Add a tee layer that copies prefixed lines into a global buffer, flushed to a nullable `output TEXT` column at end of invocation. Cap at 64KB. Does NOT cover passthrough subprocess output (`brokkr run`, `brokkr serve`) which uses `Stdio::inherit()` - capturing that would require piped tee threads and changes live output UX. Schema v2 migration alongside `error_tail`.
+All brokkr output goes through `output::*` helpers (`build_msg`, `bench_msg`, `error`, etc.). Add a tee layer that copies prefixed lines into a global buffer, flushed to a nullable `output TEXT` column at end of invocation. Cap at 64KB. Does NOT cover passthrough subprocess output (`brokkr run`) which uses `Stdio::inherit()` - capturing that would require piped tee threads and changes live output UX. Schema v2 migration alongside `error_tail`.
 
 ### Capture stderr tail on failure
 On non-zero exit, capture the last 4KB of stderr into a nullable `error_tail TEXT` column. Requires schema v2 migration. Only stored on failure - success path stays lightweight. The `history <id>` detail view would display it, and `brokkr history --failed` could show a one-line preview.

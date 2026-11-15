@@ -28,11 +28,8 @@ Clippy's `print_stdout` and `print_stderr`; function-scoped exceptions cover
 JSON, tables, outline and subprocess protocols. Such exceptions do not permit
 operator narration. Textlint also rejects hand-written operator prefixes and
 warning tags. Raw captured replay uses `output::raw_stdout` or
-`output::raw_stderr`, which add no newline and use the renderer and log.
-`output::run_streamed` replays selected pipe chunks through the channel as they
-arrive, while retaining the supervised capture and ending contract. Nidhogg
-ingest replays stderr only; update replays both streams. Byte-oriented replay
-preserves split UTF-8 sequences and non-UTF-8 bytes. Inherited child streams
+`output::raw_stderr`, which add no newline and use the renderer and log. No
+captured stream is replayed while its child runs. Inherited child streams
 remain owned by the child.
 
 Operator elapsed durations use `output::format_duration`: milliseconds below

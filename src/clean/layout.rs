@@ -170,10 +170,6 @@ impl ProjectState {
         self.root.join("corpus-sort")
     }
 
-    pub(crate) fn nidhogg_pid_file(&self) -> PathBuf {
-        self.root.join("nidhogg.pid")
-    }
-
     pub(crate) fn ratatoskr(&self) -> RatatoskrLayout {
         RatatoskrLayout::new(&self.root)
     }
@@ -351,7 +347,9 @@ impl<'a> ElivagarLayout<'a> {
     }
 }
 
-/// Nidhogg's mode-specific ingest output directories.
+/// The per-mode ingest output directories the retired nidhogg `nid-ingest`
+/// and `suite nidhogg` left in scratch, a whole ingested store each when a
+/// run failed. Nothing writes them now; `brokkr clean` still sweeps them.
 pub(crate) struct NidhoggLayout<'a> {
     paths: &'a config::ResolvedPaths,
 }
@@ -361,16 +359,9 @@ impl<'a> NidhoggLayout<'a> {
         Self { paths }
     }
 
-    pub(crate) fn run_ingest_output(&self) -> PathBuf {
-        self.paths.scratch_dir.join("run-ingest-output")
-    }
-
-    pub(crate) fn bench_ingest_output(&self) -> PathBuf {
-        self.paths.scratch_dir.join("bench-ingest-output")
-    }
-
-    pub(crate) fn hotpath_ingest_output(&self) -> PathBuf {
-        self.paths.scratch_dir.join("hotpath-ingest-output")
+    pub(crate) fn ingest_outputs(&self) -> [PathBuf; 3] {
+        ["run", "bench", "hotpath"]
+            .map(|mode| self.paths.scratch_dir.join(format!("{mode}-ingest-output")))
     }
 }
 

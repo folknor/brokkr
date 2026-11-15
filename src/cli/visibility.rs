@@ -119,11 +119,8 @@ PmtilesWriter => ("pmtiles-writer", Visibility::Only(&[Project::Elivagar]), Requ
 NodeStore => ("node-store", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
 ElivPlanetiler => ("planetiler", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "java"], Mode),
 ElivTilemaker => ("tilemaker", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "cmake", "g++", "make"], Mode),
-RunApi => ("api", Visibility::Only(&[Project::Nidhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
-RunNidIngest => ("nid-ingest", Visibility::Only(&[Project::Nidhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
-RunTiles => ("tiles", Visibility::Only(&[Project::Nidhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
 GenericHotpath => ("generic-hotpath", Visibility::Any, Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
-Suite => ("suite", Visibility::Only(&[Project::Pbfhogg, Project::Elivagar, Project::Nidhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
+Suite => ("suite", Visibility::Only(&[Project::Pbfhogg, Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
 Passthrough => ("passthrough", Visibility::Any, Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Results => ("results", Visibility::Any, Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Sidecar => ("sidecar", Visibility::Any, Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
@@ -134,7 +131,7 @@ Guard => ("guard", Visibility::Any, None, None, true, crate::measure::MeasureMod
 Kill => ("kill", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
 History => ("history", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Invalidate => ("invalidate", Visibility::Except(MEASURED_DB_ABSENT), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Verify => ("verify", Visibility::Only(&[Project::Elivagar, Project::Nidhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
+Verify => ("verify", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 CompareTiles => ("compare-tiles", Visibility::Only(&[Project::Elivagar]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
 DownloadOcean => ("download-ocean", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "curl"]),
 OceanBuild => ("ocean-build", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
@@ -144,14 +141,7 @@ Diag => ("diag", Visibility::Only(&[Project::Elivagar]), Required, Blocking, tru
 Svg => ("svg", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Regress => ("regress", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 PmtilesCorpus => ("pmtiles-corpus", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-PmtilesStats => ("pmtiles-stats", Visibility::Only(&[Project::Elivagar, Project::Nidhogg]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Serve => ("serve", Visibility::Only(&[Project::Nidhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Stop => ("stop", Visibility::Only(&[Project::Nidhogg]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Status => ("status", Visibility::Only(&[Project::Nidhogg]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Ingest => ("ingest", Visibility::Only(&[Project::Nidhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Update => ("update", Visibility::Only(&[Project::Nidhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Query => ("query", Visibility::Only(&[Project::Nidhogg]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Geocode => ("geocode", Visibility::Only(&[Project::Nidhogg]), Required, None, true, crate::measure::MeasureMode::Run, None, &["curl"]),
+PmtilesStats => ("pmtiles-stats", Visibility::Only(&[Project::Elivagar]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Visual => ("visual", Visibility::Only(&[Project::Litehtml, Project::Sluggrs]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "node"]),
 Test => ("test", Visibility::Any, Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::TEST), &["cargo"]),
 List => ("list", Visibility::Only(&[Project::Litehtml, Project::Sluggrs]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
@@ -275,9 +265,6 @@ impl CommandSpec {
                     | super::Command::NodeStore { mode, .. }
                     | super::Command::ElivPlanetiler { mode, .. }
                     | super::Command::ElivTilemaker { mode, .. }
-                    | super::Command::RunApi { mode, .. }
-                    | super::Command::RunNidIngest { mode, .. }
-                    | super::Command::RunTiles { mode, .. }
                     | super::Command::GenericHotpath { mode, .. }
                     | super::Command::Suite { mode, .. }
                     | super::Command::Hotpath { mode, .. }
@@ -303,7 +290,6 @@ impl CommandSpec {
                 super::Command::Build { commit, .. }
                 | super::Command::Crit { commit, .. }
                 | super::Command::Bench { commit, .. }
-                | super::Command::Verify { commit, .. }
                 | super::Command::Sync { commit, .. }
                 | super::Command::Corpus { commit, .. } => Ok(commit.is_some()),
                 _ => Err(crate::error::DevError::Internal(

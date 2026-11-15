@@ -61,14 +61,6 @@ pub(super) fn format_result_line(
         }
     }
 
-    if let Some(ref dist) = result.distribution {
-        parts.push(format!("samples={}", dist.samples));
-        parts.push(format!("min_ms={}", ms_value(dist.min)));
-        parts.push(format!("p50_ms={}", ms_value(dist.p50)));
-        parts.push(format!("p95_ms={}", ms_value(dist.p95)));
-        parts.push(format!("max_ms={}", ms_value(dist.max)));
-    }
-
     parts.join("  ")
 }
 
@@ -598,7 +590,6 @@ impl BenchHarness {
                     .map(Wall::from_legacy_millis)
                     .collect()
             },
-            distribution: result.distribution.clone(),
             hotpath: result.hotpath.clone(),
         })
     }

@@ -15,13 +15,13 @@ Hygiene findings from the hunt for the per-project command layers: pbfhogg/nidho
 
 Reported by: pbfhogg-nidhogg.
 
-Residue: Danish geocode fixtures and default term and the fixed `TimeFilter` date remain, and GETID hit counts are still not recorded.
+Residue: the fixed `TimeFilter` date remains, and GETID hit counts are still not recorded.
 
 ## PRJ-015 - Cross-repo output contracts are unenforced
 
 Reported by: pbfhogg-nidhogg.
 
-`bench_tiles::is_ready_line` keys on the substring "listening" in nidhogg's stderr; pbfhogg `inspect` and `diff` text formats and nidhogg's shutdown kv are parsed without a pinned contract. The hunter says these can't be enforced mechanically from here; they need a structured output mode in those tools or a pinned fixture test on each side.
+pbfhogg `inspect` and `diff` text formats are parsed without a pinned contract. The hunter says these can't be enforced mechanically from here; they need a structured output mode in pbfhogg or a pinned fixture test on each side.
 
 ## PRJ-031 - Dead code in elivagar
 
