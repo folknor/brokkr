@@ -1,12 +1,6 @@
-//! Launch reservations: what keeps a pbfhogg child's disposable state, a
-//! script-bench iteration's outputs, scratch and spools, and the paths they
-//! use, safe from brokkr itself.
-//!
-//! A pbfhogg child killed mid-write leaves its staging file and run scratch
-//! behind, and pbfhogg reports such leftovers but never deletes them. So each
-//! launch gets a private directory, passed as `--staging-dir` and
-//! `--tmp-dir`, which brokkr removes once nothing can use it any more. What
-//! "nothing can use it" means is the point of this module:
+//! Launch reservations protect script-bench outputs, scratch, spools and inputs
+//! from conflicting launches and brokkr mutations. Disposable resources belong
+//! to leases and are reclaimed only after their last holder exits.
 //!
 //! - **Liveness is a lease the child carries.** Before the spawn, brokkr
 //!   creates a lock file in its per-user state and flocks it; the child
@@ -25,8 +19,8 @@
 //!   lease left unsynced (`store`).
 //! - **Every mutation is gated.** Deletions, renames and replacements that can
 //!   touch such paths go through `guard`, which refuses when a reservation's
-//!   resource overlaps an operand, and refuses to remove a tree holding a
-//!   pbfhogg backup. Admission refuses a launch whose resources overlap a
+//!   resource overlaps an operand; legacy scratch cleanup also preserves
+//!   trees holding a pbfhogg backup. Admission refuses a launch whose resources overlap a
 //!   reservation when either side writes.
 //!
 //! One critical section (`serialize`: a process-wide mutex and an exclusive
@@ -41,9 +35,8 @@
 //! kept while any process can still use what it owns
 //! (`reference/bench-resources.md`).
 //!
-//! The layer is scoped to pbfhogg and to script benches: pbfhogg's launches,
-//! the staged writes of a child's output, the removals of pbfhogg scratch,
-//! leftover verify output and worktrees, the
+//! The layer covers reserved child launches,
+//! leftover scratch and verify output, worktrees, and the
 //! iterations of a script bench of any project, and the recursive removals
 //! of every configured directory such an iteration can sit under (any
 //! project's measured scratch trees, elivagar's scratch, `tilegen_tmp` and
@@ -53,8 +46,7 @@
 //!
 //! The guarantee is for cooperating brokkr processes of one user on one host
 //! sharing one `HOME` on a local filesystem with kernel `flock` semantics, the
-//! scope of the global lock and the compile lease; it rests on pbfhogg
-//! starting no helper process that outlives it, and on a script bench's child
+//! scope of the global lock and the compile lease; it rests on a child
 //! and every process it starts keeping the borrow descriptor it inherited
 //! while it can still use the iteration. Other users, other hosts, bind-mount
 //! aliases of one directory and an NFS `HOME` are outside it.
@@ -68,14 +60,11 @@ mod paths;
 mod store;
 
 pub(crate) use guard::{
-    check_unreserved, is_refusal, mutate, remove_dir_all, remove_file, remove_reserved_tree, write,
+    check_unreserved, is_refusal, mutate, remove_dir_all, remove_file, remove_reserved_tree,
 };
 pub(crate) use iteration::{Call, Iteration, NameArea, Names, Preview, Spool, open_input};
-#[cfg(test)]
-pub(crate) use launch::hold;
 pub(crate) use launch::{
-    LaunchSpec, Launched, PRIVATE_DIR_PLACEHOLDER, ReadHold, hold_reads, inherit_in_child,
-    take_armed,
+    LaunchSpec, PRIVATE_DIR_PLACEHOLDER, ReadHold, hold_reads, inherit_in_child, take_armed,
 };
 pub(crate) use store::Access;
 
@@ -110,8 +99,8 @@ pub(crate) fn reclaim() -> Vec<String> {
         .collect();
     lines.extend(scan.unknown.iter().map(|(id, why)| {
         format!(
-            "launch lease {id} cannot be established ({why}); kept, and it blocks pbfhogg launches, \
-             pbfhogg cleanup and script-bench iterations and their reclamation until resolved; {}",
+            "launch lease {id} cannot be established ({why}); kept, and it blocks launches, \
+             gated cleanup and script-bench iterations and their reclamation until resolved; {}",
             by_hand(id)
         )
     }));

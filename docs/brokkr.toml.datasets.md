@@ -31,25 +31,15 @@ paths still resolve against each including project's root.
   They live here rather than in a `[<host>.tilegen.<name>]` block because they
   describe the input, not the pipeline - a block would otherwise have to know
   which variant it was about to be run against.
-- `pbf.<variant>.expect` (pbfhogg, optional) - the answers pbfhogg's
-  answer commands should give on this file, so a contradicting answer fails
-  the run instead of being stored (`docs/projects/pbfhogg.md`, Declared
-  answers). `check-refs`, `check-refs-relations`, `check-ids`,
-  `check-index`, `check-locations` and `check-locations-agreement` take
-  `"clean"` or `"violations"`; `check-refs` covers the plain run and
-  `check-refs-relations` the `--check-relations` one, since a file with clean
-  way refs can still have missing relation members (an extract cuts them at
-  its boundary), and `check-locations` and `check-locations-agreement` split
-  the same way over `--agreement`. `diff` is a table keyed by an OSC sequence of the same
-  snapshot, `"same"` or `"differs"`, for this file against itself with that
-  OSC applied. Unknown keys and values are load errors. Absent, either
-  answer is stored. It belongs to the entry as composed, so an `include`
-  override of `file` alone keeps the declarations of the file it replaced.
-- `expect.diff-snapshots` (pbfhogg, optional) - on the dataset:
-  `"<xxhash>+<xxhash>" = "same" | "differs"`, the `diff-snapshots` answer
-  between the two PBF files whose registered digests the key names, in
-  either order and either hex case; one pair spelled twice is a load error.
-  Addressed by content, it never follows a snapshot key to another file.
+- `pbf.<variant>.expect` - accepted for compatibility and unused. The keys
+  `check-refs`, `check-refs-relations`, `check-ids`, `check-index`,
+  `check-locations` and `check-locations-agreement` accept `"clean"` or
+  `"violations"`; `diff` maps OSC sequence keys to `"same"` or `"differs"`.
+  Unknown keys and invalid values still fail config load. Include composition
+  still preserves expectations when only `file` is overridden.
+- `expect.diff-snapshots` - accepted for compatibility and unused. Keys are
+  `"<xxhash>+<xxhash>"`, in either order and hex case; values are `"same"` or
+  `"differs"`. Invalid digests and duplicate unordered pairs still fail load.
 - `osc.<seq>` - OSC diff file entries keyed by sequence number. Each has
   `file`, optional `xxhash` (XXH128).
 - `snapshot.<key>` - another point-in-time capture of the dataset, with its
@@ -72,55 +62,30 @@ paths still resolve against each including project's root.
   is parsed at config load as four finite
   `lon_min,lat_min,lon_max,lat_max` coordinates; longitude must be within
   -180..180, latitude within -90..90, and each minimum must not exceed its
-  maximum. A pbfhogg extract row that took its bbox from here carries it as
-  an arm qualifier, so changing the box splits `results --compare` pairing
-  (see `docs/commands/results.md`).
+  maximum.
 - `polygon.<name>` (pbfhogg, optional) - GeoJSON extract regions keyed by a
   name matching `[a-zA-Z0-9_-]+`, dataset-level like `bbox` and shared by
   every variant and snapshot. Each has `file` (under the data directory, like
   every entry) and optional `xxhash` (XXH128); `brokkr env` lists them as
-  `<dataset>/polygon.<name>`. A file is resolved, and its pin checked, when a
-  command reads it. `brokkr extract --polygon <name>` measures it instead of
-  the bbox and `brokkr multi-extract --polygon <name>` appends it after the
-  strips; a bare `extract` or `multi-extract` still measures the bbox alone.
-  `brokkr suite pbfhogg`'s extract bench runs on every
-  configured polygon after the bbox. A polygon row carries `polygon=<name>@<xxh128>`
-  as an arm qualifier, the digest computed from the file whether or not it is
-  pinned, so changing the file splits `results --compare` pairing (see
-  `docs/commands/results.md`).
-- `getid_ids`, `getparents_ids` (pbfhogg, optional) - the element IDs the
-  getid and getparents benches request on this dataset, every variant and
-  snapshot of it (`brokkr getid`/`getparents` in any measured mode, and the
-  suite's `getid`, `getid-invert` and `getparents` presets). Each entry is
-  `n`, `w` or `r` and a decimal ID from 0 to 9223372036854775807 (the
-  non-negative IDs pbfhogg getid accepts); the list must be non-empty and
-  free of duplicates (compared after parsing, so `n1` and `n01` collide), and
-  its order is the argv order. Absent, the bench uses the built-in lists,
-  which were chosen in Denmark: a dataset that does not contain Denmark may
-  lack most of them, and its bench then times a mostly empty selection. The IDs are a request,
-  not a guarantee: nothing checks that they exist in the file, and a
-  getparents seed without parents measures little. The built-in getparents
-  way seed `w2080` is such a seed where it was checked: on the europe and
-  planet inputs of 2026-10-28 the built-in list selected two ways and no
-  relations, so `w2080` adds lookup work but no parent (Denmark is
-  unverified). Set `getparents_ids` on a dataset to measure a seed with
-  relation parents there. A list that differs from
-  the built-in one keeps its rows apart in `brokkr results --compare` (see
-  `brokkr man results`).
+  `<dataset>/polygon.<name>`. These entries remain available to `env` and script benches.
+- `getid_ids`, `getparents_ids` - accepted for compatibility and unused.
+  Each entry is `n`, `w` or `r` followed by a decimal ID from 0 to
+  9223372036854775807. Lists must remain non-empty and free of duplicates
+  after parsing (`n1` and `n01` collide). The parsed order is preserved.
 
 ```toml
 [plantasjen.datasets.denmark]
 origin = "Geofabrik"
 download_date = "2026-02-20"
 bbox = "12.4,55.6,12.7,55.8"
-getid_ids = ["n115722", "w2080", "r174"]    # pbfhogg only
+getid_ids = ["n115722", "w2080", "r174"]    # compatibility, unused
 
 [plantasjen.datasets.denmark.pbf.indexed]
 file = "denmark-with-indexdata.osm.pbf"
 xxhash = "3f1977fd..."
 seq = 4704
 
-[plantasjen.datasets.denmark.pbf.indexed.expect]   # pbfhogg only
+[plantasjen.datasets.denmark.pbf.indexed.expect]   # compatibility, unused
 check-refs = "clean"
 check-ids = "clean"
 diff = { "4705" = "differs" }
@@ -129,24 +94,16 @@ diff = { "4705" = "differs" }
 file = "denmark-4705.osc.gz"
 xxhash = "fa581f7b..."
 
-[plantasjen.datasets.denmark.polygon.copenhagen]   # pbfhogg only
+[plantasjen.datasets.denmark.polygon.copenhagen]
 file = "polygons/copenhagen.geojson"
 
 ```
 
-## Shared variant-selection flags
+## Variant selection
 
-Every measurable command on a project that uses datasets accepts:
-
-- `--variant <name>` - selects from `pbf.<name>`. Default: `indexed`
-  (pbfhogg, except `check-locations`, which defaults to `altw-keep-untagged`,
-  or `altw` with `--agreement`), `raw` (elivagar).
-- `--osc-seq <seq>` - selects from `osc.<seq>`. Auto-selects if exactly one
-  OSC is configured.
+Elivagar's measured commands select `pbf.<name>` with `--variant <name>`,
+defaulting to `raw`. Script benches declare and bind their own params.
 
 No command selects a `pmtiles.<variant>` entry: elivagar's archive readers
 address the durable output store by `--dataset`/`--variant`/`--commit`/`--file`
 instead (see `docs/projects/elivagar.md`).
-
-pbfhogg has additional flags for snapshots, I/O backends, and compression -
-see `docs/projects/pbfhogg.md`.

@@ -186,7 +186,7 @@ fn parse_cli(project: Option<&Project>) -> (Cli, cli::CommandId, crate::db::RunI
 fn shed_inherited_run_env() {
     for name in [
         crate::sidecar::MARKER_FIFO_ENV,
-        crate::pbfhogg::binary::HARNESS_ARTEFACT_DIR_ENV,
+        "BROKKR_HARNESS_ARTEFACT_DIR",
     ] {
         // SAFETY: called from `main` before brokkr starts any thread, so no
         // other thread can read or write the environment concurrently.

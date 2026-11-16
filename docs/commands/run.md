@@ -1,5 +1,8 @@
 # brokkr run + brokkr build + brokkr install
 
+pbfhogg's verification and dataset tools run through this generic command;
+its benchmarks use `brokkr bench NAME`.
+
 Three metadata-driven commands for launching, building and installing a
 workspace's own binaries, available in any Rust project (not project-gated) and
 working with no `brokkr.toml` at all. `run` builds and runs one target; `build`

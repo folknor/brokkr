@@ -1,5 +1,8 @@
 # brokkr test
 
+pbfhogg continues to use this generic test command; its workload benchmarks
+run separately through `brokkr bench NAME`.
+
 `brokkr test [-p <PKG>] <NAME>`. (Any cargo project.) It shares `brokkr
 check`'s sweeps and profiles (`brokkr man check`), its libtest runner and time
 ceilings (`brokkr man hygiene`), and its test lanes (`brokkr man test-lanes`).

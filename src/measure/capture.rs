@@ -10,8 +10,7 @@ use crate::output::child;
 use std::path::Path;
 use std::time::Duration;
 
-/// The metadata key (`meta.exit_code`) recording the exit status of a
-/// counted iteration whose command accepts a non-zero answer code.
+/// The metadata key (`meta.exit_code`) retained for historical answer rows.
 pub(crate) const EXIT_CODE_KEY: &str = "exit_code";
 
 impl BenchHarness {
@@ -92,24 +91,11 @@ impl BenchHarness {
                 child::IterationVerdict::Interrupted => Some(DevError::Interrupted),
             }
         };
-        let (reported_us, mut kv) = if incomplete_output {
+        let (reported_us, kv) = if incomplete_output {
             (None, Vec::new())
         } else {
             parse_kv_lines_us(&capture.stderr)
         };
-        // A command whose exit status is its answer (`diff` found differences,
-        // `check` found violations) stores both answers as completed runs, so
-        // the row says which one it measured. Other commands keep their rows
-        // as they were.
-        if exits.is_answer()
-            && error.is_none()
-            && let Some(code) = ending.exit_code()
-        {
-            kv.push(db::KvPair::int(
-                db::KvKey::metadata(EXIT_CODE_KEY),
-                i64::from(code),
-            ));
-        }
         Ok(Iteration {
             result: Some(BenchResult {
                 elapsed_ms: elapsed_to_ms(&capture.elapsed),
@@ -131,8 +117,7 @@ impl BenchHarness {
 
     /// A fresh path for one instrumented child's hotpath report, unique per
     /// launch, so a child that outlived its run can never write the next
-    /// run's report. A reserved launch declares it as an output
-    /// (`Invocation::launch_with`) and removes it once released.
+    /// run's report. The caller removes it after capturing the sample.
     pub(crate) fn new_hotpath_report_path(&self) -> Result<std::path::PathBuf, DevError> {
         let token = crate::lockfile::RunToken::mint()
             .ok_or_else(|| DevError::Internal("no entropy for a hotpath report name".into()))?;

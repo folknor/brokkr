@@ -759,7 +759,7 @@ fn spawn_supervisor(
         .arg(flock.as_raw_fd().to_string())
         .current_dir(dir)
         .env_remove(SERVE_ENV)
-        .env_remove(crate::pbfhogg::binary::HARNESS_ARTEFACT_DIR_ENV)
+        .env_remove("BROKKR_HARNESS_ARTEFACT_DIR")
         .stdin(std::process::Stdio::null())
         .stdout(out)
         .stderr(err);

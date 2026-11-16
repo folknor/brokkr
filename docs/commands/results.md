@@ -219,9 +219,12 @@ invocation, and it can still pair with a new row of a different one (an old
 Reading a row's `arm_key` beside its `brokkr_args` shows which case it is;
 the argv alone does not, since the positional boundary is not stored.
 
+Historical pbfhogg typed-command rows retain their qualifiers and migration
+behavior below; no new typed pbfhogg rows are produced.
+
 A measurement-defining choice that reaches the subprocess argv from config
 rather than from the brokkr argv cannot show in the argv key, so the row
-carries it as a qualifier. For pbfhogg that is a dataset's `getid_ids` or
+carries it as a qualifier. For historical pbfhogg rows that was a dataset's `getid_ids` or
 `getparents_ids` when it differs from the built-in list (`ids=...`), and for
 `extract`, `multi-extract` and the suite's extract bench the bbox when it came
 from the dataset rather than `--bbox` (`bbox=...`, the parsed coordinates, so
@@ -233,8 +236,7 @@ share one argv), and the strategy when one argv ran every strategy
 `strategy=...`), joined by `;` in that order. An extract
 row from before the bbox and strategy qualifiers existed carries neither, so
 it does not pair with a newer row that does. A pbfhogg `digest` without
-`--form` carries the form it measured (`form=full` or `form=content`;
-`docs/projects/pbfhogg.md`, Digest). An elivagar `tilegen` row, the `suite
+`--form` carries the form it measured (`form=full` or `form=content`). An elivagar `tilegen` row, the `suite
 elivagar` self arm's included, carries every flag its tilegen block and input
 assertions passed (`tilegen=` and a JSON array of them, ocean entries under
 their brokkr.toml names rather than the host's resolved paths; an empty block
@@ -289,7 +291,7 @@ changes output - except where brokkr holds a choice constant as a workload
 axis, as it does pbfhogg's digest form, which is resolved before the run and
 named in the row. A bare pbfhogg `inspect --tags`, which moved from counting
 pairs to counting keys, is such a default; its pair workload is named only by
-an explicit expression (`docs/projects/pbfhogg.md`, Inspect tags). Not in the key: the content behind an input's name (a
+an explicit expression historically. Not in the key: the content behind an input's name (a
 dataset PBF or an ocean file replaced under the same name), and a resource
 the program sizes at run time (the worker count an omitted tilegen `threads`
 resolves to), which the host-condition annotations below do not capture
@@ -329,17 +331,16 @@ a per-comparison verdict.
 they differ between two runs without the work differing, and `prev.*`
 describes the preceding run so it differs on nearly every pair.
 
-One `meta.` pair is the exception. A command whose exit status is its answer
-(a project-defined set; for pbfhogg `diff`, `diff-snapshots`, `check-refs`,
-`check-ids`, `check-index`, `check-locations`) stores a run that exits with an accepted non-zero code as a
-completed run, and every such row records `meta.exit_code`, 0 included. When
+One `meta.` pair is the exception. Historical typed answer commands
+(pbfhogg `diff`, `diff-snapshots`, `check-refs`,
+`check-ids`, `check-index`, `check-locations`) stored accepted non-zero exits as
+completed runs, and every such row records `meta.exit_code`, 0 included. When
 both sides of a pair recorded one and they differ, the pair gets an
 `answer: exit A -> B` line: one side found violations or differences and the
 other did not, so the walls time different work. A row from before exit codes
 were recorded has no key and is never flagged. `--meta exit_code=1` selects the
-negative answers. An input that declares its answer in brokkr.toml stores
-only that answer; the other fails the run (`docs/projects/pbfhogg.md`,
-Declared answers).
+negative answers. These historical answer checks no longer run; the config expectations are
+accepted for compatibility and unused.
 
 ### Build provenance
 

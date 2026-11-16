@@ -35,21 +35,21 @@ the command name.
 
 ## Measurable commands per project
 
-The measurable commands are pbfhogg's data ops and elivagar's tilegen/etc.
+Elivagar's tilegen and related commands use these measurement flags.
+pbfhogg uses script benches (`brokkr bench NAME`).
 Piners' `corpus` is **not** measurable: it takes no
 measurement flag, and its timing is the parity run row's `wall_ms` (why:
 `docs/commands/corpus.md`).
 
 ## Command plans
 
-Pbfhogg and elivagar use `src/measure/runner.rs`. Binary plans run a
+Elivagar uses `src/measure/runner.rs`. Binary plans run a
 built executable; external plans materialize tools outside the measured samples;
 lifecycle plans provide their own operations. All use one
 `MeasurementSession` for the lock, paths, optional build and request provenance.
 A binary plan's argv is resolved against the built executable before the
 first sample; that resolved invocation is what runs and what `cli_args`
-records. Pbfhogg adds `--overwrite` there when the executable accepts it (see
-`docs/projects/pbfhogg.md`).
+records.
 
 Dry-run validates inputs and argv without acquiring a measurement session,
 building, downloading tools, or creating run artifacts.
@@ -66,8 +66,7 @@ directories.
 Run executes once without persisting result or sidecar records. Stored modes
 use the request's measurement mode and brokkr invocation; per-row fallback
 fields do not exist. Row command names and subprocess `cli_args` retain their
-previous spelling, except that pbfhogg rows gain `--overwrite` from builds that
-accept it (example lifecycles retain absent `cli_args`).
+previous spelling (example lifecycles retain absent `cli_args`).
 
 Declared sample scratch is reset before each sample and removed after success.
 A failed process, capture, or artifact promotion retains its current output.
@@ -77,7 +76,7 @@ from sample scratch. Tilegen's checkpoint directory remains available for
 
 ## Benchmark harness
 
-`BenchHarness` (in `src/measure.rs`) provides:
+`BenchHarness` (in `src/harness.rs`) provides:
 - Exclusive lockfile (prevents parallel bench/verify/hotpath runs). The
   lock is re-entrant *within* one brokkr process: a command that
   internally invokes another locked command shares the same hold, and
@@ -112,9 +111,7 @@ from sample scratch. Tilegen's checkpoint directory remains available for
   (`src/measure/runner.rs`) is the one place a measured invocation's mode is
   decided: run with output passed through, benchmark, or profile. A cell is
   the invocation, its row subject, its accepted exits and its wall source;
-  the planned runner's plans are cells with the external wall, and pbfhogg's
-  `read`, `write` and `merge` cells (`src/pbfhogg/bench_cells.rs`) are cells
-  with the self-reported wall in every mode. No command accepts `--hotpath`
+  the planned runner's plans are cells with the external wall. No command accepts `--hotpath`
   or `--alloc` and runs a plain child, and every measured build takes its
   features from `MeasureRequest::build_features`, which adds the mode's
   instrumentation feature.

@@ -32,9 +32,9 @@ pub fn run(
         &invocation.invocation(),
         project_root,
         crate::output::child::Exits::SUCCESS,
-        || invocation.prepare_sample(false),
+        || invocation.prepare_sample(),
     )?;
-    invocation.cleanup(false);
+    invocation.cleanup();
     Ok(())
 }
 
@@ -79,7 +79,7 @@ pub(crate) fn prepare(
 ) -> Result<crate::measure::runner::ExternalInvocation, DevError> {
     let data_dir = layout.data_dir();
     let scratch_dir = layout.scratch();
-    // The runtime only: pbfhogg's read-baseline class is pbfhogg's alone.
+    // The pinned runtime runs Planetiler directly.
     // Resolving it here used to compile `bench/planetiler-baseline` from the
     // elivagar tree, which has never had one, so javac failed every run.
     let pt = if dry_run {

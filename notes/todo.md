@@ -61,56 +61,12 @@ deliberately.
 
 ### Low ROI - not worth doing yet
 
-#### `--clean` only emits `version` attr (brokkr cat)
-`brokkr cat --clean` hardcodes the emitted attr as `version`. pbfhogg's
-real flag accepts multiple attrs (`version|changeset|timestamp|uid|user`,
-comma-separated or repeated). Combinations like `--clean version --clean
-uid` aren't reachable from brokkr. Would need to change brokkr's
-`clean: bool` into `clean: Option<Vec<String>>` to bench the cost of
-stripping each attr independently.
-
-#### `-b=<val>` vs `-b <val>` in extract suite rows (cosmetic)
-After the build_args unification, suite presets `extract-simple`/`extract-complete`/
-`extract-smart` emit `format!("-b={bbox}")` as a single token; pre-refactor
-suite emitted `"-b"` then `"12.4,55.6,12.7,55.8"` as two tokens. Clap accepts
-both, but the `cli_args` column text differs between old and new rows. A user
-filtering with `--grep "-b 12.4"` would miss new rows (would need `--grep -b=12.4`
-or just `--grep 12.4`). Not a behaviour bug, just a textual shift in stored argv.
-
-#### `-R` flag position in tags-filter suite rows (cosmetic)
-`tags-filter-way` / `tags-filter-amenity`: old suite emitted `tags-filter pbf -R
-w/highway=primary -o out`; the enum emits `tags-filter -R pbf w/highway=primary
--o out`. Same semantics (clap is order-independent for boolean flags), but the
-`cli_args` column text differs between old and new rows.
-
-#### Hotpath scratch filenames renamed
-Old code used ad-hoc `hotpath-merged`, `hotpath-altw`, `hotpath-extract-{simple,complete,smart}`.
-The unified `build_args` normalises to `hotpath-{cmd.id()}-output.{ext}`, so
-`hotpath-merged` becomes `hotpath-apply-changes-output`, etc. The cli_args
-column reflects the new names; historical rows keep the old names.
-
-#### Scratch output filename pattern coupled to command id
-`bench-<id>-output.osm.pbf` / `hotpath-<id>-output.osm.pbf` in
-`scratch_output_path`. Works today because benches run sequentially with
-cleanup between; becomes a problem if two benches of the same command
-want distinct outputs within one suite run.
-
-#### `PbfhoggCommand::metadata` takes `&CommandContext`, others don't
-Pbfhogg's metadata reads runtime observations from `ctx.params`; elivagar
-doesn't have any. The signature difference reflects a real
-semantic difference, not duplication.
-
 #### Harness builder methods split across types
 `BenchHarness::with_cargo_features` / `with_brokkr_args` / `with_measure_mode`
 vs `BenchContext::with_request` (which wraps two of them). Different
 abstraction levels - `with_request` is a convenience for `MeasureRequest`
 callers; removing it would add boilerplate to every measured-command
 dispatch.
-
-#### `cmd.rs` layouts differ per project
-pbfhogg: top-level cmd dispatch + per-bench helpers + verify dispatch.
-elivagar: small per-subcommand fns. Each reflects
-that project's feature shape; no clean unification.
 
 ### Speculative - wait for the trigger
 
@@ -150,52 +106,6 @@ review.
 
 ## Punted
 
-### `diff-snapshots` per-side variant selection (punted 2026-04-11)
-`Command::DiffSnapshots` exposes a single `--variant` flag and resolves both
-`--from` and `--to` with the same variant via `build_diff_snapshots_context`.
-That rejects asymmetric snapshot pairs where one side has `pbf.indexed` but
-the other only has `pbf.raw`.
-
-**Why punted**: no concrete use case has surfaced. Both auto-population paths
-(`brokkr download <region> --as-snapshot <key>` and `brokkr download <region>
---refresh`) generate `pbf.raw` *and* `pbf.indexed` automatically via
-`pbfhogg cat`, so brokkr-managed snapshots are always symmetric. The
-asymmetric case only arises with hand-edited brokkr.toml entries or
-third-party archives. The TODO note was a code-reviewer observation, not a
-user-need report.
-
-**Original design decision (Q3 of the snapshot feature spec)**: explicitly
-went with a single `--variant` flag (default `indexed`), with the reasoning
-"YAGNI on the split flags - no known use case for asymmetric variants, and
-the error-if-missing behavior on the receiving snapshot is the right default.
-Add `--variant-from` / `--variant-to` later only when a concrete need shows
-up." Today's review (2026-04-11) confirmed that decision still holds - the
-pbfhogg dev's roadmap doesn't include any workflow that intentionally
-produces asymmetric snapshots.
-
-**What was done instead**: improved the error message that fires when the
-asymmetric case is hit (commit 36cb9f3). The new error names the available
-variants on the snapshot, suggests `--variant <X>` as a one-shot workaround,
-and points at `brokkr download <region> --as-snapshot <key>` as the proper
-fix (which auto-generates the missing variant). Closes the
-first-time-user papercut without committing to any particular per-side flag
-shape.
-
-**Trigger condition for revisiting**: someone files a bug or feature request
-with a concrete asymmetric use case. Examples that would qualify: regular
-benchmarks against archive.org weekly dumps (raw-only) compared against
-brokkr-managed snapshots (raw + indexed); a pbfhogg testing workflow that
-deliberately wants to diff `--from raw --to indexed` for some reason; a
-third party releasing snapshots in a non-standard variant set.
-
-**If revisited**: the original feature request walkthrough lists the most
-plausible CLI shape - `--variant-from` / `--variant-to` overriding `--variant`
-on each side independently. But "wait for a real use case to inform the
-shape" was the principled call; the use case might suggest a different shape
-(e.g. `--variants from=X,to=Y`).
-
----
-
 ## Won't fix
 
 ### `brokkr run` releasing the lock while its program runs
@@ -224,11 +134,6 @@ string once at startup. Removing the leak requires dropping the `Copy`
 derive on `Project` (or switching to a `'static` interner), both of
 which cascade through every `fn foo(project: Project)` signature for
 no runtime benefit - `Project` is constructed exactly once per process.
-
-### Suite without `--bench` stores results in DB
-`brokkr suite pbfhogg` (no `--bench`) calls `bench_all` which stores
-results. Suite is inherently a benchmarking operation - there's no
-meaningful "measure without storing" mode to preserve.
 
 ### `test` and `list` are generic top-level names
 These only work for litehtml/sluggrs but are natural names users might
@@ -317,15 +222,6 @@ home that brokkr can justify - perhaps the nearest ancestor that existed
 before any install (recorded in the journal), or syncing up to the mount
 point of the destination's filesystem.
 
-### `suite pbfhogg`'s dry-run branch is unreachable (2026-11-04)
-
-`pbfhogg::cmd::bench_all` opens with a `req.dry_run` branch that resolves
-the PBF and prints `ok (suite pbfhogg)`, but its one caller, the `suite` arm
-in `src/main_parts/dispatch.rs`, refuses `--dry-run` for every suite before
-it dispatches. Either the refusal goes for pbfhogg (the branch is a working
-dry run) or the branch goes. Found while respelling the retired `bench all`
-name.
-
 ### Bench `.lua` files are outside the gremlins scan (2026-11-04)
 
 The gremlins phase scans a fixed extension set (`SCANNED_EXTENSIONS` in
@@ -340,7 +236,7 @@ Found while landing the script-bench schema.
 
 Found while landing the script-bench resource protocol. `~/.brokkr/launch-leases/`
 (`reservations::store::Store::user`) is per-user state that now holds
-script-bench iterations as well as pbfhogg launches, but it is not among
+script-bench iterations and children, but it is not among
 `health.rs`'s user stores, so `brokkr env` neither sizes it nor names its
 remedy, and its path is built in `store.rs` rather than through
 `user_dirs`. Its leases are small; the private and iteration directories
@@ -604,20 +500,6 @@ With 55+ top-level commands, `--help` is a wall of text. `display_order` groups 
 ---
 
 ## CLI sync backlog
-
-### pbfhogg: new flags on existing commands
-
-New flags that could warrant additional `bench commands` variants or verify coverage:
-
-- `tags-filter`: `-i/--invert-match`, `-e/--expressions`, `-t/--remove-tags`
-- `getid`: `-I/--id-osm-file`, `--verbose-ids` (`--remove-tags` has verify coverage in `verify getid-removeid`; no bench variant)
-- `diff`: `--summary`, `--quiet`, `--output`
-- `inspect`: `-e/--extended`, `-g/--get`, `--json`
-- `extract`: `--clean`, `--set-bounds`
-- `check-refs`: `--show-ids`
-- `derive-changes`: `--update-timestamp`, `--increment-version`
-- `tags-count`: `-M`, `-s`
-- `degrade`: the typed measured command forwards only `--unsort`, `--strip-locations` and `--strip-indexdata`; pbfhogg's `--unsort-intra`, `--drop-ids N:SEED`, `--elements-per-blob`, `--force`, `--strip-tagdata`, `--strip-bbox` and the `--corrupt-*` rewrites have no `brokkr degrade` flag, so no measured run or `--as-snapshot` artifact can use them. `verify degrade` (brokkr#117) drives the decode-path flags through its own argv and needs none of this.
 
 ### elivagar: memory-budget run flags not exposed
 

@@ -1560,6 +1560,42 @@ xxhash = "cccccccccccccccccccccccccccccccc"
     }
 
     #[test]
+    fn retired_pbfhogg_expectations_still_parse_and_validate() {
+        let parse = |body: &str| {
+            let root: toml::Value = toml::from_str(body).unwrap();
+            parse_hosts(root.as_table().unwrap())
+        };
+        let body = r#"
+project = "pbfhogg"
+[h.datasets.de.pbf.raw]
+file = "de.pbf"
+[h.datasets.de.pbf.raw.expect]
+check-refs = "clean"
+check-refs-relations = "violations"
+check-ids = "clean"
+check-index = "clean"
+check-locations = "clean"
+check-locations-agreement = "violations"
+diff = { "123" = "differs" }
+[h.datasets.de.expect.diff-snapshots]
+"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa+BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" = "same"
+"#;
+        let hosts = parse(body).unwrap();
+        let ds = &hosts["h"].datasets["de"];
+        assert_eq!(ds.pbf["raw"].expect.check_refs, Some(CheckVerdict::Clean));
+        assert_eq!(ds.pbf["raw"].expect.diff["123"], DiffVerdict::Differs);
+        assert_eq!(ds.expect.diff_snapshots.len(), 1);
+        for bad in [
+            body.replace("check-refs =", "unknown-check ="),
+            body.replace("check-refs = \"clean\"", "check-refs = \"maybe\""),
+            body.replace("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bad-digest"),
+            format!("{body}\n\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" = \"same\"\n"),
+        ] {
+            assert!(parse(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn dataset_bench_id_lists_parse_and_refuse_bad_entries() {
         let parse = |line: &str| {
             let toml_str = format!("project = \"pbfhogg\"\n[h.datasets.de]\n{line}\n");

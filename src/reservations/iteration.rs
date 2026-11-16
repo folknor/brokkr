@@ -6,8 +6,7 @@
 //! with `out/`, `scratch/`, `stdout/`, `stderr/` and `profile/` inside it,
 //! for writing. Each child
 //! launches with a borrow of its own, a lease whose record names the owner
-//! and the call's declared resources, and inherits that one descriptor as a
-//! pbfhogg child inherits its launch lease. A held borrow pins its owner: a
+//! and the call's declared resources, and inherits that one descriptor. A held borrow pins its owner: a
 //! scan keeps a free owner while any borrow of it is held, so a brokkr that
 //! dies under a running child never has the iteration reclaimed under it,
 //! and the scan after the last holder is gone reclaims both. A borrow's

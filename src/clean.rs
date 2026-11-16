@@ -49,7 +49,7 @@ impl Cleaner {
     }
 
     /// [`dir`](Self::dir) for a pbfhogg target, through the reservation gate
-    /// (`crate::reservations`): a tree a running pbfhogg launch uses, or one
+    /// (`crate::reservations`): a tree a reserved launch uses, or one
     /// holding a pbfhogg backup, is named and skipped, not removed, and the
     /// rest of the clean goes on.
     fn guarded_dir(&self, path: &Path) -> Result<bool, DevError> {

@@ -71,45 +71,18 @@ impl Ending {
     }
 }
 
-/// The exits a run counts as completed, and whether its exit status is its
-/// answer. An ordinary command completes on 0 alone; an answer command
-/// (pbfhogg's `diff` finding differences, `check` finding violations)
-/// completes on the answers it may give, which can exclude 0 when the input
-/// is expected to answer no, and records which one it gave.
+/// The exit codes a run counts as completed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Exits {
     codes: &'static [i32],
-    answer: bool,
 }
 
 impl Exits {
-    /// Exit 0 only, and the exit is not an answer.
-    pub const SUCCESS: Self = Self {
-        codes: &[0],
-        answer: false,
-    };
-
-    /// An answer command completing on exactly `codes`. Empty means no
-    /// exit completes it.
-    pub const fn answer(codes: &'static [i32]) -> Self {
-        Self {
-            codes,
-            answer: true,
-        }
-    }
+    /// Exit 0 only.
+    pub const SUCCESS: Self = Self { codes: &[0] };
 
     pub fn accepts(self, code: i32) -> bool {
         self.codes.contains(&code)
-    }
-
-    /// Whether the exit status is the command's answer, recorded on its row.
-    pub fn is_answer(self) -> bool {
-        self.answer
-    }
-
-    #[cfg(test)]
-    pub fn codes(self) -> &'static [i32] {
-        self.codes
     }
 }
 

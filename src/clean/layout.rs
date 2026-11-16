@@ -135,17 +135,6 @@ impl ProjectState {
         self.root.join("sluggrs-visual.db")
     }
 
-    /// Which pbfhogg builds accept which flags, keyed by executable digest.
-    pub(crate) fn pbfhogg_capabilities_file(&self) -> PathBuf {
-        self.root.join("pbfhogg-capabilities")
-    }
-
-    /// The input the pbfhogg exit-code probe names. Never created: the probe
-    /// asks how a build fails on an input that does not exist.
-    pub(crate) fn pbfhogg_exit_probe_input(&self) -> PathBuf {
-        self.root.join("pbfhogg-exit-probe-missing.osm.pbf")
-    }
-
     /// The reference cache the retired `brokkr verify` left under the state
     /// root. Nothing writes it now; `brokkr clean` still sweeps it.
     pub(crate) fn verify_reference_dir(&self) -> PathBuf {
@@ -380,7 +369,7 @@ pub(crate) enum PbfhoggFileKind {
     Text,
 }
 
-/// Pbfhogg's known scratch outputs. These names come from the command layer;
+/// The retired pbfhogg commands' known scratch outputs, kept for cleanup;
 /// arbitrary `.pbf`/`.osc.gz` files in scratch are not targets.
 pub(crate) struct PbfhoggLayout<'a> {
     paths: &'a config::ResolvedPaths,
@@ -454,10 +443,6 @@ impl<'a> PbfhoggLayout<'a> {
         scratch_dir.join("multi-extract")
     }
 
-    pub(crate) fn fixed_scratch_dir(scratch_dir: &Path, name: &str) -> PathBuf {
-        scratch_dir.join(name)
-    }
-
     pub(crate) fn scratch_dir_with_dataset(
         scratch_dir: &Path,
         prefix: &str,
@@ -505,7 +490,7 @@ impl<'a> PbfhoggLayout<'a> {
 
         let scratch_dir = self.scratch();
         let mut files = BTreeSet::new();
-        // Pbfhogg's current writers do not create a `.pbfhogg-external-join-*`
+        // The retired typed commands did not create a `.pbfhogg-external-join-*`
         // directory, so clean does not reclaim that unconstructed namespace.
         for name in [
             "bench-merge-output.osm.pbf",

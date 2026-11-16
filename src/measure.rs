@@ -222,7 +222,7 @@ pub struct BenchConfig {
     pub metadata: Vec<KvPair>,
     /// Measurement identity the brokkr argv cannot carry: a selection a
     /// project command resolves from config into the subprocess argv (the
-    /// pbfhogg getid/getparents IDs a dataset configures). Recorded with the
+    /// tilegen flags a dataset configures). Recorded with the
     /// row's own invocation and folded into its stored `arm_key`, so rows
     /// that measured different selections never pair. `None` leaves the key
     /// exactly the argv's.
@@ -484,13 +484,6 @@ impl BenchHarness {
         *self.build_identity.borrow_mut() = Some(identity);
     }
 
-    /// Stop attributing a build: the rows that follow measure an executable
-    /// brokkr did not build (an installed tool), so they record no provenance
-    /// rather than the last build's.
-    pub fn forget_build(&self) {
-        *self.build_identity.borrow_mut() = None;
-    }
-
     /// Attach captured env-var snapshot (see [`crate::config::captured_env_pairs`]).
     /// Merged into every row's kv via `build_row`.
     pub fn with_env_kv(mut self, env_kv: Vec<crate::db::KvPair>) -> Self {
@@ -630,10 +623,9 @@ impl BenchHarness {
         let program = invocation.program();
         self.measure(config, Some(program), source, true, |i, fifo| {
             prepare()?;
-            let launched = invocation.launch(cwd)?;
-            let mut iteration = self.capture(
+            let iteration = self.capture(
                 program,
-                &launched.arg_refs(),
+                &invocation.arg_refs(),
                 cwd,
                 &[],
                 exits,
@@ -641,9 +633,6 @@ impl BenchHarness {
                 i,
                 None,
             )?;
-            if let Err(error) = launched.finish() {
-                iteration.fail(error);
-            }
             Ok(iteration)
         })
     }
@@ -713,7 +702,7 @@ fn config_for(config: &BenchConfig, invocation: &Invocation<'_>) -> BenchConfig 
 
 mod argv;
 pub use argv::format_cli_args;
-pub(crate) use argv::{Executable, ExternalTool, Invocation, ResolvedExecutable};
+pub(crate) use argv::{Executable, Invocation};
 pub(crate) mod capture;
 pub(crate) mod execution;
 pub(crate) mod kv;

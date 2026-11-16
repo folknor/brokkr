@@ -80,14 +80,7 @@ command at all. That product cannot be enumerated, and a registry that must be
 edited before a new question can be asked will not survive a decade of asking
 them.
 
-pbfhogg is the precedent, with a difference. Its `brokkr.toml` registers
-**zero** workloads; it registers inputs. Its command shapes do live in a
-registry, though: brokkr's typed pbfhogg layer (`PbfhoggCommand`) defines each
-measurable command's argv once, and brokkr is edited when pbfhogg gains one.
-What that layer does not enumerate is the product: commands, flag axes and
-datasets combine at the call site, the invocation is captured verbatim, and
-pairing rows is a query rather than a name lookup. Mogwai drops the typed layer
-as well and captures the argv itself.
+pbfhogg uses script benches; its typed command registry has been removed.
 
 What went with it, and why:
 

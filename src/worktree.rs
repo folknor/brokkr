@@ -538,7 +538,7 @@ pub fn purge_all(git_root: &Path) -> Result<usize, DevError> {
     Ok(removed)
 }
 
-/// Whether a worktree went: a refusal by the reservation gate (a pbfhogg
+/// Whether a worktree went: a refusal by the reservation gate (a reserved
 /// launch still uses it, or it holds a pbfhogg backup) is named and skipped,
 /// so the purge goes on with the others; any other error stops it.
 fn kept_if_reserved(result: Result<(), DevError>, path: &Path) -> Result<bool, DevError> {
@@ -570,11 +570,11 @@ pub fn remove_one(git_root: &Path, slot: &Path) -> Result<(), DevError> {
             (Some(key), Some(short)) if dest.ends_with(Path::new(TARGET_SUBDIR).join(key).join(short))
         ) && dest.exists()
     });
-    // A running pbfhogg launch can read inputs or write outputs anywhere, a
+    // A reserved launch can read inputs or write outputs anywhere, a
     // worktree included (`crate::reservations`): the whole removal runs under
     // the gate, refused while a lease overlaps the slot or its target dir.
-    // pbfhogg outputs land in a worktree only under its target dir's
-    // `verify` (`verify --commit`), so that is the one tree searched for a
+    // Retired verify commands left output under the target dir's `verify`,
+    // so that is the one tree searched for a
     // pbfhogg backup, rather than the whole checkout and cargo target dir.
     let mut targets: Vec<&Path> = vec![slot];
     targets.extend(dest.as_deref());

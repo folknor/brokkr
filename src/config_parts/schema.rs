@@ -15,64 +15,6 @@ use crate::datasets::{Bbox, ElementIdList};
 // Data structures
 // ---------------------------------------------------------------------------
 
-/// Inclusive OSC sequence range used by the CLI and resolver.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OscRange {
-    lo: u64,
-    hi: u64,
-    source: String,
-}
-
-impl OscRange {
-    pub(crate) const fn lo(&self) -> u64 {
-        self.lo
-    }
-
-    pub(crate) const fn hi(&self) -> u64 {
-        self.hi
-    }
-}
-
-impl FromStr for OscRange {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (lo, hi) = value
-            .split_once("..")
-            .ok_or_else(|| format!("expected LO..HI, got '{value}'"))?;
-        let lo = lo
-            .parse::<u64>()
-            .map_err(|error| format!("invalid LO '{lo}': {error}"))?;
-        let hi = hi
-            .parse::<u64>()
-            .map_err(|error| format!("invalid HI '{hi}': {error}"))?;
-        if lo > hi {
-            return Err(format!("LO ({lo}) must be <= HI ({hi})"));
-        }
-        Ok(Self {
-            lo,
-            hi,
-            source: value.to_owned(),
-        })
-    }
-}
-
-impl std::fmt::Display for OscRange {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.source)
-    }
-}
-
-impl<'de> Deserialize<'de> for OscRange {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        value.parse().map_err(de::Error::custom)
-    }
-}
-
 /// The one bbox text parser used by clap and host dataset deserialization.
 /// `datasets::Bbox::parse` owns the token and finite-number parsing; this
 /// adapter adds the geographic bounds and min/max ordering required by every
@@ -1849,8 +1791,7 @@ pub struct PbfEntry {
     /// Force the compact node store without the PBF sort header.
     #[serde(default)]
     pub force_sorted: bool,
-    /// The answers pbfhogg's answer commands should give on this file,
-    /// declared by hand (pbfhogg). Absent: unknown, either answer is stored.
+    /// Accepted and validated for config compatibility; unused by brokkr.
     #[serde(default)]
     pub expect: PbfExpect,
 }
@@ -1875,41 +1816,13 @@ pub enum DiffVerdict {
     Differs,
 }
 
-impl CheckVerdict {
-    pub fn exit_code(self) -> i32 {
-        match self {
-            Self::Clean => 0,
-            Self::Violations => 1,
-        }
-    }
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Clean => "clean",
-            Self::Violations => "violations",
-        }
-    }
-}
-
-impl DiffVerdict {
-    pub fn exit_code(self) -> i32 {
-        match self {
-            Self::Same => 0,
-            Self::Differs => 1,
-        }
-    }
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Same => "same",
-            Self::Differs => "differs",
-        }
-    }
-}
-
-/// `[..pbf.<variant>.expect]`: expected answers on one PBF file. Handwritten;
+/// `[..pbf.<variant>.expect]`: accepted for compatibility and unused.
+/// Expected answers on one PBF file. Handwritten;
 /// it follows the effective composed entry, so an `include` override of
 /// `file` alone keeps the expectations declared for the file it replaced.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
+#[allow(dead_code)]
 pub struct PbfExpect {
     /// Covers `check-refs` without `--check-relations` only: a relation
     /// check can find violations on a file whose way refs are clean.
@@ -1958,11 +1871,13 @@ impl FromStr for DigestPair {
     }
 }
 
-/// `[..datasets.<name>.expect]`: expected answers about pairs of this
+/// `[..datasets.<name>.expect]`: accepted for compatibility and unused.
+/// Expected answers about pairs of this
 /// dataset's PBF files, addressed by content so a rotation or a replaced
 /// snapshot can never retarget one.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
+#[allow(dead_code)]
 pub struct DatasetExpect {
     /// `diff-snapshots` between the two files whose registered digests the
     /// key names, `"<xxhash>+<xxhash>"` in either order.
@@ -2013,8 +1928,7 @@ pub struct PolygonEntry {
 }
 
 /// A historical snapshot of a dataset - a different point-in-time capture
-/// of the same region. Snapshots are first-class for the `diff-snapshots`
-/// command and any future operation that takes a pair of snapshot refs.
+/// of the same region, available in the script-bench resolved view.
 ///
 /// Snapshots are NOT variants in the `pbf.raw` / `pbf.indexed` sense - those
 /// are transforms of one PBF. A snapshot is a different PBF (e.g. a different
@@ -2029,9 +1943,7 @@ pub struct Snapshot {
     /// PBF variants keyed by name (e.g. "raw", "indexed").
     #[serde(default)]
     pub pbf: HashMap<String, PbfEntry>,
-    /// OSC files keyed by sequence number. Stored but not consumed by any
-    /// current command - pre-positioned for future `apply-changes --snapshot`
-    /// / `merge-changes --snapshot` style commands.
+    /// OSC files keyed by sequence number, available in the resolved view.
     #[serde(default)]
     pub osc: HashMap<String, OscEntry>,
 }
@@ -2040,7 +1952,7 @@ pub struct Snapshot {
 /// or more historical snapshots.
 ///
 /// The top-level `pbf` and `osc` tables are the dataset's "primary" snapshot
-/// (referenced as `base` by the `diff-snapshots` command). Additional
+/// (referenced as `base` in dataset resolution). Additional
 /// snapshots live under `snapshot.<key>` with their own pbf/osc tables.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2051,11 +1963,10 @@ pub struct Dataset {
     /// Validated longitude/latitude bounds in
     /// `lon_min,lat_min,lon_max,lat_max` order.
     pub bbox: Option<Bbox>,
-    /// IDs the pbfhogg getid bench requests on this dataset (every variant
-    /// and snapshot). Absent: the built-in Denmark list.
+    /// Accepted and validated for compatibility; unused former getid selection.
     #[serde(default)]
     pub getid_ids: Option<ElementIdList>,
-    /// IDs the pbfhogg getparents bench requests. Absent: the built-in list.
+    /// Accepted and validated for compatibility; unused former getparents selection.
     #[serde(default)]
     pub getparents_ids: Option<ElementIdList>,
     /// Retired: the ingested-store directory the retired nidhogg commands
@@ -2082,7 +1993,7 @@ pub struct Dataset {
     /// because it's the CLI sentinel for the legacy top-level data.
     #[serde(default)]
     pub snapshot: HashMap<String, Snapshot>,
-    /// Expected answers about pairs of this dataset's PBF files (pbfhogg).
+    /// Accepted and validated for compatibility; unused former pair expectations.
     #[serde(default)]
     pub expect: DatasetExpect,
     /// A plain out-of-git input: one path, one digest, no variant structure.

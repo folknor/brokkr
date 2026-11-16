@@ -89,39 +89,13 @@ Crit => ("crit", Visibility::Any, Optional, None, true, crate::measure::MeasureM
 Bench => ("bench", Visibility::Any, Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::SCRIPT_BENCH), &["cargo"], Direct),
 Deps => ("deps", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Env => ("env", Visibility::Any, Required, None, false, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Inspect => ("inspect", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-CheckRefs => ("check-refs", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-CheckIds => ("check-ids", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-CheckIndex => ("check-index", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-CheckLocations => ("check-locations", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-Digest => ("digest", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-Sort => ("sort", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-Cat => ("cat", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-TagsFilter => ("tags-filter", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-Getid => ("getid", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-Getparents => ("getparents", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-Renumber => ("renumber", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-MergeChanges => ("merge-changes", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-ApplyChanges => ("apply-changes", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-AddLocationsToWays => ("add-locations-to-ways", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-Repack => ("repack", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-Degrade => ("degrade", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-MultiExtract => ("multi-extract", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-TimeFilter => ("time-filter", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-Diff => ("diff", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-DiffSnapshots => ("diff-snapshots", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-BuildGeocodeIndex => ("build-geocode-index", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-Extract => ("extract", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-Read => ("read", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-Write => ("write", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
-MergeBench => ("merge", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
 Tilegen => ("tilegen", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
 PmtilesWriter => ("pmtiles-writer", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
 NodeStore => ("node-store", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
 ElivPlanetiler => ("planetiler", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "java"], Mode),
 ElivTilemaker => ("tilemaker", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "cmake", "g++", "make"], Mode),
 GenericHotpath => ("generic-hotpath", Visibility::Any, Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
-Suite => ("suite", Visibility::Only(&[Project::Pbfhogg, Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
+Suite => ("suite", Visibility::Only(&[Project::Elivagar]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
 Passthrough => ("passthrough", Visibility::Any, Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Results => ("results", Visibility::Any, Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Sidecar => ("sidecar", Visibility::Any, Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
@@ -240,33 +214,7 @@ impl CommandSpec {
             WorktreePolicy::None => Ok(false),
             WorktreePolicy::Mode => {
                 let mode = match command {
-                    super::Command::Inspect { mode, .. }
-                    | super::Command::CheckRefs { mode, .. }
-                    | super::Command::CheckIds { mode, .. }
-                    | super::Command::CheckIndex { mode, .. }
-                    | super::Command::CheckLocations { mode, .. }
-                    | super::Command::Digest { mode, .. }
-                    | super::Command::Sort { mode, .. }
-                    | super::Command::Cat { mode, .. }
-                    | super::Command::TagsFilter { mode, .. }
-                    | super::Command::Getid { mode, .. }
-                    | super::Command::Getparents { mode, .. }
-                    | super::Command::Renumber { mode, .. }
-                    | super::Command::MergeChanges { mode, .. }
-                    | super::Command::ApplyChanges { mode, .. }
-                    | super::Command::AddLocationsToWays { mode, .. }
-                    | super::Command::Repack { mode, .. }
-                    | super::Command::Degrade { mode, .. }
-                    | super::Command::MultiExtract { mode, .. }
-                    | super::Command::TimeFilter { mode, .. }
-                    | super::Command::Diff { mode, .. }
-                    | super::Command::DiffSnapshots { mode, .. }
-                    | super::Command::BuildGeocodeIndex { mode, .. }
-                    | super::Command::Extract { mode, .. }
-                    | super::Command::Read { mode, .. }
-                    | super::Command::Write { mode, .. }
-                    | super::Command::MergeBench { mode, .. }
-                    | super::Command::Tilegen { mode, .. }
+                    super::Command::Tilegen { mode, .. }
                     | super::Command::PmtilesWriter { mode, .. }
                     | super::Command::NodeStore { mode, .. }
                     | super::Command::ElivPlanetiler { mode, .. }

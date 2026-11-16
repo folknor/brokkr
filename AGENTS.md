@@ -31,7 +31,7 @@ The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bar
 - `reference/results-server.md` - how `brokkr-results-server` is built. Read before changing `src/bin/results_server/`. Running it: `docs/results-server.md`.
 - `reference/bench-resources.md` - what a script-bench iteration owns: leases, admission, handles, placement. Read before changing `src/reservations/iteration.rs` or `src/bench/resources.rs`.
 - `docs/commands/visual.md`, `hotpath.md`, `sync.md`, `ratatoskr-gate.md`, `service.md`, `corpus.md` - project-specific commands.
-- `docs/projects/*.md` - per-project commands and internals; `pbfhogg-vs-elivagar.md` contrasts the two dispatch layers.
+- `docs/projects/*.md` - per-project commands and internals; pbfhogg uses script benches and generic commands.
 
 ## Architecture
 
@@ -44,7 +44,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `src/lock/`, `src/hold.rs`, `src/guard.rs`, `src/stray.rs`, `src/test_orphans.rs` - the global lock, compile capability, rustc guard and reapers.
 - `src/measure/`, `src/harness.rs`, `src/db/`, `src/sidecar.rs` - measurement and result stores; `src/bench/store/` is the per-user store of script-bench runs, served over HTTP by `src/bin/results_server/` and reached by `src/bench/remote.rs`.
 - `src/bench/` - script benches: `runner/` runs `brokkr bench NAME`, `lua.rs` is the only seam to the dellingr VM.
-- `src/<project>/` - project-specific commands.
+- `src/<project>/` - project-specific commands (pbfhogg has no typed command module).
 
 ## Shared commands quick reference
 

@@ -12,31 +12,15 @@ pub(crate) enum ResolveError {
         key: String,
         available: Vec<String>,
     },
-    EmptySelection {
-        scope: String,
-        kind: String,
-    },
-    AmbiguousSelection {
-        scope: String,
-        kind: String,
-        flag: String,
-        available: Vec<String>,
-    },
     UnknownSnapshot {
         dataset: String,
         key: String,
         available: Vec<String>,
     },
-    MissingOsc {
-        scope: String,
-        seq: u64,
-        range: crate::config::OscRange,
-    },
     MissingFile {
         kind: String,
         path: std::path::PathBuf,
     },
-    MissingBbox(String),
     InvalidSnapshot(String),
     SnapshotVariant {
         dataset: String,
@@ -66,17 +50,6 @@ impl fmt::Display for ResolveError {
                     available.join(", ")
                 }
             ),
-            Self::EmptySelection { scope, kind } => write!(f, "{scope} has no {kind} configured"),
-            Self::AmbiguousSelection {
-                scope,
-                kind,
-                flag,
-                available,
-            } => write!(
-                f,
-                "{scope} has multiple {kind} entries - use {flag} to select (available: {})",
-                available.join(", ")
-            ),
             Self::UnknownSnapshot {
                 dataset,
                 key,
@@ -86,19 +59,12 @@ impl fmt::Display for ResolveError {
                 "dataset '{dataset}' has no snapshot '{key}' (available: {})",
                 available.join(", ")
             ),
-            Self::MissingOsc { scope, seq, range } => write!(
-                f,
-                "{scope} missing osc.{seq} (required by --osc-range {range})"
-            ),
             Self::MissingFile { kind, path } => write!(
                 f,
                 "{} file not found: {}",
                 kind.to_uppercase(),
                 path.display()
             ),
-            Self::MissingBbox(dataset) => {
-                write!(f, "dataset '{dataset}' has no bbox configured (use --bbox)")
-            }
             Self::InvalidSnapshot(message) => f.write_str(message),
             Self::SnapshotVariant {
                 dataset,

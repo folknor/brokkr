@@ -390,7 +390,7 @@ than this reaper is.
 The reap (and the stale-guard check below) runs inside `lockfile::acquire`
 itself, once per *fresh* hold - never on a re-entrant acquire, whose outer hold
 already reaped. It used to live in one command wrapper, and roughly a dozen
-paths that took the lock directly (bench contexts, the old pbfhogg verify harness,
+paths that took the lock directly (bench contexts,
 piners, ratatoskr) silently skipped it.
 
 A consequence worth naming: the post-acquisition reap runs only once the hold is
@@ -413,7 +413,7 @@ lanes that child is cargo, and the test binary beneath it (or a doctest under
 rustdoc, or anything a test spawned) is reparented and keeps running.
 
 Every process a test runner starts - libtest lanes and nextest lane alike -
-and every child that inherits a lease (a reserved pbfhogg launch, a
+and every child that inherits a lease (a reserved launch, a
 script-bench call's borrow: `src/reservations/`, which also gives it the
 parent-death signal) carries `BROKKR_TEST_RUN=<token>`, one random token
 per brokkr process, and

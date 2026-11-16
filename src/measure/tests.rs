@@ -19,7 +19,6 @@ mod persistence {
         clippy::let_underscore_must_use,
         clippy::useless_vec
     )]
-    use crate::bench_variants::*;
     use crate::db::{KvPair, KvValue};
     use crate::git::GitInfo;
     use crate::measure::*;
@@ -50,48 +49,6 @@ mod persistence {
         let unaliased =
             sidecar_summary_line("a1b2c3d4", Filing::Unstored { aliased: false }, &[], 0);
         assert_eq!(unaliased, "(sidecar.db a1b2c3d4, no results row)");
-    }
-
-    // -----------------------------------------------------------------------
-    // run_variants
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn run_variants_refuses_an_empty_selection() {
-        // The retired nidhogg `brokkr api --query typo --bench` filtered its
-        // query list to nothing and used to record no rows and exit 0.
-        let mut calls = 0;
-        let result = run_variants("query", &[], |_| {
-            calls += 1;
-            Ok(())
-        });
-        assert!(matches!(result, Err(DevError::Refused(_))));
-        assert_eq!(calls, 0);
-    }
-
-    #[test]
-    fn run_variants_summary_names_the_variants_and_renders_bare() {
-        let result = run_variants("query", &["a", "b", "c"], |v| {
-            if v == "c" {
-                Ok(())
-            } else {
-                Err(DevError::Refused(format!("{v} broke")))
-            }
-        });
-        let e = result.unwrap_err();
-        assert!(matches!(e, DevError::Reported(_)), "{e:?}");
-        assert_eq!(e.to_string(), "2 of 3 variants failed: a, b");
-    }
-
-    #[test]
-    fn run_variants_stops_at_a_shutdown() {
-        let mut calls = 0;
-        let result = run_variants("query", &["a", "b"], |_| {
-            calls += 1;
-            Err(DevError::Interrupted)
-        });
-        assert!(matches!(result, Err(DevError::Interrupted)));
-        assert_eq!(calls, 1);
     }
 
     // -----------------------------------------------------------------------

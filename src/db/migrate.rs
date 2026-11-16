@@ -165,7 +165,7 @@ fn migrate_v26_to_v27(conn: &rusqlite::Connection) -> Result<(), DevError> {
             continue;
         }
         let Some(qualifier) =
-            crate::pbfhogg::bench_cells::historical_qualifier(&command, &cli_args)
+            super::historical_qualifier::historical_qualifier(&command, &cli_args)
         else {
             continue;
         };

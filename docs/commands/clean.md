@@ -83,7 +83,7 @@ No flag removes these either. What keeps each in check, where anything does:
 | `<scratch>/bench-iterations/` | each script-bench iteration's directory goes with its lease, at its end or, after a crash, once nothing holding its reservation runs; the empty container stays |
 | `$XDG_DATA_HOME/brokkr/sidecar-backups/` | nothing: three whole copies of each project root's sidecar.db, in a directory per root whose `origin` file names it, never pruned; a moved checkout starts a new one. The kind-keyed `<kind>-sidecar.db`, `.1`, `.2` an earlier brokkr wrote at the top level stay too, never written again; delete either by hand |
 | `.brokkr/hash_cache`, `hash_cache.lock` | a save drops entries for files that no longer exist; a run that only hits the cache does not save |
-| `.brokkr/pbfhogg-capabilities` | capped at 512 lines |
+| `.brokkr/pbfhogg-capabilities` | retired, no longer read or written; safe to delete |
 | `.brokkr/worktrees.toml` | cutting a new `--commit` worktree drops the vanished records of that checkout only; nothing else does |
 | `.brokkr/parallel-timings.toml` | nothing: measured costs merge in per sweep and binary, and a sweep or binary that stops existing keeps its entries; advisory, and safe to delete |
 | `.brokkr/.sidecar.lock`, `.gitignore` | one small file each; the lock persists, and an existing `.gitignore` is never rewritten |
@@ -109,7 +109,7 @@ observed. `clean --dry-run` only lists them:
 Nothing sweeps these, and they can accumulate:
 
 - `.<name>.tmp-<pid>-<n>` beside a file brokkr replaces atomically (the hash
-  cache, the capabilities store, `worktrees.toml` and others), removed once
+  cache, `worktrees.toml` and others), removed once
   the replacement is published. Their writers do not all share one
   exclusion, and a lockless `brokkr env` writes the hash cache, so no sweep
   can prove one dead.
@@ -130,8 +130,8 @@ Bare `brokkr clean`, in order:
 - **Leases**, in every project, first: every free lease in the launch lease
   store is reclaimed with its private directory, wherever that sits, a
   script-bench iteration's included unless a borrow of it is still held,
-  and each lease kept is named with why (see "Launch reservations" in
-  `docs/projects/pbfhogg.md`). Script-bench iterations live under
+  and each lease kept is named with why (see the ownership protocol in
+  `reference/bench-resources.md`). Script-bench iterations live under
   `bench-iterations/` under the host's scratch, which clean never removes
   by name; elivagar's scratch wipe goes through the reservation gate, so a
   live iteration there keeps it.
@@ -143,12 +143,12 @@ Bare `brokkr clean`, in order:
   nidhogg commands left in scratch are removed. Those
   removals go through the reservation gate, since a configured directory
   can enclose a script-bench iteration a surviving child still holds: such
-  a directory is named and kept. Pbfhogg removes its known
+  a directory is named and kept. In pbfhogg, clean removes the retired commands' known
   bench/hotpath PBF, OSC and diff text outputs, `multi-extract/`, the `geocode-<dataset>/`
   dirs for configured datasets, merged-PBF cache names constructed from
   configured PBF/OSC entries.
   Its removals of pbfhogg's leftover verify output and scratch go through the
-  reservation gate, so a path a running pbfhogg launch still uses is named,
+  reservation gate, so a path a reserved child still uses is named,
   kept and skipped while the rest of the clean goes on, and a tree holding a
   `.pbfhogg-backup-*` is never removed; it also removes the fixed-name
   `.brokkr-pbfhogg/` directories an older brokkr left in scratch and the
@@ -205,8 +205,7 @@ runs keep on purpose for later: hung-test snapshots, the run directories of
 failed corpus and ratatoskr runs, an elivagar archive whose
 promotion failed, caches. Instead a measured attempt that a stop ends
 discards its own scratch output as it unwinds, still under its hold
-(`src/measure/runner.rs`): the plan's scratch directories, pbfhogg's command
-output, elivagar's partial archive and `tilegen_tmp`, and an external tool's
+(`src/measure/runner.rs`): the plan's scratch directories, elivagar's partial archive and `tilegen_tmp`, and an external tool's
 declared outputs. It does so only once a preparation has cleared those
 paths, and never for a stop during promotion, after execution completed; a
 path it cannot remove is named and kept. Other disposable working state an

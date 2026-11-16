@@ -2,8 +2,7 @@
 
 What one script-bench iteration owns, how its children borrow it, and what
 survives a crash. The protocol is `src/reservations/iteration.rs`, an
-extension of the launch-lease store pbfhogg's launches use (`brokkr man
-pbfhogg`, Launch reservations and the private directory); the handles a
+extension of the launch-lease store (`src/reservations/`); the handles a
 script's paths reach a child through are `src/bench/resources.rs`. The
 script-bench runner (`src/bench/runner/`, `brokkr man bench`) drives it, one
 owner per iteration; its tests run it against real children spawned through
@@ -20,7 +19,7 @@ the owner's descriptor; it is never lent to a child.
 Each child launches with a **borrow**: a lease of its own whose record names
 its owner and the call's declared resources, never a private one, since what
 it uses is the owner's to remove. The child inherits the borrow's descriptor
-and nothing else of the store's, as a pbfhogg child inherits its launch lease
+and nothing else of the store's, as a reserved child inherits its launch lease
 (made inheritable for that one child at the spawn choke point, with the
 parent-death signal and the orphan token). A borrow's release gives up
 brokkr's own copy and tests that no process holds it any more; that test is
@@ -48,8 +47,7 @@ held again, so a borrow seen held that exits during the scan only delays its
 owner's reclamation. A lease whose record cannot be read, other than a free
 borrow-named one, may be a borrow of any owner: while one exists, no free
 owner is reclaimed (it is kept, with that reason, and blocks what overlaps
-it). Leases with no tie, a pbfhogg launch's and a staged write's,
-are reclaimed exactly as before ties existed.
+it). Untied leases are reclaimed once their last holder exits.
 
 The record says which a lease is: version 2 adds `owner` and
 `borrows_from`, and a version 1 record reads as untied. A record with both,
@@ -296,7 +294,7 @@ a record lands in the evidence of the child whose borrow wrote it.
 The runner places every iteration directory in `<scratch>/bench-iterations/`,
 `scratch` the host's resolved scratch directory
 (`layout::bench_iterations_container`), so a script bench writes to the
-drive the typed commands do. The iteration directory is removed by its
+configured scratch drive. The iteration directory is removed by its
 lease alone, at the owner's release or by a later scan; `brokkr clean` has
 no name for it and reclaims free leases in every project, by the path each
 lease recorded.
@@ -315,8 +313,7 @@ gate or cannot name it.
 
 - A configured path can name it (a host's `scratch = ".brokkr"`, or another
   project's absolute scratch pointing here), so every recursive removal of a
-  configured directory goes through the gate, without the pbfhogg backup
-  walk outside pbfhogg: the measured runner's scratch trees in every
+  configured directory goes through the overlap gate: the measured runner's scratch trees in every
   project; in `brokkr clean`, elivagar's scratch, `tilegen_tmp` and corpus
   calibrands and the ingest outputs the retired nidhogg commands left;
   elivagar's tilegen removal of its

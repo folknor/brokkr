@@ -20,9 +20,9 @@ use crate::project::Project;
 use crate::request::{CorpusQuery, ResultsQuery, SidecarQuery};
 use crate::visual_approve_cmd::cmd_approve;
 use crate::{
-    check_cmd, cli, command_input, context, crit_cmd, elivagar, history_cmd, invalidate_cmd,
-    litehtml, lockfile, measure, mogwai, output, pbfhogg, piners, project, ratatoskr, results_cmd,
-    runnables, sidecar_cmd, sluggrs, test_cmd,
+    check_cmd, cli, context, crit_cmd, elivagar, history_cmd, invalidate_cmd, litehtml, lockfile,
+    measure, mogwai, output, piners, project, ratatoskr, results_cmd, runnables, sidecar_cmd,
+    sluggrs, test_cmd,
 };
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
@@ -393,35 +393,6 @@ fn with_target(program: &cli::ProgramArgs) -> Option<WithTarget<'_>> {
     })
 }
 
-/// `write`, `merge` and `read` share `PbfArgs` with the single-command benches
-/// but run pbfhogg's `bench-write`, `bench-merge` and `bench-read`, which take
-/// none of `--compression`, `--direct-io` and `--io-uring` (write and merge
-/// run their own codec matrix), so the flags would be silently ignored.
-/// Refuse them instead, naming the flag the matrix does honour.
-fn reject_unused_pbf_flags(
-    command: &str,
-    pbf: &crate::cli::PbfArgs,
-    uring_flag: Option<&str>,
-) -> Result<(), DevError> {
-    if pbf.compression.is_some() {
-        return Err(DevError::Usage(format!(
-            "{command} ignores --compression; use --compressions to pick the codecs it benchmarks"
-        )));
-    }
-    if pbf.direct_io {
-        return Err(DevError::Usage(format!(
-            "{command} does not support --direct-io"
-        )));
-    }
-    if pbf.io_uring {
-        return Err(DevError::Usage(match uring_flag {
-            Some(flag) => format!("{command} ignores --io-uring; use {flag}"),
-            None => format!("{command} does not support --io-uring"),
-        }));
-    }
-    Ok(())
-}
-
 // The project command table: one arm per subcommand, so its size tracks the CLI's.
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 fn run_project(
@@ -443,36 +414,6 @@ fn run_project(
     // the one-level-up layout used to drive a foreign checkout.
     let build_root = detection.build_root.as_path();
 
-    let command = match command.into_route() {
-        command_input::RoutedCommand::Pbf {
-            mode,
-            pbf,
-            command,
-            osc,
-            mut params,
-        } => {
-            params.io = pbf.io_mode();
-            params.compression = pbf.compression.clone();
-            return run_measured(
-                &mode,
-                detection,
-                &pbf.dataset,
-                &pbf.variant,
-                invocation,
-                |req| {
-                    measure::runner::run(
-                        req,
-                        &pbfhogg::plan::PbfhoggPlan {
-                            command: &command,
-                            osc_seq: osc.as_deref(),
-                            params: &params,
-                        },
-                    )
-                },
-            );
-        }
-        command_input::RoutedCommand::Other(command) => *command,
-    };
     match command {
         Command::Lock
         | Command::Kill { .. }
@@ -490,27 +431,7 @@ fn run_project(
         | Command::Install { .. }
         | Command::Wc { .. }
         | Command::Man { .. }
-        | Command::Deps { .. }
-        | Command::Inspect { .. }
-        | Command::CheckRefs { .. }
-        | Command::CheckIds { .. }
-        | Command::CheckIndex { .. }
-        | Command::CheckLocations { .. }
-        | Command::Digest { .. }
-        | Command::Sort { .. }
-        | Command::Cat { .. }
-        | Command::TagsFilter { .. }
-        | Command::Getid { .. }
-        | Command::Getparents { .. }
-        | Command::Renumber { .. }
-        | Command::MergeChanges { .. }
-        | Command::ApplyChanges { .. }
-        | Command::AddLocationsToWays { .. }
-        | Command::Repack { .. }
-        | Command::Degrade { .. }
-        | Command::TimeFilter { .. }
-        | Command::Diff { .. }
-        | Command::BuildGeocodeIndex { .. } => {
+        | Command::Deps { .. } => {
             unreachable!("top-level command dispatch must not re-enter through run_project")
         }
         Command::Env => cmd_env(
@@ -520,194 +441,6 @@ fn run_project(
             &detection.build_root,
             &detection.config_sources,
         ),
-        Command::DiffSnapshots {
-            mode,
-            dataset,
-            from,
-            to,
-            variant,
-            format,
-            jobs,
-        } => {
-            let params = crate::pbfhogg::context::CommandParams {
-                from_snapshot: Some(from.clone()),
-                to_snapshot: Some(to.clone()),
-                jobs,
-                ..Default::default()
-            };
-            run_measured(&mode, detection, &dataset, &variant, invocation, |req| {
-                let cmd = pbfhogg::commands::PbfhoggCommand::DiffSnapshots { format };
-                measure::runner::run(
-                    req,
-                    &pbfhogg::plan::PbfhoggPlan {
-                        command: &cmd,
-                        osc_seq: None,
-                        params: &params,
-                    },
-                )
-            })
-        }
-        Command::Extract {
-            mode,
-            pbf,
-            strategy,
-            bbox,
-            polygon,
-            snapshot,
-        } => {
-            let params = crate::pbfhogg::context::CommandParams {
-                io: pbf.io_mode(),
-                compression: pbf.compression.clone(),
-                bbox: bbox.clone(),
-                polygons: polygon.clone().into_iter().collect(),
-                snapshot: snapshot.clone(),
-                strategy_fanout: strategy == "all",
-                ..Default::default()
-            };
-            run_measured(
-                &mode,
-                detection,
-                &pbf.dataset,
-                &pbf.variant,
-                invocation,
-                |req| {
-                    if strategy == "all" {
-                        for strat in pbfhogg::commands::ExtractStrategy::all() {
-                            let cmd =
-                                pbfhogg::commands::PbfhoggCommand::Extract { strategy: *strat };
-                            measure::runner::run(
-                                req,
-                                &pbfhogg::plan::PbfhoggPlan {
-                                    command: &cmd,
-                                    osc_seq: None,
-                                    params: &params,
-                                },
-                            )?;
-                        }
-                        Ok(())
-                    } else {
-                        let strat = pbfhogg::commands::ExtractStrategy::parse(&strategy)?;
-                        let cmd = pbfhogg::commands::PbfhoggCommand::Extract { strategy: strat };
-                        measure::runner::run(
-                            req,
-                            &pbfhogg::plan::PbfhoggPlan {
-                                command: &cmd,
-                                osc_seq: None,
-                                params: &params,
-                            },
-                        )
-                    }
-                },
-            )
-        }
-        Command::MultiExtract {
-            mode,
-            pbf,
-            regions,
-            bbox,
-            polygon,
-            strategy,
-            snapshot,
-        } => {
-            let params = crate::pbfhogg::context::CommandParams {
-                io: pbf.io_mode(),
-                compression: pbf.compression.clone(),
-                bbox: bbox.clone(),
-                polygons: polygon.clone(),
-                snapshot: snapshot.clone(),
-                strategy_fanout: strategy == "all",
-                ..Default::default()
-            };
-            run_measured(
-                &mode,
-                detection,
-                &pbf.dataset,
-                &pbf.variant,
-                invocation,
-                |req| {
-                    if strategy == "all" {
-                        for strat in pbfhogg::commands::ExtractStrategy::all() {
-                            let cmd = pbfhogg::commands::PbfhoggCommand::MultiExtract {
-                                regions,
-                                strategy: *strat,
-                            };
-                            measure::runner::run(
-                                req,
-                                &pbfhogg::plan::PbfhoggPlan {
-                                    command: &cmd,
-                                    osc_seq: None,
-                                    params: &params,
-                                },
-                            )?;
-                        }
-                        Ok(())
-                    } else {
-                        let strat = pbfhogg::commands::ExtractStrategy::parse(&strategy)?;
-                        let cmd = pbfhogg::commands::PbfhoggCommand::MultiExtract {
-                            regions,
-                            strategy: strat,
-                        };
-                        measure::runner::run(
-                            req,
-                            &pbfhogg::plan::PbfhoggPlan {
-                                command: &cmd,
-                                osc_seq: None,
-                                params: &params,
-                            },
-                        )
-                    }
-                },
-            )
-        }
-        Command::Read {
-            mode,
-            pbf,
-            modes,
-            snapshot,
-        } => {
-            reject_unused_pbf_flags("read", &pbf, None)?;
-            run_measured(
-                &mode,
-                detection,
-                &pbf.dataset,
-                &pbf.variant,
-                invocation,
-                |req| pbfhogg::cmd::bench_read(req, &modes, snapshot.as_ref()),
-            )
-        }
-        Command::Write {
-            mode,
-            pbf,
-            compressions,
-        } => {
-            reject_unused_pbf_flags("write", &pbf, None)?;
-            run_measured(
-                &mode,
-                detection,
-                &pbf.dataset,
-                &pbf.variant,
-                invocation,
-                |req| pbfhogg::cmd::bench_write(req, &compressions),
-            )
-        }
-        Command::MergeBench {
-            mode,
-            pbf,
-            compressions,
-            uring,
-            osc_seq,
-        } => {
-            reject_unused_pbf_flags("merge", &pbf, Some("--uring"))?;
-            run_measured(
-                &mode,
-                detection,
-                &pbf.dataset,
-                &pbf.variant,
-                invocation,
-                |req| pbfhogg::cmd::bench_merge(req, osc_seq.as_deref(), uring, &compressions),
-            )
-        }
-
         // ----- elivagar commands -----
         Command::Tilegen {
             mode,
@@ -834,16 +567,12 @@ fn run_project(
                 ));
             }
             match name.as_str() {
-                "pbfhogg" => {
-                    project::require(project, &Project::Pbfhogg, "suite pbfhogg")?;
-                    pbfhogg::cmd::bench_all(req)
-                }
                 "elivagar" => {
                     project::require(project, &Project::Elivagar, "suite elivagar")?;
                     elivagar::cmd::bench_all(req)
                 }
                 other => Err(DevError::Usage(format!(
-                    "unknown suite: {other} (expected: pbfhogg, elivagar)"
+                    "unknown suite: {other} (expected: elivagar)"
                 ))),
             }
         }),

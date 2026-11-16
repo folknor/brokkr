@@ -1,6 +1,5 @@
 //! Resolve registered dataset entries and verify their input files.
 
-use super::Bbox;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -53,90 +52,6 @@ impl FileEntry for config::PolygonEntry {
     }
 }
 
-/// A resolved dataset polygon: its name, its on-disk GeoJSON file and the
-/// file's content digest, computed whether or not a pin is configured, since
-/// it is the region's identity in a results row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PolygonInput {
-    pub(crate) name: String,
-    pub(crate) path: PathBuf,
-    pub(crate) digest: preflight::Xxh128,
-}
-
-impl PolygonInput {
-    /// `name@digest`: the polygon's pairing identity. The name keeps two
-    /// configured polygons with the same bytes apart, the digest keeps one
-    /// name's rows from pairing across a change of its file.
-    pub(crate) fn identity(&self) -> String {
-        format!("{}@{}", self.name, self.digest)
-    }
-}
-
-/// Resolve the dataset polygon `name`: its file under the data directory,
-/// existence, its pin when one is configured, and its content digest.
-pub(crate) fn resolve_polygon(
-    dataset: &str,
-    name: &str,
-    paths: &config::ResolvedPaths,
-    project_root: &Path,
-) -> Result<PolygonInput, ResolveError> {
-    let ds = get_dataset(dataset, paths)?;
-    let path = resolve_entry_path(
-        &ds.polygon,
-        name,
-        dataset,
-        "polygon",
-        &paths.data_dir,
-        ds.origin.as_deref(),
-        project_root,
-    )?;
-    let digest = match preflight::cached_path_digest(&path, project_root)? {
-        preflight::PathDigest::File(digest) => digest.value(),
-        preflight::PathDigest::Tree(_) => {
-            return Err(ResolveError::Verification(crate::error::DevError::Config(
-                format!(
-                    "dataset '{dataset}' polygon '{name}' is a directory, not a GeoJSON file: {}",
-                    path.display()
-                ),
-            )));
-        }
-    };
-    Ok(PolygonInput {
-        name: name.to_owned(),
-        path,
-        digest,
-    })
-}
-
-/// Every polygon the dataset configures, ordered by name.
-pub(crate) fn resolve_polygons(
-    dataset: &str,
-    paths: &config::ResolvedPaths,
-    project_root: &Path,
-) -> Result<Vec<PolygonInput>, ResolveError> {
-    let ds = get_dataset(dataset, paths)?;
-    let mut names: Vec<&String> = ds.polygon.keys().collect();
-    names.sort();
-    names
-        .into_iter()
-        .map(|name| resolve_polygon(dataset, name, paths, project_root))
-        .collect()
-}
-
-/// Generic file resolver: lookup entry in map -> join path -> check exists -> verify hash.
-fn resolve_entry_path<E: FileEntry>(
-    entries: &HashMap<String, E>,
-    key: &str,
-    dataset: &str,
-    kind: &str,
-    data_dir: &Path,
-    origin: Option<&str>,
-    project_root: &Path,
-) -> Result<PathBuf, ResolveError> {
-    let entry = get_entry(entries, key, dataset, kind)?;
-    finalize_entry_path(entry, data_dir, kind, origin, project_root)
-}
-
 fn get_entry<'a, E>(
     entries: &'a HashMap<String, E>,
     key: &str,
@@ -155,7 +70,7 @@ fn get_entry<'a, E>(
     })
 }
 
-/// Tail of `resolve_entry_path`: build the on-disk path, check existence,
+/// Build the on-disk path, check existence,
 /// verify hash. Extracted so callers that want a custom "missing key" error
 /// (e.g. the snapshot pbf path) can reuse the file-checking logic.
 fn finalize_entry_path<E: FileEntry>(
@@ -181,32 +96,6 @@ fn finalize_entry_path<E: FileEntry>(
     Ok(path)
 }
 
-/// Select the sole configured entry, with deterministic diagnostics for zero or many.
-fn select_one<'a, E>(
-    entries: &'a HashMap<String, E>,
-    scope: &str,
-    kind: &str,
-    flag: &str,
-) -> Result<(&'a String, &'a E), ResolveError> {
-    if entries.is_empty() {
-        return Err(ResolveError::EmptySelection {
-            scope: scope.to_owned(),
-            kind: kind.to_owned(),
-        });
-    }
-    if entries.len() > 1 {
-        let mut available: Vec<String> = entries.keys().cloned().collect();
-        available.sort();
-        return Err(ResolveError::AmbiguousSelection {
-            scope: scope.to_owned(),
-            kind: kind.to_owned(),
-            flag: flag.to_owned(),
-            available,
-        });
-    }
-    Ok(entries.iter().next().expect("exactly one entry"))
-}
-
 /// Look up a dataset by name, returning it and its origin.
 ///
 /// This resolved table is authoritative for both paths and entry metadata.
@@ -226,8 +115,7 @@ fn get_dataset<'a>(
 // Snapshot resolution
 // ---------------------------------------------------------------------------
 
-/// A reference to a dataset snapshot used by `diff-snapshots` and any future
-/// command that takes snapshot pairs as input.
+/// A reference to a registered dataset snapshot.
 ///
 /// `Base` refers to the dataset's legacy top-level `pbf`/`osc` data - the
 /// "primary" snapshot. `Named(key)` refers to a snapshot registered under
@@ -243,6 +131,7 @@ pub(crate) enum SnapshotRef {
 ///
 /// Keep file-specific assertions attached to the same entry the resolver
 /// checked, rather than looking them up again through the raw host config.
+#[derive(Debug)]
 pub(crate) struct ResolvedPbf<'a> {
     pub(crate) path: PathBuf,
     pub(crate) entry: &'a config::PbfEntry,
@@ -258,11 +147,6 @@ impl SnapshotRef {
         }
         crate::config::validate_snapshot_key(s).map_err(ResolveError::InvalidSnapshot)?;
         Ok(Self::Named(s.to_owned()))
-    }
-
-    /// Select an already-parsed CLI snapshot, defaulting to the primary data.
-    pub(crate) fn from_opt(snapshot: Option<&Self>) -> Self {
-        snapshot.cloned().unwrap_or(Self::Base)
     }
 }
 
@@ -286,54 +170,6 @@ impl SnapshotRef {
             Self::Named(key) => key,
         }
     }
-}
-
-/// Get the OSC HashMap for a snapshot ref. `Base` returns the dataset's
-/// top-level `osc` table; `Named(key)` returns the snapshot's `osc` table.
-/// Errors if the snapshot key isn't registered.
-fn snapshot_osc_map<'a>(
-    dataset: &str,
-    snapshot: &SnapshotRef,
-    paths: &'a config::ResolvedPaths,
-) -> Result<&'a HashMap<String, config::OscEntry>, ResolveError> {
-    let ds = get_dataset(dataset, paths)?;
-    match snapshot {
-        SnapshotRef::Base => Ok(&ds.osc),
-        SnapshotRef::Named(key) => {
-            let snap = ds.snapshot.get(key).ok_or_else(|| {
-                let mut available: Vec<&str> = std::iter::once("base")
-                    .chain(ds.snapshot.keys().map(String::as_str))
-                    .collect();
-                available.sort();
-                ResolveError::UnknownSnapshot {
-                    dataset: dataset.to_owned(),
-                    key: key.clone(),
-                    available: available.into_iter().map(str::to_owned).collect(),
-                }
-            })?;
-            Ok(&snap.osc)
-        }
-    }
-}
-
-/// Get the dataset's `data_dir` (data files always live in the dataset's
-/// data dir; snapshots don't have their own data dir).
-fn dataset_data_dir(paths: &config::ResolvedPaths) -> &Path {
-    &paths.data_dir
-}
-
-/// Resolve a snapshot's PBF path for the given variant.
-///
-/// `Base` selects the top-level `pbf.<variant>` entry. `Named(key)` selects
-/// `dataset.snapshot.<key>.pbf.<variant>`.
-pub(crate) fn resolve_snapshot_pbf_path(
-    dataset: &str,
-    snapshot: &SnapshotRef,
-    variant: &str,
-    paths: &config::ResolvedPaths,
-    project_root: &Path,
-) -> Result<PathBuf, ResolveError> {
-    Ok(resolve_snapshot_pbf_entry(dataset, snapshot, variant, paths, project_root)?.path)
 }
 
 /// Resolve a snapshot PBF and retain the exact entry that supplied its path.
@@ -400,155 +236,10 @@ pub(crate) fn resolve_pbf_entry<'a>(
     resolve_snapshot_pbf_entry(dataset, &SnapshotRef::Base, variant, paths, project_root)
 }
 
-/// Resolve the PBF path from --dataset + --variant.
-pub(crate) fn resolve_pbf_path(
-    dataset: &str,
-    variant: &str,
-    paths: &config::ResolvedPaths,
-    project_root: &Path,
-) -> Result<PathBuf, ResolveError> {
-    Ok(resolve_pbf_entry(dataset, variant, paths, project_root)?.path)
-}
-
-/// Resolve a single OSC path along with the seq key it came from.
-///
-/// If `osc_seq` is `Some(seq)`, returns the path for that seq plus the seq
-/// itself. If `None`, auto-selects the only configured OSC entry (errors if
-/// zero or multiple), returning both its path and its key. The seq key is
-/// useful when constructing cache keys that need to disambiguate by OSC
-/// (e.g. the diff/diff-osc merged-PBF cache).
-pub(crate) fn resolve_single_osc(
-    dataset: &str,
-    snapshot: &SnapshotRef,
-    osc_seq: Option<&str>,
-    paths: &config::ResolvedPaths,
-    project_root: &Path,
-) -> Result<(PathBuf, String), ResolveError> {
-    let osc_map = snapshot_osc_map(dataset, snapshot, paths)?;
-    let ds = get_dataset(dataset, paths)?;
-    let origin = ds.origin.as_deref();
-    let data_dir = dataset_data_dir(paths);
-    let kind_label = match snapshot {
-        SnapshotRef::Base => "osc seq".to_string(),
-        SnapshotRef::Named(k) => format!("snapshot.{k}.osc seq"),
-    };
-
-    if let Some(seq) = osc_seq {
-        let path = resolve_entry_path(
-            osc_map,
-            seq,
-            dataset,
-            &kind_label,
-            data_dir,
-            origin,
-            project_root,
-        )?;
-        return Ok((path, seq.to_string()));
-    }
-
-    let where_clause = match snapshot {
-        SnapshotRef::Base => format!("dataset '{dataset}'"),
-        SnapshotRef::Named(key) => format!("dataset '{dataset}' snapshot '{key}'"),
-    };
-    let (key, _) = select_one(osc_map, &where_clause, "osc", "--osc-seq")?;
-    let key = key.clone();
-    let path = resolve_entry_path(
-        osc_map,
-        &key,
-        dataset,
-        &kind_label,
-        data_dir,
-        origin,
-        project_root,
-    )?;
-    Ok((path, key))
-}
-
-/// Resolve a range of OSC paths from `--osc-range LO..HI`.
-///
-/// Every integer seq in `[LO, HI]` must be present in the dataset's osc map;
-/// a missing seq fails fast with `missing osc.X`. Returns paths in ascending
-/// seq order. The CLI passes the range after its shared typed parse.
-pub(crate) fn resolve_osc_range(
-    dataset: &str,
-    snapshot: &SnapshotRef,
-    range: &config::OscRange,
-    paths: &config::ResolvedPaths,
-    project_root: &Path,
-) -> Result<Vec<PathBuf>, ResolveError> {
-    let (lo, hi) = (range.lo(), range.hi());
-
-    let osc_map = snapshot_osc_map(dataset, snapshot, paths)?;
-    let ds = get_dataset(dataset, paths)?;
-    let origin = ds.origin.as_deref();
-    let data_dir = dataset_data_dir(paths);
-    let kind_label = match snapshot {
-        SnapshotRef::Base => "osc seq".to_string(),
-        SnapshotRef::Named(k) => format!("snapshot.{k}.osc seq"),
-    };
-    let where_clause = match snapshot {
-        SnapshotRef::Base => format!("dataset '{dataset}'"),
-        SnapshotRef::Named(k) => format!("dataset '{dataset}' snapshot '{k}'"),
-    };
-
-    let mut resolved = Vec::new();
-    for seq in lo..=hi {
-        let key = seq.to_string();
-        if !osc_map.contains_key(&key) {
-            return Err(ResolveError::MissingOsc {
-                scope: where_clause.clone(),
-                seq,
-                range: range.clone(),
-            });
-        }
-        let path = resolve_entry_path(
-            osc_map,
-            &key,
-            dataset,
-            &kind_label,
-            data_dir,
-            origin,
-            project_root,
-        )?;
-        resolved.push(path);
-    }
-    Ok(resolved)
-}
-
-/// Resolve the already-parsed bbox from --bbox or dataset config.
-pub(crate) fn resolve_bbox(
-    bbox: Option<&Bbox>,
-    dataset: &str,
-    paths: &config::ResolvedPaths,
-) -> Result<Bbox, ResolveError> {
-    if let Some(bbox) = bbox {
-        return Ok(bbox.clone());
-    }
-    let ds = paths
-        .datasets
-        .get(dataset)
-        .ok_or_else(|| ResolveError::UnknownDataset(dataset.to_owned()))?;
-    ds.bbox
-        .clone()
-        .ok_or_else(|| ResolveError::MissingBbox(dataset.to_owned()))
-}
-
 /// Get file size in MB (decimal, consistent with bench scripts).
 pub(crate) fn file_size_mb(path: &Path) -> Result<f64, ResolveError> {
     let meta = std::fs::metadata(path)?;
     Ok(meta.len() as f64 / 1_000_000.0)
-}
-
-/// Resolve PBF path and its size in one call.
-pub(crate) fn resolve_pbf_with_size(
-    dataset: &str,
-    variant: &str,
-    paths: &config::ResolvedPaths,
-    project_root: &Path,
-) -> Result<(PathBuf, f64), ResolveError> {
-    let path = resolve_pbf_path(dataset, variant, paths, project_root)?;
-    let mb = file_size_mb(&path)?;
-    Ok((path, mb))
 }
 
 #[cfg(test)]

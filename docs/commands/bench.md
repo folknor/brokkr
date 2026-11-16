@@ -1,5 +1,8 @@
 # brokkr bench
 
+pbfhogg's benchmarks use this script-bench command. Answer checking runs
+through its own `pbfhogg-verify` binary (`brokkr man run`).
+
 Run a script bench, a `[bench.NAME]` table in brokkr.toml (`brokkr man
 bench-config`), and store the run in the per-user bench store, which `brokkr
 results` reads (`brokkr man results`, Script benches): the local file, or
@@ -907,7 +910,7 @@ project root), holding `out/`, `scratch/`, the children's stdout and
 stderr spools and the marked calls' hotpath reports, on the resource protocol `reference/bench-resources.md` describes: it
 is removed when the iteration ends, and one a crash left behind goes once
 nothing that inherited its reservation is still running. Its outputs and
-scratch so land on the drive the typed commands write to. A `scratch`
+scratch land on that configured drive. A `scratch`
 inside the project's `.brokkr/` is refused unless it is `.brokkr` itself,
 and a `scratch` inside a directory brokkr installs, prunes or removes by
 fixed name (a tool install or cache under the data dir) is a misplacement

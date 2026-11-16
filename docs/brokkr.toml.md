@@ -36,10 +36,7 @@ reads the ones that apply to it:
   benchmarks through `[bench.*]` (`docs/brokkr.toml.bench.md`)
 - `[mogwai]` and `[mogwai.targets.*]` -> `docs/projects/mogwai.md`
 
-For project-specific CLI flags that adjust dataset resolution or cargo
-features (`--snapshot`, `--direct-io`, `--io-uring`,
-`--compression`, `--locations-on-ways`) see `docs/projects/pbfhogg.md` -
-those are pbfhogg-only.
+pbfhogg uses script benches and generic commands (`docs/projects/pbfhogg.md`).
 
 ## Where brokkr.toml lives
 

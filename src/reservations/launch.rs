@@ -18,7 +18,7 @@ use crate::error::DevError;
 pub(crate) const PRIVATE_DIR_PLACEHOLDER: &str = "@brokkr-private-dir@";
 
 /// The private directory's name prefix; a 128-bit random token follows.
-pub(crate) const PRIVATE_DIR_PREFIX: &str = ".brokkr-pbfhogg-";
+pub(crate) const PRIVATE_DIR_PREFIX: &str = ".brokkr-launch-";
 
 /// What one launch uses, declared with its argv.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,21 +45,6 @@ impl LaunchSpec {
             writes,
             private_in,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn private_in(&self) -> Option<&Path> {
-        self.private_in.as_deref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn reads(&self) -> &[PathBuf] {
-        &self.reads
-    }
-
-    #[cfg(test)]
-    pub(crate) fn writes(&self) -> &[PathBuf] {
-        &self.writes
     }
 
     /// Admit one launch of `program` with `args` in `cwd`: refuse when an
@@ -167,11 +152,6 @@ pub(crate) struct Launched {
 }
 
 impl Launched {
-    /// A launch with nothing declared: the argv runs as given.
-    pub(crate) fn bare(args: Vec<String>) -> Self {
-        Self { args, lease: None }
-    }
-
     pub(crate) fn arg_refs(&self) -> Vec<&str> {
         self.args.iter().map(String::as_str).collect()
     }
@@ -295,60 +275,6 @@ pub(super) fn conflict(scan: &super::store::Scan, ours: &[Resource]) -> Option<S
     None
 }
 
-/// A write reservation this process holds with no child: the tests' stand-in
-/// for another launch writing `paths`.
-#[cfg(test)]
-#[derive(Debug)]
-pub(crate) struct Hold {
-    lease: Option<Lease>,
-}
-
-/// Reserve `paths` for writing, refused like a launch that writes them.
-#[cfg(test)]
-pub(crate) fn hold(paths: &[&Path]) -> io::Result<Hold> {
-    let Some(store) = super::store() else {
-        // No store to hold in ($HOME unset): the gate's own refusals still
-        // apply, and no launch can be admitted either.
-        super::guard::mutate(paths, &[], || Ok::<_, io::Error>(()))?;
-        return Ok(Hold { lease: None });
-    };
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    let _serial = super::serialize()?;
-    let scan = store.scan();
-    let resources = paths
-        .iter()
-        .map(|path| {
-            Spelled::of(path, &cwd).map(|s| Resource::new(&s, Access::Write, Disposition::Reserve))
-        })
-        .collect::<io::Result<Vec<_>>>()?;
-    if let Some(why) = conflict(&scan, &resources) {
-        return Err(super::guard::busy(format!("refusing to write: {why}")));
-    }
-    Ok(Hold {
-        lease: Some(store.create(resources)?),
-    })
-}
-
-#[cfg(test)]
-impl Drop for Hold {
-    fn drop(&mut self) {
-        let Some(lease) = self.lease.take() else {
-            return;
-        };
-        if let Some(fd) = lease.fd() {
-            disarm(fd);
-        }
-        // Without the critical section the lease is dropped unreleased: its
-        // descriptor closes, so a later scan finds it free and reclaims it.
-        let released = super::serialize().and_then(|_serial| lease.release());
-        if let Err(e) = released {
-            crate::output::warn(&format!(
-                "a staged write could not release its reservation: {e}"
-            ));
-        }
-    }
-}
-
 /// A read reservation this process holds with no child: a script-bench run's
 /// bound inputs, from before their preflight digests until the run ends, so
 /// no other lease writes them between the hash and the last iteration
@@ -430,7 +356,7 @@ fn check_placement(location: &Path, writes: &[PathBuf], cwd: &Path) -> Result<()
         if !here.same_mount(&there) {
             return Err(DevError::Config(format!(
                 "output {} is on another mount than {}, where its private directory would go; \
-                 pbfhogg publishes by rename, so one launch cannot write across mounts",
+                 publication uses rename, so one launch cannot write across mounts",
                 output.display(),
                 location.display()
             )));

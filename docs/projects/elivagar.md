@@ -67,8 +67,7 @@ knobs. CLI defaults are still spelled in the command schema.
 
 ## Variant defaults
 
-- `--variant <name>` defaults to `raw` (vs pbfhogg's `indexed`, or
-  `locations` for its `check-locations`), except on
+- `--variant <name>` defaults to `raw`, except on
   `pmtiles-corpus`, where it is required (see the corpus section).
 - The `pmtiles.<variant>` config entry has **no elivagar consumer**.
   Elivagar produces archives rather than reading configured ones, so every
@@ -157,10 +156,7 @@ refusal is elivagar's job; brokkr just runs the commands.
 `brokkr svg -z Z -x X -y Y [-W width] [-H height] [-l layers] [-o output]`, and
 `brokkr verify pmtiles` wrap elivagar's `inspect`/`diag`/`svg`/`verify`
 subcommands (`src/elivagar/inspect.rs`, `src/elivagar/diag.rs`,
-`src/elivagar/svg.rs`, `src/elivagar/verify.rs`). `pmtiles-inspect` is named
-that way (not `inspect`) because `brokkr inspect` is already pbfhogg's PBF
-inspector - the two share one flat clap `Command` enum so names must be
-unique.
+`src/elivagar/svg.rs`, `src/elivagar/verify.rs`).
 
 All four take `--dataset`/`--variant`/`--commit`/`--file`, resolved by
 `ArchiveStore::resolve()` in `src/elivagar/archive_store.rs`, exposed through

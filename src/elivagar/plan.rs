@@ -57,7 +57,7 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         &self,
         req: &MeasureRequest<'_>,
         paths: &crate::config::ResolvedPaths,
-        _target: runner::PlanTarget<'_>,
+        _target: runner::PlanTarget,
     ) -> Result<CommandPlan<Self::State>, DevError> {
         if matches!(
             self.0,
@@ -181,11 +181,11 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         if let ElivagarCommand::Built(command @ BuiltCommand::MainBinary { .. }) = self.0 {
             let layout = ElivagarLayout::new(&ctx.paths);
             for file in command.output_files(&layout) {
-                runner::discard_path(false, &file, false);
+                runner::discard_path(&file, false);
             }
             let tmp_dir = layout.tilegen_tmp();
             if tmp_dir.as_path() != layout.scratch() {
-                runner::discard_path(false, &tmp_dir, true);
+                runner::discard_path(&tmp_dir, true);
             }
         }
         Ok(())

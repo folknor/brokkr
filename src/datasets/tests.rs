@@ -22,7 +22,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
-    use crate::config::{Dataset, OscEntry, PbfEntry, ResolvedPaths};
+    use crate::config::{Dataset, PbfEntry, ResolvedPaths};
     use crate::elivagar::archive_store::{ArchiveKey, ArchiveStore};
 
     use crate::datasets::resolve::*;
@@ -63,61 +63,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_bbox_prefers_arg_then_dataset() {
-        let mut ds = empty_dataset();
-        ds.bbox = Some("1,2,3,4".parse().unwrap());
-        let mut datasets = HashMap::new();
-        datasets.insert(String::from("denmark"), ds);
-        let paths = mk_paths(Path::new("/irrelevant"), datasets);
-
-        let explicit_bbox = "9,9,9,9".parse().unwrap();
-        let explicit = resolve_bbox(Some(&explicit_bbox), "denmark", &paths).expect("bbox");
-        assert_eq!(explicit.to_string(), "9,9,9,9");
-
-        let from_dataset = resolve_bbox(None, "denmark", &paths).expect("bbox");
-        assert_eq!(from_dataset.to_string(), "1,2,3,4");
-    }
-
-    #[test]
-    fn polygons_resolve_by_name_with_their_content_digest() {
-        let dir = unique_test_dir("polygons");
-        std::fs::write(dir.join("b.geojson"), "{}").expect("write");
-        std::fs::write(dir.join("a.geojson"), "{}").expect("write");
-        let mut ds = empty_dataset();
-        for (name, file) in [("zeta", "b.geojson"), ("alpha", "a.geojson")] {
-            ds.polygon.insert(
-                name.into(),
-                crate::config::PolygonEntry {
-                    file: file.into(),
-                    xxhash: None,
-                },
-            );
-        }
-        let mut datasets = HashMap::new();
-        datasets.insert(String::from("denmark"), ds);
-        let paths = mk_paths(&dir, datasets);
-        let root = dir.join("root");
-
-        // Every polygon, ordered by name; the same bytes give the same digest
-        // whether or not a pin is configured.
-        let all = resolve_polygons("denmark", &paths, &root).expect("all");
-        let names: Vec<&str> = all.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["alpha", "zeta"]);
-        assert_eq!(all[0].digest, all[1].digest);
-        assert!(all[1].path.ends_with("b.geojson"));
-
-        let one = resolve_polygon("denmark", "zeta", &paths, &root).expect("one");
-        assert_eq!(one, all[1]);
-        let err = resolve_polygon("denmark", "nope", &paths, &root)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("no polygon 'nope'"), "got: {err}");
-        assert!(err.contains("alpha, zeta"), "got: {err}");
-
-        drop(std::fs::remove_dir_all(&dir));
-    }
-
-    #[test]
     fn snapshot_ref_parses_base_sentinel() {
         assert!(matches!(
             SnapshotRef::parse("base").unwrap(),
@@ -144,25 +89,6 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_ref_from_opt_none_is_base() {
-        assert!(matches!(SnapshotRef::from_opt(None), SnapshotRef::Base));
-    }
-
-    #[test]
-    fn snapshot_ref_from_opt_some_base_is_base() {
-        assert!(matches!(
-            SnapshotRef::from_opt(Some(&SnapshotRef::Base)),
-            SnapshotRef::Base
-        ));
-    }
-
-    #[test]
-    fn snapshot_ref_from_opt_some_named() {
-        let parsed = SnapshotRef::from_opt(Some(&SnapshotRef::Named("unsorted".into())));
-        assert!(matches!(parsed, SnapshotRef::Named(ref s) if s == "unsorted"));
-    }
-
-    #[test]
     fn snapshot_ref_cli_parser_rejects_invalid_key() {
         assert!("bad key".parse::<SnapshotRef>().is_err());
     }
@@ -184,7 +110,7 @@ mod tests {
         datasets.insert("planet".into(), ds);
         let paths = mk_paths(&dir, datasets);
 
-        let resolved = resolve_snapshot_pbf_path(
+        let resolved = resolve_snapshot_pbf_entry(
             "planet",
             &SnapshotRef::Base,
             "indexed",
@@ -192,7 +118,7 @@ mod tests {
             Path::new("."),
         )
         .expect("resolve");
-        assert!(resolved.ends_with("planet-base.osm.pbf"));
+        assert!(resolved.path.ends_with("planet-base.osm.pbf"));
 
         drop(std::fs::remove_dir_all(&dir));
     }
@@ -223,7 +149,7 @@ mod tests {
         datasets.insert("planet".into(), ds);
         let paths = mk_paths(&dir, datasets);
 
-        let resolved = resolve_snapshot_pbf_path(
+        let resolved = resolve_snapshot_pbf_entry(
             "planet",
             &SnapshotRef::Named("20260411".into()),
             "raw",
@@ -231,7 +157,7 @@ mod tests {
             Path::new("."),
         )
         .expect("resolve");
-        assert!(resolved.ends_with("planet-20260411.osm.pbf"));
+        assert!(resolved.path.ends_with("planet-20260411.osm.pbf"));
 
         drop(std::fs::remove_dir_all(&dir));
     }
@@ -265,7 +191,7 @@ mod tests {
         datasets.insert("planet".into(), ds);
         let paths = mk_paths(&dir, datasets);
 
-        let err = resolve_snapshot_pbf_path(
+        let err = resolve_snapshot_pbf_entry(
             "planet",
             &SnapshotRef::Named("20260411".into()),
             "indexed",
@@ -309,7 +235,7 @@ mod tests {
         datasets.insert("planet".into(), ds);
         let paths = mk_paths(Path::new("/irrelevant"), datasets);
 
-        let err = resolve_snapshot_pbf_path(
+        let err = resolve_snapshot_pbf_entry(
             "planet",
             &SnapshotRef::Named("missing-snap".into()),
             "indexed",
@@ -323,268 +249,6 @@ mod tests {
             err.contains("base"),
             "available list should mention base: {err}"
         );
-    }
-
-    #[test]
-    fn resolve_single_osc_returns_explicit_seq() {
-        let dir = unique_test_dir("single-osc-explicit");
-        std::fs::write(dir.join("planet-4914.osc.gz"), "x").expect("write");
-
-        let mut ds = empty_dataset();
-        ds.osc.insert(
-            String::from("4914"),
-            OscEntry {
-                file: String::from("planet-4914.osc.gz"),
-                xxhash: None,
-            },
-        );
-        let mut datasets = HashMap::new();
-        datasets.insert(String::from("planet"), ds);
-        let paths = mk_paths(&dir, datasets);
-
-        let (path, seq) = resolve_single_osc(
-            "planet",
-            &SnapshotRef::Base,
-            Some("4914"),
-            &paths,
-            Path::new("."),
-        )
-        .expect("resolve");
-        assert!(path.ends_with("planet-4914.osc.gz"));
-        assert_eq!(seq, "4914");
-
-        drop(std::fs::remove_dir_all(&dir));
-    }
-
-    #[test]
-    fn resolve_single_osc_auto_selects_when_one_configured() {
-        let dir = unique_test_dir("single-osc-auto");
-        std::fs::write(dir.join("denmark-4705.osc.gz"), "x").expect("write");
-
-        let mut ds = empty_dataset();
-        ds.osc.insert(
-            String::from("4705"),
-            OscEntry {
-                file: String::from("denmark-4705.osc.gz"),
-                xxhash: None,
-            },
-        );
-        let mut datasets = HashMap::new();
-        datasets.insert(String::from("denmark"), ds);
-        let paths = mk_paths(&dir, datasets);
-
-        let (path, seq) =
-            resolve_single_osc("denmark", &SnapshotRef::Base, None, &paths, Path::new("."))
-                .expect("resolve");
-        assert!(path.ends_with("denmark-4705.osc.gz"));
-        assert_eq!(seq, "4705");
-
-        drop(std::fs::remove_dir_all(&dir));
-    }
-
-    #[test]
-    fn resolve_single_osc_errors_when_multiple_and_no_seq() {
-        let mut ds = empty_dataset();
-        for n in [4913u64, 4914, 4915] {
-            ds.osc.insert(
-                n.to_string(),
-                OscEntry {
-                    file: format!("planet-{n}.osc.gz"),
-                    xxhash: None,
-                },
-            );
-        }
-        let mut datasets = HashMap::new();
-        datasets.insert(String::from("planet"), ds);
-        let paths = mk_paths(Path::new("/irrelevant"), datasets);
-
-        let err = resolve_single_osc("planet", &SnapshotRef::Base, None, &paths, Path::new("."))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("multiple osc entries"), "got: {err}");
-        assert!(err.contains("4913, 4914, 4915"), "got: {err}");
-    }
-
-    #[test]
-    fn resolve_single_osc_named_snapshot_uses_snapshot_table() {
-        use crate::config::Snapshot;
-
-        let dir = unique_test_dir("snap-osc-named");
-        std::fs::write(dir.join("planet-20260411-seq4969.osc.gz"), "x").expect("write");
-
-        let mut snap = Snapshot {
-            download_date: Some("2026-04-11".into()),
-            seq: Some(4969),
-            pbf: HashMap::new(),
-            osc: HashMap::new(),
-        };
-        snap.osc.insert(
-            "4969".into(),
-            OscEntry {
-                file: "planet-20260411-seq4969.osc.gz".into(),
-                xxhash: None,
-            },
-        );
-        let mut ds = empty_dataset();
-        ds.snapshot.insert("20260411".into(), snap);
-        let mut datasets = HashMap::new();
-        datasets.insert("planet".into(), ds);
-        let paths = mk_paths(&dir, datasets);
-
-        let (path, seq) = resolve_single_osc(
-            "planet",
-            &SnapshotRef::Named("20260411".into()),
-            Some("4969"),
-            &paths,
-            Path::new("."),
-        )
-        .expect("resolve");
-        assert!(path.ends_with("planet-20260411-seq4969.osc.gz"));
-        assert_eq!(seq, "4969");
-
-        drop(std::fs::remove_dir_all(&dir));
-    }
-
-    #[test]
-    fn resolve_osc_range_named_snapshot_uses_snapshot_table() {
-        use crate::config::Snapshot;
-
-        let dir = unique_test_dir("snap-osc-range");
-        for n in 4969..=4971 {
-            std::fs::write(dir.join(format!("planet-20260411-seq{n}.osc.gz")), "x").expect("write");
-        }
-
-        let mut snap = Snapshot {
-            download_date: Some("2026-04-11".into()),
-            seq: Some(4969),
-            pbf: HashMap::new(),
-            osc: HashMap::new(),
-        };
-        for n in 4969..=4971u64 {
-            snap.osc.insert(
-                n.to_string(),
-                OscEntry {
-                    file: format!("planet-20260411-seq{n}.osc.gz"),
-                    xxhash: None,
-                },
-            );
-        }
-        let mut ds = empty_dataset();
-        ds.snapshot.insert("20260411".into(), snap);
-        let mut datasets = HashMap::new();
-        datasets.insert("planet".into(), ds);
-        let paths = mk_paths(&dir, datasets);
-
-        let resolved = resolve_osc_range(
-            "planet",
-            &SnapshotRef::Named("20260411".into()),
-            &"4969..4971".parse().unwrap(),
-            &paths,
-            Path::new("."),
-        )
-        .expect("range");
-        assert_eq!(resolved.len(), 3);
-        assert!(resolved[0].ends_with("planet-20260411-seq4969.osc.gz"));
-        assert!(resolved[2].ends_with("planet-20260411-seq4971.osc.gz"));
-
-        drop(std::fs::remove_dir_all(&dir));
-    }
-
-    #[test]
-    fn resolve_single_osc_named_snapshot_unknown_key_errors() {
-        let mut ds = empty_dataset();
-        ds.osc.insert(
-            "4913".into(),
-            OscEntry {
-                file: "planet-4913.osc.gz".into(),
-                xxhash: None,
-            },
-        );
-        let mut datasets = HashMap::new();
-        datasets.insert("planet".into(), ds);
-        let paths = mk_paths(Path::new("/irrelevant"), datasets);
-
-        let err = resolve_single_osc(
-            "planet",
-            &SnapshotRef::Named("missing".into()),
-            None,
-            &paths,
-            Path::new("."),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("no snapshot 'missing'"), "got: {err}");
-    }
-
-    #[test]
-    fn resolve_osc_range_returns_paths_in_seq_order() {
-        let dir = unique_test_dir("osc-range-ok");
-        for n in 4914..=4916 {
-            std::fs::write(dir.join(format!("planet-{n}.osc.gz")), "x").expect("write");
-        }
-
-        let mut ds = empty_dataset();
-        for n in 4914..=4916u64 {
-            ds.osc.insert(
-                n.to_string(),
-                OscEntry {
-                    file: format!("planet-{n}.osc.gz"),
-                    xxhash: None,
-                },
-            );
-        }
-        let mut datasets = HashMap::new();
-        datasets.insert(String::from("planet"), ds);
-        let paths = mk_paths(&dir, datasets);
-
-        let resolved = resolve_osc_range(
-            "planet",
-            &SnapshotRef::Base,
-            &"4914..4916".parse().unwrap(),
-            &paths,
-            Path::new("."),
-        )
-        .expect("range");
-        assert_eq!(resolved.len(), 3);
-        assert!(resolved[0].ends_with("planet-4914.osc.gz"));
-        assert!(resolved[1].ends_with("planet-4915.osc.gz"));
-        assert!(resolved[2].ends_with("planet-4916.osc.gz"));
-
-        drop(std::fs::remove_dir_all(&dir));
-    }
-
-    #[test]
-    fn resolve_osc_range_fails_fast_on_missing_seq() {
-        let dir = unique_test_dir("osc-range-missing");
-        std::fs::write(dir.join("planet-4914.osc.gz"), "x").expect("write");
-        std::fs::write(dir.join("planet-4916.osc.gz"), "x").expect("write");
-
-        let mut ds = empty_dataset();
-        for n in [4914u64, 4916] {
-            ds.osc.insert(
-                n.to_string(),
-                OscEntry {
-                    file: format!("planet-{n}.osc.gz"),
-                    xxhash: None,
-                },
-            );
-        }
-        let mut datasets = HashMap::new();
-        datasets.insert(String::from("planet"), ds);
-        let paths = mk_paths(&dir, datasets);
-
-        let err = resolve_osc_range(
-            "planet",
-            &SnapshotRef::Base,
-            &"4914..4916".parse().unwrap(),
-            &paths,
-            Path::new("."),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("missing osc.4915"), "got: {err}");
-
-        drop(std::fs::remove_dir_all(&dir));
     }
 
     #[test]

@@ -177,30 +177,16 @@ pub(crate) fn create_dir_all_durable(anchor: &Path, dir: &Path) -> std::io::Resu
 /// sequence are the ones [`replace`] documents - `replace` is built on this -
 /// and so is its atomic tier.
 ///
-/// A pbfhogg child's output is staged through
-/// [`Staged::stable_keeping_for_child`], which holds no reservation of its
-/// own, because the pbfhogg launch writing its temp file reserves it
-/// (`crate::reservations`); its commit and drop go through the gate. Every other staged write - brokkr's own state and config files,
-/// which no launch reads or writes - is plain, outside the reservation layer,
-/// so a lease store problem never stops brokkr writing its own files.
+/// These writes own brokkr state, config and downloaded tools, outside the
+/// reservation layer, so a lease store problem never stops them.
 pub(crate) struct Staged {
     target: PathBuf,
     dir: PathBuf,
     tmp: PathBuf,
-    mode: Mode,
     committed: bool,
     /// The drop must leave the name at `tmp` alone: it holds another
-    /// writer's file, or a reservation this write has yet to take may cover
-    /// it.
+    /// writer's file.
     leave_tmp: bool,
-}
-
-/// How a staged write relates to the reservation layer.
-enum Mode {
-    /// brokkr's own files: no reservation, no gate.
-    Plain,
-    /// The temp file is a reserved launch's output: gated commit and drop.
-    ForChild,
 }
 
 /// What the directory fsync after a publication came to.
@@ -236,29 +222,6 @@ impl Staged {
         Ok(staged)
     }
 
-    /// As [`stable`](Self::stable), but for a pbfhogg child as the writer: the
-    /// child infers its output format from the file name (`-o x.osm.pbf`), so
-    /// when the target's name ends in `keep` the temp file is
-    /// `.<rest>.partial<keep>` and the child sees the same format suffix. The
-    /// child's launch reserves the temp file as its output while it writes,
-    /// so this holds no reservation of its own; its commit and drop still go
-    /// through the gate.
-    pub(crate) fn stable_keeping_for_child(path: &Path, keep: &str) -> std::io::Result<Self> {
-        let mut staged = Self::with_suffix(path, "partial", true)?;
-        let name = staged
-            .target
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if let Some(rest) = name.strip_suffix(keep).filter(|r| !r.is_empty()) {
-            staged.tmp = staged.dir.join(format!(".{rest}.partial{keep}"));
-        }
-        // Gated from here on, a refusal's drop included.
-        staged.mode = Mode::ForChild;
-        crate::reservations::mutate(&[&staged.tmp, &staged.target], &[], || clear(&staged.tmp))?;
-        Ok(staged)
-    }
-
     /// With `resolve`, an existing target is canonicalized, so a symlinked one
     /// is replaced where it leads; without, `path` is the target as spelled.
     fn with_suffix(path: &Path, suffix: &str, resolve: bool) -> std::io::Result<Self> {
@@ -284,7 +247,6 @@ impl Staged {
             target,
             dir,
             tmp,
-            mode: Mode::Plain,
             committed: false,
             leave_tmp: false,
         })
@@ -390,13 +352,9 @@ impl Staged {
             }
             f.sync_all()?;
             drop(f);
-            rename_at(&dir, &tmp_name, &target_name) // gate: under mutate, or Plain
+            rename_at(&dir, &tmp_name, &target_name) // gate: brokkr's own file
         };
-        let targets = [self.tmp.as_path(), self.target.as_path()];
-        let published = match &self.mode {
-            Mode::Plain => publish(),
-            Mode::ForChild => crate::reservations::mutate(&targets, &[], publish),
-        };
+        let published = publish();
         if foreign.get() {
             self.leave_tmp = true;
         }
@@ -420,13 +378,7 @@ impl Drop for Staged {
         if self.committed || self.leave_tmp {
             return;
         }
-        // A child's is refused while another launch still reserves the temp
-        // file.
-        let removed = match &self.mode {
-            Mode::Plain => std::fs::remove_file(&self.tmp), // gate: brokkr's own file
-            Mode::ForChild => crate::reservations::remove_file(&self.tmp),
-        };
-        drop(removed);
+        drop(std::fs::remove_file(&self.tmp)); // gate: brokkr's own file
     }
 }
 
@@ -654,18 +606,6 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_child_construction_leaves_a_held_temp_alone() {
-        let dir = crate::test_scratch::scratch("atomic_write", "refused_hold");
-        let pbf = dir.join("dk.osm.pbf");
-        let child_tmp = dir.join(".dk.partial.osm.pbf");
-        std::fs::write(&child_tmp, "theirs").unwrap();
-        let other = crate::reservations::hold(&[&child_tmp]).unwrap();
-        assert!(Staged::stable_keeping_for_child(&pbf, ".osm.pbf").is_err());
-        assert_eq!(std::fs::read_to_string(&child_tmp).unwrap(), "theirs");
-        drop(other);
-    }
-
-    #[test]
     fn a_missing_directory_publishes_nothing() {
         let dir = crate::test_scratch::scratch("atomic_write", "no_dir");
         let err = replace(&dir.join("gone/x.toml"), b"a").unwrap_err();
@@ -690,20 +630,6 @@ mod tests {
         }
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn a_kept_suffix_survives_into_the_temp_name() {
-        let dir = crate::test_scratch::scratch("atomic_write", "keeping");
-        let pbf =
-            Staged::stable_keeping_for_child(&dir.join("dk-merged.osm.pbf"), ".osm.pbf").unwrap();
-        assert_eq!(
-            pbf.tmp_path().file_name().unwrap(),
-            ".dk-merged.partial.osm.pbf"
-        );
-        // A name without the suffix falls back to the plain stable shape.
-        let other = Staged::stable_keeping_for_child(&dir.join("a.png"), ".osm.pbf").unwrap();
-        assert_eq!(other.tmp_path().file_name().unwrap(), ".a.png.partial");
     }
 
     #[test]

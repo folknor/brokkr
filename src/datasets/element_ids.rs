@@ -67,8 +67,10 @@ impl ElementIdList {
         }
         Ok(Self(ids))
     }
+}
 
-    /// The canonical argv tokens (`n115722`, ...).
+impl ElementIdList {
+    #[cfg(test)]
     pub(crate) fn args(&self) -> Vec<String> {
         self.0.iter().map(ToString::to_string).collect()
     }

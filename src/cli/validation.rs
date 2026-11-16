@@ -120,14 +120,6 @@ pub(super) fn validate_since_shape(s: &str) -> Result<String, String> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Pbfhogg command extraction
-// ---------------------------------------------------------------------------
-//
-// `Command::into_route` (`src/command_input.rs`) consumes a pbfhogg command
-// variant into its typed `PbfhoggCommand` and parameters - the one bridge
-// between the CLI shape and the dispatch layer.
-
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -254,34 +246,6 @@ mod tests {
         assert!(parse(["brokkr", "bench", "--iterations", "0", "cat"]).is_err());
     }
 
-    /// check-locations alone defaults to `altw-keep-untagged`, or `altw` with
-    /// `--agreement`; an explicit `--variant` still wins, and a sibling check
-    /// keeps `indexed`.
-    #[test]
-    fn check_locations_defaults_to_an_altw_variant() {
-        let variant = |cli: Cli| match cli.command {
-            Command::CheckLocations { pbf, .. } | Command::CheckIndex { pbf, .. } => pbf.variant,
-            _ => panic!("unexpected command"),
-        };
-        let omitted = parse(["brokkr", "check-locations"]).unwrap();
-        assert_eq!(variant(omitted), "altw-keep-untagged");
-        let agreement = parse(["brokkr", "check-locations", "--agreement"]).unwrap();
-        assert_eq!(variant(agreement), "altw");
-        let explicit = parse(["brokkr", "check-locations", "--variant", "raw"]).unwrap();
-        assert_eq!(variant(explicit), "raw");
-        let both = parse([
-            "brokkr",
-            "check-locations",
-            "--agreement",
-            "--variant",
-            "altw-keep-untagged",
-        ])
-        .unwrap();
-        assert_eq!(variant(both), "altw-keep-untagged");
-        let sibling = parse(["brokkr", "check-index"]).unwrap();
-        assert_eq!(variant(sibling), "indexed");
-    }
-
     /// The positional tail the arm key keeps verbatim, from a real parse.
     fn tail(argv: &'static [&'static str]) -> usize {
         std::thread::Builder::new()
@@ -322,7 +286,7 @@ mod tests {
         assert_eq!(tail(&["brokkr", "crit", "--", "--sample-size", "10"]), 2);
         assert_eq!(tail(&["brokkr", "fmt", "--", "--check"]), 1);
         assert_eq!(tail(&["brokkr", "fmt", "a", "--b"]), 2);
-        assert_eq!(tail(&["brokkr", "read", "--bench", "3"]), 0);
+        assert_eq!(tail(&["brokkr", "tilegen", "--bench", "3"]), 0);
     }
 
     #[test]
@@ -503,79 +467,9 @@ mod tests {
     }
 
     #[test]
-    fn cat_dedupe_conflicts_with_type_and_clean() {
-        for extra in [["--clean", ""], ["--type", "way"]] {
-            let mut argv = vec!["brokkr", "cat", "--dedupe"];
-            argv.extend(extra.into_iter().filter(|s| !s.is_empty()));
-            let rendered = argv.join(" ");
-            assert!(parse(argv).is_err(), "{rendered} should conflict");
-        }
-    }
-
-    #[test]
-    fn cat_accepts_type_with_clean() {
-        let parsed = parse(["brokkr", "cat", "--type", "way", "--clean"]).expect("parse");
-        let Command::Cat {
-            type_filter, clean, ..
-        } = parsed.command
-        else {
-            panic!("expected Cat");
-        };
-        assert_eq!(type_filter.as_deref(), Some("way"));
-        assert!(clean);
-    }
-
-    #[test]
     fn pmtiles_stats_requires_at_least_one_file() {
         let parsed = parse(["brokkr", "pmtiles-stats"]);
         assert!(parsed.is_err());
-    }
-
-    #[test]
-    fn inspect_tags_accepts_mode_flags() {
-        let parsed = parse([
-            "brokkr",
-            "inspect",
-            "--tags",
-            "--hotpath",
-            "--dataset",
-            "japan",
-        ])
-        .expect("parse");
-
-        let Command::Inspect {
-            mode,
-            pbf,
-            tags,
-            type_filter,
-            ..
-        } = parsed.command
-        else {
-            panic!("expected inspect command");
-        };
-        assert!(mode.hotpath.is_some());
-        assert_eq!(pbf.dataset, "japan");
-        assert!(tags);
-        assert_eq!(type_filter, None);
-    }
-
-    #[test]
-    fn inspect_expr_repeats_in_order_and_requires_tags() {
-        let parsed = parse([
-            "brokkr", "inspect", "--tags", "--expr", "*=*", "--expr", "highway",
-        ])
-        .expect("parse");
-        let Command::Inspect { expr, .. } = parsed.command else {
-            panic!("expected inspect command");
-        };
-        assert_eq!(expr, ["*=*", "highway"]);
-
-        assert!(parse(["brokkr", "inspect", "--expr", "highway"]).is_err());
-        assert!(parse(["brokkr", "inspect", "--nodes", "--expr", "highway"]).is_err());
-        assert!(parse(["brokkr", "inspect", "--extended", "--expr", "highway"]).is_err());
-        // The same hole was open for `--type`, dropped silently in routing.
-        assert!(parse(["brokkr", "inspect", "--nodes", "--type", "way"]).is_err());
-        assert!(parse(["brokkr", "inspect", "--extended", "--type", "way"]).is_err());
     }
 
     #[test]

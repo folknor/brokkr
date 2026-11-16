@@ -1,5 +1,5 @@
 //! The mutation gate: every brokkr deletion, rename or replacement that can
-//! touch a path a pbfhogg launch uses goes through here, and so does every
+//! touch a path a reserved launch uses goes through here, and so does every
 //! recursive removal of a configured directory a script-bench iteration can
 //! sit under (`reference/bench-resources.md`, Placement and cleanup).
 //!
@@ -51,12 +51,6 @@ pub(crate) fn remove_reserved_tree(path: &Path) -> io::Result<()> {
 /// reservation between this check and the child.
 pub(crate) fn check_unreserved(path: &Path) -> io::Result<()> {
     gated(&[path], None, || Ok(()))
-}
-
-/// Write `contents` to `path`, replacing it: a file a child reads, such as a
-/// generated extract config.
-pub(crate) fn write(path: &Path, contents: &[u8]) -> io::Result<()> {
-    gated(&[path], None, || std::fs::write(path, contents))
 }
 
 /// Run `op`, a mutation made some other way (several removals, a `git

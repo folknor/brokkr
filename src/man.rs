@@ -177,21 +177,15 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "pbfhogg",
-        summary: "pbfhogg commands and snapshot graph",
+        summary: "pbfhogg script benches and generic commands",
         content: include_str!("../docs/projects/pbfhogg.md"),
-        commands: &[CommandId::Read],
+        commands: &[CommandId::Bench],
     },
     Topic {
         name: "elivagar",
         summary: "elivagar commands, regress, the pmtiles corpus, the durable tilegen output store",
         content: include_str!("../docs/projects/elivagar.md"),
         commands: &[CommandId::Tilegen],
-    },
-    Topic {
-        name: "dispatch-differences",
-        summary: "how pbfhogg and elivagar's dispatch layers differ",
-        content: include_str!("../docs/projects/pbfhogg-vs-elivagar.md"),
-        commands: &[CommandId::Read, CommandId::Tilegen],
     },
     Topic {
         name: "visual",
@@ -460,7 +454,7 @@ mod tests {
             .map(|t| t.name)
             .collect();
         assert!(piners.contains(&"corpus"));
-        assert!(!piners.contains(&"pbfhogg"));
+        assert!(piners.contains(&"pbfhogg"));
 
         let pbfhogg: Vec<&str> = visible(Some(&Project::Pbfhogg))
             .iter()

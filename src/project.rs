@@ -253,7 +253,7 @@ impl Detection {
 ///
 /// `command` is rendered as `'brokkr {command}'`, so it must be what the user
 /// actually types: its first word a real subcommand name (one the command
-/// catalogue knows, `cli::CommandId::from_name`), optionally followed by a sub-subcommand (`"suite pbfhogg"`).
+/// catalogue knows, `cli::CommandId::from_name`), optionally followed by a sub-subcommand (`"suite elivagar"`).
 /// A literal label that names no command is caught by
 /// `tests::require_labels_are_real_commands`.
 pub fn require(current: &Project, expected: &Project, command: &str) -> Result<(), DevError> {

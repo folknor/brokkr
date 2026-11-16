@@ -47,14 +47,14 @@ pub(crate) enum PlanKind {
 /// What a plan is resolved against. The runner is the only place that picks
 /// it, from `req.dry_run`, so a plan never consults a second dry-run flag.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum PlanTarget<'a> {
+pub(crate) enum PlanTarget {
     /// `--dry-run`: nothing was built. Resolve and validate only; a plan must
     /// not spawn, probe or materialise anything against an executable.
     DryRun,
     /// A real run of a [`PlanKind::Binary`] plan, against the executable the
     /// runner just built, handed over opaque. The runner builds nothing else
     /// until the plan's last sample has run.
-    Built(Executable<'a>),
+    Built,
     /// A real run of an external or lifecycle plan, which spawns its own
     /// programs from [`PlannedCommand::execute`].
     Unbound,
@@ -62,8 +62,7 @@ pub(crate) enum PlanTarget<'a> {
 
 /// A resolved plan. `argv` is the one planned argument value: dry run
 /// prints its strings, and [`PlannedCommand::materialize`] resolves that
-/// same value, so the two cannot drift. A project whose argv carries more
-/// than strings (pbfhogg's overwrite decision) uses its own type.
+/// same value, so the two cannot drift.
 pub(crate) struct CommandPlan<S, A = Vec<String>> {
     pub argv: A,
     pub scratch_dirs: Vec<PathBuf>,
@@ -101,7 +100,7 @@ pub(crate) trait PlannedCommand {
         &self,
         req: &MeasureRequest<'_>,
         paths: &crate::config::ResolvedPaths,
-        target: PlanTarget<'_>,
+        target: PlanTarget,
     ) -> Result<CommandPlan<Self::State, Self::Argv>, DevError>;
     /// Resolve a binary plan into what the runner executes. Called only for
     /// a [`PlanTarget::Built`] plan, with that same executable. No default:
@@ -233,16 +232,15 @@ pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Re
     let plan = command.plan(
         req,
         &ctx.paths,
-        binary.map_or(PlanTarget::Unbound, PlanTarget::Built),
+        binary.map_or(PlanTarget::Unbound, |_| PlanTarget::Built),
     )?;
-    let gated = gated_for(req);
     // Set once a preparation has cleared the plan's paths: from then on what
     // sits at them is this attempt's own output.
     let owned = std::cell::Cell::new(false);
     let prepare = || -> Result<(), DevError> {
         for dir in &plan.scratch_dirs {
             if dir.exists() {
-                remove_tree(gated, dir)?;
+                remove_tree(dir)?;
             }
             std::fs::create_dir_all(dir)?;
         }
@@ -254,17 +252,13 @@ pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Re
         let invocation = command.materialize(&plan, binary)?;
         let executed = execute_invocation(req, &ctx, command, &plan, &invocation, &prepare);
         if matches!(executed, Err(DevError::Interrupted)) && owned.get() {
-            discard_interrupted(gated, &plan.scratch_dirs, || {
-                command.discard(req, &ctx, &plan)
-            });
+            discard_interrupted(&plan.scratch_dirs, || command.discard(req, &ctx, &plan));
         }
         executed.map_err(|error| command.explain(&plan, error))?;
     } else {
         let executed = prepare().and_then(|()| command.execute(req, &ctx, &plan));
         if matches!(executed, Err(DevError::Interrupted)) && owned.get() {
-            discard_interrupted(gated, &plan.scratch_dirs, || {
-                command.discard(req, &ctx, &plan)
-            });
+            discard_interrupted(&plan.scratch_dirs, || command.discard(req, &ctx, &plan));
         }
         executed?;
     }
@@ -272,27 +266,13 @@ pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Re
     // a stop during it included: execution completed, so the output is whole.
     command.finish(req, &ctx, &plan)?;
     for dir in &plan.scratch_dirs {
-        remove_tree(gated, dir).ok();
+        remove_tree(dir).ok();
     }
     Ok(())
 }
 
-/// Whether a measured run's removals go through the pbfhogg reservation gate
-/// (`crate::reservations`), backup walk included: for pbfhogg, whose
-/// launches and backups they can reach. Every other project's scratch trees
-/// still go through the gate without the backup walk, since a script-bench
-/// iteration can sit under a configured directory; its single files are its
-/// own.
-pub(crate) fn gated_for(req: &MeasureRequest<'_>) -> bool {
-    req.project == crate::project::Project::Pbfhogg
-}
-
-fn remove_tree(gated: bool, dir: &Path) -> std::io::Result<()> {
-    if gated {
-        crate::reservations::remove_dir_all(dir)
-    } else {
-        crate::reservations::remove_reserved_tree(dir)
-    }
+fn remove_tree(dir: &Path) -> std::io::Result<()> {
+    crate::reservations::remove_reserved_tree(dir)
 }
 
 /// Discard what an interrupted attempt wrote: its scratch dirs, then the
@@ -300,14 +280,10 @@ fn remove_tree(gated: bool, dir: &Path) -> std::io::Result<()> {
 /// with no subprocess: a removal that fails is named and the stop still ends
 /// the command. This is the whole of brokkr's cleanup after an interrupt; no
 /// project-wide sweep follows, so a stop never removes what other runs keep.
-fn discard_interrupted(
-    gated: bool,
-    scratch_dirs: &[PathBuf],
-    discard: impl FnOnce() -> Result<(), DevError>,
-) {
+fn discard_interrupted(scratch_dirs: &[PathBuf], discard: impl FnOnce() -> Result<(), DevError>) {
     output::run_msg("interrupted - discarding this run's scratch output");
     for dir in scratch_dirs {
-        discard_path(gated, dir, true);
+        discard_path(dir, true);
     }
     if let Err(error) = discard() {
         output::warn(&format!("interrupted run's scratch output kept: {error}"));
@@ -316,11 +292,11 @@ fn discard_interrupted(
 
 /// Remove one path of an interrupted attempt, naming it when it stays. Gone
 /// already is fine; a reservation refusal or any other error keeps it.
-pub(crate) fn discard_path(gated: bool, path: &Path, dir: bool) {
+pub(crate) fn discard_path(path: &Path, dir: bool) {
     let result = if dir {
-        remove_tree(gated, path)
+        remove_tree(path)
     } else {
-        remove_one_file(gated, path)
+        remove_one_file(path)
     };
     match result {
         Ok(()) => {}
@@ -329,12 +305,8 @@ pub(crate) fn discard_path(gated: bool, path: &Path, dir: bool) {
     }
 }
 
-fn remove_one_file(gated: bool, file: &Path) -> std::io::Result<()> {
-    if gated {
-        crate::reservations::remove_file(file)
-    } else {
-        std::fs::remove_file(file) // gate: another project's own scratch
-    }
+fn remove_one_file(file: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(file) // gate: the plan owns this scratch file
 }
 
 /// Run a binary plan's materialised invocation in the request's mode, as one
@@ -391,20 +363,11 @@ pub(crate) struct CellHooks<'h> {
     pub observe: &'h dyn Fn(&mut harness::BenchResult, &[u8]),
 }
 
-impl CellHooks<'static> {
-    /// No preparation, announcement or observation.
-    pub(crate) const NONE: Self = Self {
-        prepare: &|| Ok(()),
-        announce: &|| Ok(()),
-        observe: &|_, _| {},
-    };
-}
-
 /// The one place a measured invocation's mode is decided: run once (output
 /// passed through for an externally timed cell; one unstored measured launch
 /// for a self-timed one), benchmark, or profile under `--hotpath` and
 /// `--alloc`. Every measured command reaches its child through here, the
-/// planned runner's plans and pbfhogg's read, write and merge cells alike, so
+/// planned runner's plans, so
 /// no command can accept a profiled mode and run it as a plain one.
 pub(crate) fn execute_cell(
     mode: &MeasureMode,
@@ -429,31 +392,10 @@ pub(crate) fn execute_cell(
         }
         MeasureMode::Run => {
             prepare()?;
-            let launched = invocation.launch(cwd)?;
-            let args = launched.arg_refs();
+            let args = invocation.arg_refs();
             output::run_msg(&format!("{program} {}", args.join(" ")));
-            let out = output::run_passthrough_timed(&program, &args, Some(harness.lock()));
-            let finished = launched.finish();
-            let out = match out {
-                Ok(out) => out,
-                Err(e) => {
-                    if let Err(release) = finished {
-                        output::warn(&release.to_string());
-                    }
-                    return Err(e);
-                }
-            };
-            finished?;
+            let out = output::run_passthrough_timed(&program, &args, Some(harness.lock()))?;
             if let Some(code) = out.failed_code(cell.exits) {
-                // An answer command expected to answer no fails on exit 0,
-                // which must not reach the process exit as success.
-                if code == 0 {
-                    return Err(DevError::Subprocess {
-                        program: program.clone(),
-                        ending: crate::error::ProcessEnding::Code(0),
-                        stderr: String::new(),
-                    });
-                }
                 return Err(DevError::ExitCode(code));
             }
             output::run_msg(&format!(
@@ -472,29 +414,19 @@ pub(crate) fn execute_cell(
             }
             harness.run_hotpath(&config, binary, cell.wall, |i, fifo| {
                 prepare()?;
-                // The report is this launch's disposable output: reserved
-                // with it and removed with its lease, here or, if the child
-                // outlives this run, by a later scan. A launch with no
-                // reservation (an unreserved invocation) is removed here.
+                // A unique report belongs to this measured sample.
                 let report = harness.new_hotpath_report_path()?;
-                let launched = invocation.launch_with(cwd, std::slice::from_ref(&report))?;
                 let iteration = harness.capture_hotpath_into(
                     binary,
-                    &launched.arg_refs(),
+                    &invocation.arg_refs(),
                     cwd,
                     cell.exits,
                     fifo,
                     i,
                     &report,
                 );
-                let finished = launched.finish();
-                if finished.is_ok() {
-                    crate::reservations::remove_file(&report).ok();
-                }
+                crate::reservations::remove_file(&report).ok();
                 let mut iteration = iteration?;
-                if let Err(error) = finished {
-                    iteration.fail(error);
-                }
                 if iteration.error.is_none()
                     && let Some(result) = &mut iteration.result
                 {
@@ -523,11 +455,10 @@ impl ExternalInvocation {
         Invocation::new(&self.program, self.args.clone())
     }
 
-    /// Clear the outputs and scratch before a sample; `gated` routes the
-    /// removals through the reservation gate ([`gated_for`]).
-    pub(crate) fn prepare_sample(&self, gated: bool) -> Result<(), DevError> {
+    /// Clear outputs and scratch before a sample, checking tree reservations.
+    pub(crate) fn prepare_sample(&self) -> Result<(), DevError> {
         for file in &self.output_files {
-            match remove_one_file(gated, file) {
+            match remove_one_file(file) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
@@ -535,19 +466,19 @@ impl ExternalInvocation {
         }
         for dir in &self.scratch_dirs {
             if dir.exists() {
-                remove_tree(gated, dir)?;
+                remove_tree(dir)?;
             }
             std::fs::create_dir_all(dir)?;
         }
         Ok(())
     }
 
-    pub(crate) fn cleanup(&self, gated: bool) {
+    pub(crate) fn cleanup(&self) {
         for file in &self.output_files {
-            remove_one_file(gated, file).ok();
+            remove_one_file(file).ok();
         }
         for dir in &self.scratch_dirs {
-            remove_tree(gated, dir).ok();
+            remove_tree(dir).ok();
         }
     }
 }
@@ -557,27 +488,26 @@ pub(crate) fn execute_external(
     ctx: &MeasurementSession,
     invocation: &ExternalInvocation,
 ) -> Result<(), DevError> {
-    let gated = gated_for(req);
     // As in [`run`], which this executes under and which reports the
     // discard: an interrupted attempt removes its outputs only once a
     // preparation has cleared the ones it declares.
     let owned = std::cell::Cell::new(false);
     let prepare = || -> Result<(), DevError> {
-        invocation.prepare_sample(gated)?;
+        invocation.prepare_sample()?;
         owned.set(true);
         Ok(())
     };
     let executed = run_external_mode(req, ctx, invocation, prepare);
     if matches!(executed, Err(DevError::Interrupted)) && owned.get() {
         for file in &invocation.output_files {
-            discard_path(gated, file, false);
+            discard_path(file, false);
         }
         for dir in &invocation.scratch_dirs {
-            discard_path(gated, dir, true);
+            discard_path(dir, true);
         }
     }
     executed?;
-    invocation.cleanup(gated);
+    invocation.cleanup();
     Ok(())
 }
 

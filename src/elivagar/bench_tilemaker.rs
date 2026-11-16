@@ -32,9 +32,9 @@ pub fn run(
         &invocation.invocation(),
         project_root,
         crate::output::child::Exits::SUCCESS,
-        || invocation.prepare_sample(false),
+        || invocation.prepare_sample(),
     )?;
-    invocation.cleanup(false);
+    invocation.cleanup();
     Ok(())
 }
 
