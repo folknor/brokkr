@@ -84,6 +84,22 @@ pub struct Build {
     /// The built artifact's xxh3-128 digest; absent when the build did not
     /// finish.
     pub artifact: Option<String>,
+    /// Tracked files of the `--commit` worktree left as Git LFS pointers,
+    /// observed when the worktree was admitted. Absent when not recorded (a
+    /// live-tree run, or a document from before the field); empty when the
+    /// worktree was scanned and held none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lfs_pointers: Option<Vec<LfsPointer>>,
+}
+
+/// One file left as a Git LFS pointer ([`Build::lfs_pointers`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LfsPointer {
+    /// Repository-relative path.
+    pub path: String,
+    /// The object the pointer names, `sha256:<hex>`.
+    pub oid: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

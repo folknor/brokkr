@@ -118,6 +118,7 @@ pub(crate) fn run(
                 features: vec!["default".into()],
             }),
             artifact: Some("00112233445566778899aabbccddeeff".into()),
+            lfs_pointers: None,
         },
         measurement: Measurement::Timing,
         params: BTreeMap::from([("dataset".into(), param(false, &[("denmark", None)]))]),

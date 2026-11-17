@@ -44,7 +44,8 @@ pub(super) fn load_run(
                     r.cpu_governor, r.avail_memory_mb, r.captured_env, r.target, r.profile,
                     r.features, r.default_features, r.resolved_bin, r.resolved_features,
                     r.artifact, c.text, r.iterations_requested, r.outcome, r.failure,
-                    r.config_digest, r.pairing_key, r.best_iteration, r.measurement, r.alloc
+                    r.config_digest, r.pairing_key, r.best_iteration, r.measurement, r.alloc,
+                    r.lfs_pointers
              FROM runs r JOIN configs c ON c.digest = r.config_digest
              WHERE r.uuid = ?1",
             [uuid],
@@ -80,6 +81,7 @@ pub(super) fn load_run(
             features: json(&features)?,
         });
     }
+    doc.build.lfs_pointers = cols.lfs_pointers.as_deref().map(json).transpose()?;
     doc.params = load_params(conn, run_id)?;
     doc.iterations = load_iterations(conn, run_id, children)?;
     let (config_digest, pairing_key, best) = derived;
@@ -106,6 +108,7 @@ struct RunJson {
     resolved_features: Option<String>,
     measurement: String,
     alloc: bool,
+    lfs_pointers: Option<String>,
 }
 
 struct RunColumns {
@@ -148,6 +151,7 @@ fn run_columns(row: &Row<'_>) -> rusqlite::Result<Option<RunColumns>> {
             default_features: row.get(19)?,
             resolved: None,
             artifact: row.get(22)?,
+            lfs_pointers: None,
         },
         measurement: Measurement::Timing,
         params: BTreeMap::new(),
@@ -166,6 +170,7 @@ fn run_columns(row: &Row<'_>) -> rusqlite::Result<Option<RunColumns>> {
             resolved_features: row.get(21)?,
             measurement: row.get(30)?,
             alloc: row.get(31)?,
+            lfs_pointers: row.get(32)?,
         },
     }))
 }

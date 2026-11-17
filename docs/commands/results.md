@@ -529,6 +529,10 @@ under the pair rather than splitting it:
 - `build differs:` the requested target, profile, features and default
   features, and the resolved bin and features; never the artifact digest,
   which differs across commits by construction.
+- `lfs pointers on A` (or `B`): that side's `--commit` worktree held tracked
+  files left as Git LFS pointers, the first by path and how many more, so
+  its numbers may be of a build or script that read pointer text. Silent
+  for a run with none and for one that recorded nothing.
 - `executables differ or were not read:` each external program a
   `program` call ran (`brokkr man bench`, `binary_with()`) whose observed
   digests differ between the sides, by path, that one side never ran, or

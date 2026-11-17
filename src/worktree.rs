@@ -58,6 +58,13 @@ use crate::output;
 /// The slot entry linking to the worktree's isolated target dir.
 const TARGET_LINK: &str = ".brokkr-target";
 
+/// The slot entry marking a cut that has not been admitted yet. Written before
+/// `git worktree add` and removed once the checkout passed admission, so a cut
+/// that failed or was killed partway (a hook that exited non-zero after the
+/// checkout, a stop mid-checkout) is never reused as if it were complete: the
+/// next run treats the slot as stale, under the same dirty rule as any other.
+const CUTTING_MARK: &str = ".brokkr-cutting";
+
 /// The directory under the project's effective target dir that holds the
 /// worktrees' isolated target dirs.
 const TARGET_SUBDIR: &str = crate::target_namespace::WORKTREES;
@@ -149,6 +156,9 @@ pub struct Worktree {
     pub subject: String,
     /// The slot's key in `.brokkr/worktrees.toml` ([`record_name`]).
     pub record_name: String,
+    /// Tracked files left as Git LFS pointers, observed at admission
+    /// ([`crate::worktree_lfs`]); empty when there are none.
+    pub lfs_pointers: Vec<crate::worktree_lfs::Pointer>,
 }
 
 impl Worktree {
@@ -204,44 +214,38 @@ impl Worktree {
         // Reuse path: if a worktree already exists here and its HEAD matches
         // the requested commit, skip remove + re-add.
         if checkout.exists()
+            && slot.join(CUTTING_MARK).symlink_metadata().is_err()
             && let Ok(head) = run_git(&checkout, &["rev-parse", "HEAD"])
             && head == full_hash.as_str()
         {
-            if !is_pristine(&checkout) {
-                return Err(DevError::Refused(format!(
-                    "worktree at {} has been modified since brokkr cut it, so a run would \
-                     measure changed code under {short}'s name; refusing to reuse it. Remove \
-                     it with `brokkr clean --worktrees` (or move any work out and delete the \
-                     directory), then rerun",
-                    checkout.display()
-                )));
-            }
             // The caller names the commit once; reuse vs cut is log narration.
             // `detail_or_console`: `run`, `verify` and `sync` take `--commit`
             // without opening a run log.
             output::detail_or_console(&format!("reusing worktree for {short} ({subject})"));
             // Idempotent: repairs a slot whose furnishing was interrupted.
             furnish(git_root, &slot, &checkout)?;
+            let lfs_pointers = admit(&checkout, &short)?;
             return Ok(Self {
                 path: checkout,
                 commit: short,
                 subject,
                 record_name,
+                lfs_pointers,
             });
         }
 
-        // Stale (different commit, git lost track of the dir, or HEAD could
-        // not be read at all). A failed `rev-parse` is not proof of staleness -
-        // it can be transient - so replacement goes through the same dirty
-        // rule eviction obeys: `is_dirty` reads "git could not answer" as
-        // dirty, and a dirty tree is refused rather than force-removed. The
-        // cost of a wrong refusal is one rerun; the cost of a wrong removal is
-        // somebody's uncommitted work.
+        // Stale (different commit, an unfinished cut, git lost track of the
+        // dir, or HEAD could not be read at all). A failed `rev-parse` is not
+        // proof of staleness - it can be transient - so replacement goes
+        // through the same dirty rule eviction obeys: `is_dirty` reads "git
+        // could not answer" as dirty, and a dirty tree is refused rather than
+        // force-removed. The cost of a wrong refusal is one rerun; the cost of
+        // a wrong removal is somebody's uncommitted work.
         let stale = slot.exists();
         if stale && checkout.exists() && is_dirty(&checkout) {
             return Err(DevError::Refused(format!(
-                "worktree at {} is not checked out at {short} and has uncommitted work \
-                 (or git could not read it); refusing to replace it. Commit or move the \
+                "worktree at {} is not a complete checkout of {short} and has uncommitted \
+                 work (or git could not read it); refusing to replace it. Commit or move the \
                  work, remove the directory by hand, then rerun",
                 checkout.display()
             )));
@@ -261,8 +265,12 @@ impl Worktree {
         ));
 
         std::fs::create_dir_all(&slot)?;
+        std::fs::write(slot.join(CUTTING_MARK), b"")?;
         let checkout_str = checkout.display().to_string();
-        run_git(
+        // An LFS object the server cannot serve stays a pointer rather than
+        // failing the checkout: a commit whose LFS history has rotted is still
+        // buildable, and `admit` names every file left that way.
+        run_git_env(
             git_root,
             &[
                 "worktree",
@@ -271,16 +279,43 @@ impl Worktree {
                 &checkout_str,
                 full_hash.as_str(),
             ],
+            &[("GIT_LFS_SKIP_DOWNLOAD_ERRORS", "1")],
         )?;
         furnish(git_root, &slot, &checkout)?;
+        let lfs_pointers = admit(&checkout, &short)?;
+        std::fs::remove_file(slot.join(CUTTING_MARK))?;
 
         Ok(Self {
             path: checkout,
             commit: short,
             subject,
             record_name,
+            lfs_pointers,
         })
     }
+}
+
+/// The checks every admission of a checkout passes, cut or reused: it is
+/// pristine, and its LFS pointers are found and warned about. Returns the
+/// pointers for the caller to record.
+fn admit(
+    checkout: &Path,
+    short: &crate::git::ShortCommit,
+) -> Result<Vec<crate::worktree_lfs::Pointer>, DevError> {
+    if !is_pristine(checkout) {
+        return Err(DevError::Refused(format!(
+            "worktree at {} has been modified since brokkr cut it (by a checkout hook, or by \
+             hand), so a run would measure changed code under {short}'s name; refusing to use \
+             it. Remove it with `brokkr clean --worktrees` (or move any work out and delete the \
+             directory), then rerun",
+            checkout.display()
+        )));
+    }
+    let pointers = crate::worktree_lfs::inspect(checkout)?;
+    if let Some(line) = crate::worktree_lfs::warning(short.as_str(), &pointers) {
+        output::warn(&line);
+    }
+    Ok(pointers)
 }
 
 /// Create the slot's links: the isolated target dir and one link per path
@@ -657,9 +692,15 @@ pub fn is_pristine(path: &Path) -> bool {
 
 /// Run a git command in the given directory and return trimmed stdout.
 fn run_git(cwd: &Path, args: &[&str]) -> Result<String, DevError> {
+    run_git_env(cwd, args, &[])
+}
+
+/// [`run_git`] with extra environment for the child.
+fn run_git_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String, DevError> {
     let output = crate::output::child::command_output(
         crate::process::spawn::ChildPolicy::plain_command("git")
             .args(args)
+            .envs(env.iter().copied())
             .current_dir(cwd),
     )
     .map_err(|error| DevError::Spawn {

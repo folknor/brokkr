@@ -1062,6 +1062,15 @@ impl Attempt<'_> {
             tree,
             keep,
             |build_root| {
+                document.build.lfs_pointers = build_root.lfs_pointers().map(|found| {
+                    found
+                        .iter()
+                        .map(|p| store::LfsPointer {
+                            path: p.path.clone(),
+                            oid: p.oid.clone(),
+                        })
+                        .collect()
+                });
                 self.execute(build_root.as_path(), commit, &mut document, &mut modules);
                 Ok(())
             },
@@ -1128,6 +1137,7 @@ impl Attempt<'_> {
                 default_features: self.bench.default_features,
                 resolved: None,
                 artifact: None,
+                lfs_pointers: None,
             },
             measurement: self.measurement,
             params: self.bound.document(),

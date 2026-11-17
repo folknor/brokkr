@@ -307,8 +307,16 @@ CREATE TABLE child_cache_path (
 ) STRICT;
 ";
 
+/// Version 9: Git LFS pointers. The tracked files a `--commit` worktree was
+/// admitted with as LFS pointers, a JSON array of `{path, oid}`; NULL when
+/// not recorded, which is every earlier run.
+const V9: &str = "
+ALTER TABLE runs ADD COLUMN lfs_pointers TEXT
+    CHECK (lfs_pointers IS NULL OR json_type(lfs_pointers) = 'array');
+";
+
 /// The chain. Shipped steps are frozen; append only.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 

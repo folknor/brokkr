@@ -59,7 +59,10 @@ iteration and a run whose iterations disagreed are all stored. It holds:
 - the build: what was requested (target, profile, features with host
   features folded in, default features), always; what resolution produced
   (the bin and cargo's resolved features) and the artifact digest, each
-  only as far as the build got;
+  only as far as the build got; and, for a `--commit` run, `lfs_pointers`:
+  every tracked file of the worktree left as a Git LFS pointer when it was
+  admitted, by path and oid. Absent means not recorded (a live-tree run, or
+  a document from before the field), empty means scanned and none;
 - what was asked to be measured: `timing`, `hotpath` for `brokkr bench
   --hotpath`, or `alloc` for `brokkr bench --alloc`. A run stored before the
   field existed reads as `timing`. The `runs` table keeps `alloc` as

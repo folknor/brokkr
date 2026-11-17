@@ -34,7 +34,10 @@ collide with a param. brokkr's options:
 
 - `--commit REF` - build REF in a persistent worktree, as `brokkr build
   --commit` does, and run it. The benches are always the working tree's:
-  HEAD's scripts serve every commit, and branch on `since()` (below).
+  HEAD's scripts serve every commit, and branch on `since()` (below). A Git
+  LFS object the server can no longer serve is left as its pointer file
+  rather than failing the worktree; every such file is warned about and
+  stored in the run's `build.lfs_pointers`.
 - `--iterations N` - how many iterations, overriding the bench table's
   `iterations` setting (default 3 when absent). Any positive u32 count is
   accepted, including one larger than the bench default. The result is the

@@ -146,6 +146,14 @@ impl BuildRoot {
             Checkout::Live(_) => "",
         }
     }
+    /// The Git LFS pointers a `--commit` worktree was admitted with; `None`
+    /// for the live checkout, which is not inspected.
+    pub(crate) fn lfs_pointers(&self) -> Option<&[crate::worktree_lfs::Pointer]> {
+        match &self.checkout {
+            Checkout::Worktree(wt) => Some(&wt.lfs_pointers),
+            Checkout::Live(_) => None,
+        }
+    }
     pub(crate) fn at_commit(
         &self,
         commit: &str,

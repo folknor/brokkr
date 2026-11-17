@@ -61,6 +61,25 @@ fn opt(value: Option<&String>) -> &str {
     value.map_or("(unknown)", String::as_str)
 }
 
+/// A compared run whose `--commit` worktree held Git LFS pointers: its
+/// numbers may be of a build or script that read pointer text. Silent for an
+/// empty list and for a run that did not record one.
+fn lfs_line(run: &StoredRun, side: &str) -> Option<String> {
+    let pointers = run.doc.build.lfs_pointers.as_ref()?;
+    let first = pointers.first()?;
+    let rest = pointers.len() - 1;
+    Some(format!(
+        "  lfs pointers on {side}, {}: {}{}",
+        short(run),
+        first.path,
+        if rest == 0 {
+            String::new()
+        } else {
+            format!(" and {rest} more")
+        }
+    ))
+}
+
 fn build_line(a: &Build, b: &Build) -> Option<String> {
     let mut parts = Vec::new();
     if a.target != b.target {
@@ -682,6 +701,8 @@ pub(crate) fn format_compare(
                     (&y.doc.bench, &y.doc.config),
                 ));
                 lines.extend(build_line(&x.doc.build, &y.doc.build));
+                lines.extend(lfs_line(x, "A"));
+                lines.extend(lfs_line(y, "B"));
                 lines.extend(executables_line(x, y));
                 lines.extend(preparations_line(x, y));
                 lines.extend(host_line(x, y));

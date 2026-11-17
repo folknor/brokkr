@@ -59,6 +59,7 @@ fn document(uuid: &str, project: &str) -> RunDocument {
             default_features: true,
             resolved: None,
             artifact: None,
+            lfs_pointers: None,
         },
         measurement: Measurement::Timing,
         params: BTreeMap::new(),
