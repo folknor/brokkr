@@ -217,6 +217,12 @@ fn frozen_document() -> RunDocument {
             cpu_governor: None,
             avail_memory_mb: Some(64_000),
             captured_env: BTreeMap::from([("MALLOC_ARENA_MAX".into(), "2".into())]),
+            previous_command: Some(super::store::PreviousCommand {
+                command: "[\"brokkr\",\"check\"]".into(),
+                ended_unix_s: 1_761_999_990,
+                elapsed_ms: None,
+            }),
+            fstrim_timer_unix_ms: Some(1_761_000_000_000),
         },
         build: Build {
             target: None,
@@ -228,8 +234,14 @@ fn frozen_document() -> RunDocument {
                 features: vec!["default".into(), "hotpath".into()],
             }),
             artifact: Some("00112233445566778899aabbccddeeff".into()),
-            lfs_pointers: None,
-            lockfile: None,
+            lfs_pointers: Some(vec![super::store::LfsPointer {
+                path: "data/feed.csv".into(),
+                oid: format!("sha256:{}", "ab".repeat(32)),
+            }]),
+            lockfile: Some(super::store::Lockfile {
+                source: super::store::LockSource::Seeded,
+                digest: Some("ffeeddccbbaa99887766554433221100".into()),
+            }),
         },
         measurement: Measurement::Hotpath,
         params: BTreeMap::from([(
@@ -257,7 +269,63 @@ fn frozen_document() -> RunDocument {
             wall_us: Some(2_000),
             record: Some(record),
             children: vec![child],
+            host: Some(frozen_host()),
         }],
+    }
+}
+
+/// The protocol's host trace fixture: an ended predecessor, and each
+/// reading part present and absent. Frozen with the protocol.
+fn frozen_host() -> super::store::HostTrace {
+    use super::store::{Cell, Cursor, Device, DeviceCounters, DeviceLayer, Reading};
+    let counters = DeviceCounters {
+        sectors_written: 4_096,
+        writes_completed: 10,
+        write_ticks_ms: 80,
+        in_flight: 1,
+        sectors_discarded: Some(2_048),
+    };
+    let reading = |at_us: i64| Reading {
+        at_us,
+        dirty_kb: Some(12_288),
+        writeback_kb: None,
+        device: Some(counters),
+    };
+    let device = Device {
+        name: "nvme0n1".into(),
+        major: 259,
+        minor: 0,
+        layer: DeviceLayer::Mapped,
+        diskseq: Some(9),
+    };
+    super::store::HostTrace {
+        boot_id: Some("5e1f".into()),
+        device: Some(device.clone()),
+        previous: Some(Cursor::Ended {
+            cell: Cell {
+                run: "f".repeat(32),
+                project: "pbfhogg".into(),
+                bench: "altw".into(),
+                iteration: 2,
+                boot_id: None,
+            },
+            device: Some(device),
+            reading: reading(1_000),
+            release_completed: false,
+        }),
+        cursor_written: false,
+        block_start_us: Some(2_100),
+        start: Some(reading(2_000)),
+        end: Some(reading(9_000)),
+        released: None,
+        release_completed: true,
+        readings: vec![Reading {
+            at_us: 3_000,
+            dirty_kb: None,
+            writeback_kb: Some(64),
+            device: None,
+        }],
+        capped: true,
     }
 }
 

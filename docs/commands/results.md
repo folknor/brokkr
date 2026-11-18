@@ -463,12 +463,22 @@ digest), the outcome, the result's wall with every iteration's in execution
 order (each the measured call's wall when the run marked one, said so, with
 the block's wall beside it in the iteration lines and the child flagged
 `(measured)`) and its verdict (nil, or the string quoted, so `""` stays visible),
-host, conditions, captured env, the build asked for and as resolved (with
+host, conditions, a `history` field (the last brokkr command in the user's
+history before the run and how long before it ended, and how long before
+`fstrim.timer` last fired), captured env, the build asked for and as resolved (with
 the root `Cargo.lock`'s source and its digest after the build, `brokkr man
 run`, `--commit`), the config digest, brokkr's argv, a `sidecar` field naming the `brokkr sidecar`
 invocation that reads a child's samples, markers and counters (`brokkr man
 measure`, Script-bench children) when some iteration launched one, then
-each iteration with its outcome and each child with its start offset, wall,
+each iteration with its outcome, its host lines (the sampled device, the
+gap from the cell before it, its starting `Dirty` and `Writeback`, and a
+`block` line of their peaks with the device's writes, discards and mean
+block-layer write wait per completed request over the readings inside the
+block, or, read without its periodic readings or with no block, an `around`
+line from the start and end readings, setup and extraction included; each
+figure `?` or left out when its readings cannot give it; the block window is
+placed through one clock anchor taken before `bench()`, so a host suspend
+during it misplaces the window by its length), and each child with its start offset, wall,
 ending, argv and what its capture kept and lost, for a `program` call the
 executable it ran and that file's digest (or why it was not read), and for
 a call marked `hotpath` its stage, occurrence and capture status, then, for
@@ -555,7 +565,11 @@ under the pair rather than splitting it:
   distinct sequences. Resident counts and scan times are observations and
   never compared.
 - `host:` hostname, memory, governor and kernel, and `env:` the captured
-  variables, as for typed pairs.
+  variables, as for typed pairs. A script-bench `host:` also names, from
+  each side's result iteration (`brokkr man bench`, What a run stores),
+  where its starting `Dirty` and `Writeback` differ and where its gap from
+  the cell before it differs: the predecessor, the elapsed time, and what
+  the device wrote and discarded in the gap.
 - `verdict:` when the results' verdicts differ, nil against `""` included:
   the sides measured different answers.
 - `record:` the result records' entries that moved, `hotpath` aside.

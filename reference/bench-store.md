@@ -55,7 +55,13 @@ iteration and a run whose iterations disagreed are all stored. It holds:
   checkout, hostname, the full commit sha, whether the tree was dirty, the
   commit subject, the start time, brokkr's version and argv;
 - conditions: kernel, CPU governor, available memory, the captured
-  environment;
+  environment; `previous_command`, the newest row of the user's command
+  history when the run started (`{command, ended_unix_s, elapsed_ms}`, the
+  row's own end to the second, the latest brokkr command to complete as far
+  as that file knows); and `fstrim_timer_unix_ms`, the mtime of systemd's
+  `fstrim.timer` stamp, a timer firing and never a completed trim. Each is
+  omitted when absent; the `runs` columns are `previous_command` and
+  `fstrim_timer_unix_ms` (schema step 11);
 - the build: what was requested (target, profile, features with host
   features folded in, default features), always; what resolution produced
   (the bin and cargo's resolved features) and the artifact digest, each
@@ -93,8 +99,59 @@ An iteration holds its outcome (`completed` with a verdict, where nil and
 `""` differ; `failed` with a reason; `interrupted`), its block wall from the
 call of `bench()` (absent when `bench()` was never called), its `record` as
 extracted at the end of the sample (a JSON object; absent when extraction
-never happened, which is not the same as an extracted empty table), and its
-children in launch order.
+never happened, which is not the same as an extracted empty table), its
+children in launch order, and its **host trace** (`host`), absent for an
+iteration never admitted and every one stored before the field, omitted
+when absent. Every time in it is `CLOCK_BOOTTIME` in microseconds, read just
+after the observation it stamps, so one boot's readings order and subtract
+across iterations, runs and projects. It holds the boot id; the block device
+sampled for the iteration container (`{name, major, minor, layer, diskseq}`,
+`layer` `disk` for a whole disk, a partition promoted to its disk so its
+counters include sibling partitions, or `mapped` for a dm, md or loop node,
+whose counters are its own; absent with no single block device, as on btrfs);
+`previous`, the cell cursor as the iteration found it (below); whether its
+own in-progress cursor was written; `block_start_us`, when `bench()` was
+called, the zero child origins count from (absent when it never was); the
+`start` reading, before `bench()`, the `end` reading after it returned, and
+the `released` reading after the iteration directory's release, with whether
+that release completed (when not, the directory was left to a later scan and
+cleanup I/O may follow); the periodic readings between, every 100 ms from a
+thread of their own, independent of any child; and `capped` when the run's
+100 000 periodic readings ran out (the boundary readings and cursor are kept
+past it, a few hundred bytes per iteration). A device's counters are kept in
+a reading only while its sysfs name still holds the numbers and `diskseq`
+resolved. The writer checks its own trace against publication's rules
+first: a predecessor that would be refused is dropped, and a trace still
+refused is not stored, so no cursor file costs a run its publication. A reading is `{at_us, dirty_kb,
+writeback_kb, device}`: `/proc/meminfo` `Dirty` and `Writeback`, and the
+device's cumulative `stat` counters `{sectors_written, writes_completed,
+write_ticks_ms, in_flight, sectors_discarded}` (discards absent on a kernel
+without them); each part absent when its read failed, never zero.
+Publication refuses a negative reading, readings out of order, counters
+with no device (the trace's or the predecessor's), a negative block start,
+and a predecessor of the same boot whose end is stamped after this start. The `iterations` column `host`
+holds the trace without its periodic readings, which are `host_readings`
+rows by ordinal (schema step 11), read only with children: a summary's
+traces keep their device, cursor and boundary readings and have no periodic
+ones.
+
+The **cell cursor** is a per-user file beside the global lock
+(`bench-cell.json` in brokkr's state directory), which only a holder of the
+lock writes. An iteration reads it, replaces it with `in_progress` naming
+itself (`{run, project, bench, iteration, boot_id}`), and after its release
+with `ended` carrying its device and `released` reading. So `previous` names
+the last cell to start or end on the host, whatever its project, destination
+or publication: `in_progress` means that cell never recorded its end, so the
+gap and what happened in it are unknown. A failed in-progress write is
+recorded as `cursor_written` false and the older entry is removed, so a
+later cell finds none rather than taking it as its predecessor; only when
+the removal fails too can a later cell read the older entry across this
+one unseen. Replacement is a
+rename, so the guarantee covers process death, not power loss. The gap a
+reader shows (elapsed time and device deltas from the predecessor's
+`released` reading to this `start`) is derived, never stored: elapsed only
+within one boot, device deltas only when both sides name one device with
+one `diskseq`, and none across a counter regression.
 
 A child holds its program, argv and environment additions, pid, its origin
 offset from the start of its iteration's block, its wall, its ending

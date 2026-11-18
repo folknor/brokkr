@@ -177,6 +177,69 @@ fn completed(wall_us: i64, verdict: Option<&str>) -> Iteration {
                 },
             ),
         ],
+        host: Some(host_trace()),
+    }
+}
+
+/// A host trace with every shape: a device, an ended predecessor, readings
+/// with and without each part.
+pub(super) fn host_trace() -> super::store::HostTrace {
+    use super::store::{Cell, Cursor, Device, DeviceCounters, DeviceLayer, Reading};
+    let counters = |written: i64| DeviceCounters {
+        sectors_written: written,
+        writes_completed: written / 8,
+        write_ticks_ms: written / 4,
+        in_flight: 3,
+        sectors_discarded: Some(written / 2),
+    };
+    let reading = |at_us: i64, device: Option<DeviceCounters>| Reading {
+        at_us,
+        dirty_kb: Some(12_288),
+        writeback_kb: (at_us % 2 == 0).then_some(64),
+        device,
+    };
+    let device = Device {
+        name: "nvme0n1".into(),
+        major: 259,
+        minor: 0,
+        layer: DeviceLayer::Disk,
+        diskseq: Some(1),
+    };
+    super::store::HostTrace {
+        boot_id: Some("5e1f".into()),
+        device: Some(device.clone()),
+        previous: Some(Cursor::Ended {
+            cell: Cell {
+                run: "f".repeat(32),
+                project: "pbfhogg".into(),
+                bench: "altw".into(),
+                iteration: 2,
+                boot_id: Some("5e1f".into()),
+            },
+            device: Some(device),
+            reading: reading(1_000, Some(counters(800))),
+            release_completed: false,
+        }),
+        cursor_written: true,
+        block_start_us: Some(2_100),
+        start: Some(reading(2_000, Some(counters(1_600)))),
+        end: Some(reading(9_000, Some(counters(8_000)))),
+        released: Some(reading(9_500, Some(counters(8_000)))),
+        release_completed: true,
+        readings: vec![
+            reading(3_000, Some(counters(2_400))),
+            reading(4_001, None),
+            Reading {
+                at_us: 5_000,
+                dirty_kb: None,
+                writeback_kb: None,
+                device: Some(DeviceCounters {
+                    sectors_discarded: None,
+                    ..counters(4_000)
+                }),
+            },
+        ],
+        capped: true,
     }
 }
 
@@ -214,6 +277,12 @@ pub(super) fn document(uuid: &str) -> RunDocument {
             cpu_governor: None,
             avail_memory_mb: Some(64_000),
             captured_env: BTreeMap::from([("MALLOC_ARENA_MAX".into(), "2".into())]),
+            previous_command: Some(super::store::PreviousCommand {
+                command: "[\"brokkr\",\"bench\",\"altw\"]".into(),
+                ended_unix_s: 1_761_999_990,
+                elapsed_ms: Some(51_000),
+            }),
+            fstrim_timer_unix_ms: Some(1_761_000_000_000),
         },
         build: Build {
             target: None,
@@ -323,6 +392,7 @@ fn a_config_text_is_stored_once_and_failed_attempts_keep_their_evidence() {
             wall_us: None,
             record: None,
             children: Vec::new(),
+            host: None,
         },
     ];
     store.publish(&interrupted).unwrap();
@@ -799,6 +869,11 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
     // A version one store held no stderr, no LFS pointers and no lockfile.
     doc.build.lfs_pointers = None;
     doc.build.lockfile = None;
+    doc.conditions.previous_command = None;
+    doc.conditions.fstrim_timer_unix_ms = None;
+    for iteration in &mut doc.iterations {
+        iteration.host = None;
+    }
     for child in doc.iterations.iter_mut().flat_map(|i| &mut i.children) {
         child.stderr = None;
     }
@@ -810,7 +885,11 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         store
             .conn()
             .execute_batch(
-                "DROP TABLE child_cache_path;
+                "DROP TABLE host_readings;
+                 ALTER TABLE iterations DROP COLUMN host;
+                 ALTER TABLE runs DROP COLUMN fstrim_timer_unix_ms;
+                 ALTER TABLE runs DROP COLUMN previous_command;
+                 DROP TABLE child_cache_path;
                  DROP TABLE child_cache_file;
                  DROP TABLE child_cache;
                  ALTER TABLE runs DROP COLUMN lockfile;
@@ -831,7 +910,7 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
     assert!(store.marks(&doc.project).unwrap().is_empty());
     assert_eq!(store.load(&doc.uuid).unwrap(), Some(doc));
 }

@@ -967,6 +967,28 @@ Ctrl-C during the retries ends them once the attempt in flight returns.
 The whole invocation holds the brokkr lock, every arm's publication
 included.
 
+**Host state.** Each admitted iteration also stores what the host's
+writeback and its scratch drive were doing: the block device holding the
+iteration directory (a partition's whole disk), `/proc/meminfo` `Dirty` and
+`Writeback` and that device's cumulative write, write-wait, in-flight and
+discard counters, read before `bench()`, every 100 ms through it, after it,
+and once more after the iteration directory is released. It also stores the
+cell before it on this host: every iteration records itself in a per-user
+cursor beside the brokkr lock as it starts and again once released, so the
+next one, in any project, arm or invocation, names its predecessor whether
+or not that run was ever published, or says it never recorded an end. The
+run also keeps the newest row of the command history and when
+`fstrim.timer` last fired. `brokkr results UUID` shows each iteration's
+device, the gap from its predecessor (elapsed, and what the device wrote and
+discarded in it, when both name one device instance), its starting `Dirty`
+and `Writeback` and their peaks, the device's writes and mean write wait
+through it; `brokkr results --compare` names where the result iterations'
+start state or gap differ, and `brokkr sidecar` gives each phase of a child
+its host window. A manual `fstrim` shows as discards in the gap, never by
+name. A rest between cells is a `binary_with({program = "sleep"}, "60")`
+call, whose iteration then records it, or a bench of its own that the next
+cell names as its predecessor.
+
 The stored config is one TOML document: `[run]` (the live project root and
 build root, under `--commit` too), `[script]` (the bench, the file its script came from and
 the exact source, as `source`, or `source_hex` when it is not UTF-8),

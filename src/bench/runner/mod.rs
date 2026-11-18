@@ -1133,6 +1133,8 @@ impl Attempt<'_> {
                 cpu_governor: crate::host::cpu::collect().governor,
                 avail_memory_mb: i64::try_from(crate::host::memory::collect().available_mb).ok(),
                 captured_env,
+                previous_command: crate::bench::host_trace::previous_command(),
+                fstrim_timer_unix_ms: crate::bench::host_trace::fstrim_timer_unix_ms(),
             },
             build: store::Build {
                 target: self.bench.target.clone(),
@@ -1377,6 +1379,7 @@ impl Attempt<'_> {
                     since,
                     measurement: self.measurement,
                     budget,
+                    run: document,
                 });
             since = returned;
             budget = budget_left;

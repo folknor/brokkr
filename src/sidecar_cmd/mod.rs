@@ -445,18 +445,23 @@ fn run_compare(stores: &Stores, uuid_a: &str, uuid_b: &str, human: bool) -> Resu
             data.markers = stores.typed.query_sidecar_markers(id, Some(*best))?;
         }
     }
-    print_compare_timeline(&data_a.side(), &data_b.side(), human);
+    print_compare_timeline(&data_a.side(&a), &data_b.side(&b), human);
     Ok(())
 }
 
 impl SideData {
-    fn side(&self) -> CompareSide<'_> {
+    fn side<'s>(&'s self, from: &'s Side) -> CompareSide<'s> {
+        let host = match (from, self.child) {
+            (Side::Bench(run), Some((iteration, _))) => run.host(iteration),
+            _ => None,
+        };
         CompareSide {
             uuid: &self.uuid,
             child: self.child,
             samples: &self.samples,
             markers: &self.markers,
             process: self.process,
+            host,
         }
     }
 }

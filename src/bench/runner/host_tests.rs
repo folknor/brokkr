@@ -21,8 +21,50 @@ fn setup<'a>(script: &'a lua::Script, root: &'a Path, container: &'a Path) -> It
         since: Since::new(root, "0".repeat(40).parse().unwrap()),
         measurement: store::Measurement::Timing,
         budget: super::Budget::RUN,
+        run: &RUN,
     }
 }
+
+/// The run an iteration belongs to, as far as the cell cursor reads it.
+static RUN: std::sync::LazyLock<store::RunDocument> =
+    std::sync::LazyLock::new(|| store::RunDocument {
+        format: store::DOCUMENT_FORMAT,
+        uuid: "0".repeat(32),
+        project: "brokkr".to_owned(),
+        bench: "test".to_owned(),
+        checkout: "/".to_owned(),
+        hostname: "host".to_owned(),
+        commit: "0".repeat(40),
+        dirty: false,
+        subject: None,
+        started_unix_ms: 0,
+        brokkr_version: "0".to_owned(),
+        argv: Vec::new(),
+        conditions: store::Conditions {
+            kernel: None,
+            cpu_governor: None,
+            avail_memory_mb: None,
+            captured_env: BTreeMap::new(),
+            previous_command: None,
+            fstrim_timer_unix_ms: None,
+        },
+        build: store::Build {
+            target: None,
+            profile: "release".to_owned(),
+            features: Vec::new(),
+            default_features: true,
+            resolved: None,
+            artifact: None,
+            lfs_pointers: None,
+            lockfile: None,
+        },
+        measurement: store::Measurement::Timing,
+        params: BTreeMap::new(),
+        config: String::new(),
+        iterations_requested: 1,
+        outcome: store::RunOutcome::Interrupted,
+        iterations: Vec::new(),
+    });
 
 fn script(source: &str) -> lua::Script {
     lua::load_script(source.as_bytes(), Some("test"), None).unwrap()

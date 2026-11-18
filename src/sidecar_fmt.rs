@@ -50,6 +50,66 @@ impl Process {
     }
 }
 
+/// A script-bench iteration's host trace as seen from one of its children:
+/// `child_zero_us` is the child's clock zero on the trace's boot clock, its
+/// iteration's block start plus its origin offset.
+#[derive(Clone, Copy)]
+pub(crate) struct HostProjection<'a> {
+    pub trace: &'a crate::bench::store::HostTrace,
+    pub child_zero_us: i64,
+}
+
+impl HostProjection<'_> {
+    /// The readings stamped inside a window of the child's clock, and
+    /// whether the run's reading budget ran out in its iteration, so the
+    /// window may lack later readings.
+    fn window(&self, from_us: i64, to_us: i64) -> HostWindow {
+        (
+            crate::bench::host_trace::window(
+                self.trace,
+                self.child_zero_us.saturating_add(from_us),
+                self.child_zero_us.saturating_add(to_us),
+            ),
+            self.trace.capped,
+        )
+    }
+}
+
+/// A phase's host window, and whether its iteration's readings were capped.
+pub(crate) type HostWindow = (crate::bench::host_trace::Window, bool);
+
+/// A phase's host window as JSON; derived figures are `null` when the window
+/// holds too few readings for them.
+fn host_json((w, capped): &HostWindow) -> serde_json::Value {
+    serde_json::json!({
+        "readings": w.readings,
+        "capped": capped,
+        "peak_dirty_kb": w.peak_dirty_kb,
+        "peak_writeback_kb": w.peak_writeback_kb,
+        "peak_in_flight": w.peak_in_flight,
+        "device_written_kb": w.written_kb,
+        "device_discarded_kb": w.discarded_kb,
+        "write_wait_ms": w.write_wait_ms.map(|v| (v * 100.0).round() / 100.0),
+    })
+}
+
+/// A phase's host window as one human line.
+fn host_human((w, capped): &HostWindow) -> String {
+    let kb = |v: Option<i64>| v.map_or_else(|| "-".to_owned(), |v| format!("{v}kB"));
+    format!(
+        "host: readings={}{} peak_dirty={} peak_writeback={} dev_written={} write_wait={} peak_in_flight={}",
+        w.readings,
+        if *capped { " (capped)" } else { "" },
+        kb(w.peak_dirty_kb),
+        kb(w.peak_writeback_kb),
+        kb(w.written_kb),
+        w.write_wait_ms
+            .map_or_else(|| "-".to_owned(), |v| format!("{v:.2}ms")),
+        w.peak_in_flight
+            .map_or_else(|| "-".to_owned(), |v| v.to_string()),
+    )
+}
+
 /// Format a Unix epoch as a local ISO-8601 timestamp.
 /// The provenance line for an abnormal ending, `None` for a clean exit or an
 /// intentional stop-marker end.
@@ -858,6 +918,7 @@ pub(crate) fn print_phase_summary(
     samples: &[sidecar::Sample],
     markers: &[sidecar::Marker],
     process: Process,
+    host: Option<HostProjection<'_>>,
     human: bool,
 ) {
     // Shared with `--compare`: each marker opens a segment ending at the next
@@ -869,16 +930,25 @@ pub(crate) fn print_phase_summary(
         .iter()
         .map(|(name, start, end)| compute_phase_summary(name, *start, *end, samples))
         .collect();
+    let hosts: Vec<Option<HostWindow>> = phases
+        .iter()
+        .map(|(_, start, end)| host.map(|h| h.window(*start, *end)))
+        .collect();
 
     if human {
-        print_phase_summary_human(&summaries, process, clk_tck);
+        print_phase_summary_human(&summaries, &hosts, process, clk_tck);
     } else {
-        print_phase_summary_jsonl(&summaries, samples, process, clk_tck);
+        print_phase_summary_jsonl(&summaries, &hosts, samples, process, clk_tck);
     }
 }
 
 #[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
-fn print_phase_summary_human(summaries: &[PhaseSummary], process: Process, clk_tck: i64) {
+fn print_phase_summary_human(
+    summaries: &[PhaseSummary],
+    hosts: &[Option<HostWindow>],
+    process: Process,
+    clk_tck: i64,
+) {
     println!(
         "{:<24} {:>8} {:>10} {:>10} {:>10} {:>12} {:>12} {:>10}",
         "Phase",
@@ -891,7 +961,12 @@ fn print_phase_summary_human(summaries: &[PhaseSummary], process: Process, clk_t
         "Avg Cores",
     );
 
-    for s in summaries {
+    for (s, host) in summaries.iter().zip(hosts) {
+        let host_line = || {
+            if let Some(w) = host {
+                println!("{:<24}   {}", "", host_human(w));
+            }
+        };
         if s.samples == 0 {
             // Phase is shorter than the 100ms sampling interval or landed
             // between two sample ticks. No /proc data to show, so a typed
@@ -904,6 +979,7 @@ fn print_phase_summary_human(summaries: &[PhaseSummary], process: Process, clk_t
                     "{:<24} {:>6}ms {:>10} {:>10} {:>10} {:>12} {:>12} {:>10}",
                     s.name, s.duration_ms, "-", "-", "-", "-", "-", "-",
                 );
+                host_line();
             }
             continue;
         }
@@ -929,12 +1005,14 @@ fn print_phase_summary_human(summaries: &[PhaseSummary], process: Process, clk_t
             "{:<24}   user={user_cores} kern={kernel_cores} majflt={} minflt={} vol_cs={} nonvol_cs={} peak_threads={}",
             "", s.majflt_delta, s.minflt_delta, s.vol_cs_delta, s.nonvol_cs_delta, s.peak_threads,
         );
+        host_line();
     }
 }
 
 #[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_phase_summary_jsonl(
     summaries: &[PhaseSummary],
+    hosts: &[Option<HostWindow>],
     samples: &[sidecar::Sample],
     process: Process,
     clk_tck: i64,
@@ -970,7 +1048,7 @@ fn print_phase_summary_jsonl(
     };
     println!("{header}");
 
-    for s in summaries {
+    for (s, host) in summaries.iter().zip(hosts) {
         // `avg_cores` is `null` (not 0) when we couldn't measure - zero is
         // ambiguous with "truly idle". Same for the memory/io fields, which
         // we simply omit when samples == 0.
@@ -1016,6 +1094,9 @@ fn print_phase_summary_jsonl(
         {
             map.insert("end_us".to_owned(), s.end_us.into());
             map.insert("duration_us".to_owned(), (s.end_us - s.start_us).into());
+            if let Some(w) = host {
+                map.insert("host".to_owned(), host_json(w));
+            }
         }
         println!("{obj}");
     }

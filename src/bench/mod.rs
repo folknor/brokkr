@@ -18,6 +18,7 @@
 pub(crate) mod cache;
 pub(crate) mod evidence;
 mod external;
+pub(crate) mod host_trace;
 mod json;
 mod library;
 mod lua;

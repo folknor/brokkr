@@ -322,8 +322,41 @@ ALTER TABLE runs ADD COLUMN lockfile TEXT
     CHECK (lockfile IS NULL OR json_type(lockfile) = 'object');
 ";
 
+/// Version 11: host state. A run's previous command and fstrim timer stamp;
+/// each iteration's host trace as a JSON object without its periodic
+/// readings, which are rows of `host_readings` by ordinal, each part NULL
+/// when its read failed. NULL and no rows when not observed, which is every
+/// earlier run.
+const V11: &str = "
+ALTER TABLE runs ADD COLUMN previous_command TEXT
+    CHECK (previous_command IS NULL OR json_type(previous_command) = 'object');
+ALTER TABLE runs ADD COLUMN fstrim_timer_unix_ms INTEGER;
+ALTER TABLE iterations ADD COLUMN host TEXT
+    CHECK (host IS NULL OR json_type(host) = 'object');
+
+CREATE TABLE host_readings (
+    run_id            INTEGER NOT NULL,
+    iteration         INTEGER NOT NULL,
+    ordinal           INTEGER NOT NULL CHECK (ordinal >= 0),
+    at_us             INTEGER NOT NULL CHECK (at_us >= 0),
+    dirty_kb          INTEGER,
+    writeback_kb      INTEGER,
+    sectors_written   INTEGER,
+    writes_completed  INTEGER,
+    write_ticks_ms    INTEGER,
+    in_flight         INTEGER,
+    sectors_discarded INTEGER,
+    PRIMARY KEY (run_id, iteration, ordinal),
+    FOREIGN KEY (run_id, iteration) REFERENCES iterations(run_id, idx) ON DELETE CASCADE,
+    CHECK ((sectors_written IS NULL) = (writes_completed IS NULL)),
+    CHECK ((sectors_written IS NULL) = (write_ticks_ms IS NULL)),
+    CHECK ((sectors_written IS NULL) = (in_flight IS NULL)),
+    CHECK (sectors_written IS NOT NULL OR sectors_discarded IS NULL)
+) STRICT;
+";
+
 /// The chain. Shipped steps are frozen; append only.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 

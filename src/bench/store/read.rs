@@ -7,9 +7,9 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use super::StoreError;
 use super::document::{
     BoundParam, Build, CacheFile, CacheMode, CachePreparation, CaptureOutcome, Child, ChildEnding,
-    Clock, Conditions, Evidence, Executable, ExecutableIdentity, HotpathCapture, Iteration,
-    IterationOutcome, Loss, Measurement, ParamValue, Record, ResolvedBuild, RunDocument,
-    RunOutcome, Sample, SinkEnd, StderrCapture, StderrTail,
+    Clock, Conditions, DeviceCounters, Evidence, Executable, ExecutableIdentity, HostTrace,
+    HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue, Reading, Record,
+    ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd, StderrCapture, StderrTail,
 };
 use super::list::StoredRun;
 
@@ -45,7 +45,7 @@ pub(super) fn load_run(
                     r.features, r.default_features, r.resolved_bin, r.resolved_features,
                     r.artifact, c.text, r.iterations_requested, r.outcome, r.failure,
                     r.config_digest, r.pairing_key, r.best_iteration, r.measurement, r.alloc,
-                    r.lfs_pointers, r.lockfile
+                    r.lfs_pointers, r.lockfile, r.previous_command, r.fstrim_timer_unix_ms
              FROM runs r JOIN configs c ON c.digest = r.config_digest
              WHERE r.uuid = ?1",
             [uuid],
@@ -83,6 +83,7 @@ pub(super) fn load_run(
     }
     doc.build.lfs_pointers = cols.lfs_pointers.as_deref().map(json).transpose()?;
     doc.build.lockfile = cols.lockfile.as_deref().map(json).transpose()?;
+    doc.conditions.previous_command = cols.previous_command.as_deref().map(json).transpose()?;
     doc.params = load_params(conn, run_id)?;
     doc.iterations = load_iterations(conn, run_id, children)?;
     let (config_digest, pairing_key, best) = derived;
@@ -111,6 +112,7 @@ struct RunJson {
     alloc: bool,
     lfs_pointers: Option<String>,
     lockfile: Option<String>,
+    previous_command: Option<String>,
 }
 
 struct RunColumns {
@@ -145,6 +147,8 @@ fn run_columns(row: &Row<'_>) -> rusqlite::Result<Option<RunColumns>> {
             cpu_governor: row.get(13)?,
             avail_memory_mb: row.get(14)?,
             captured_env: BTreeMap::new(),
+            previous_command: None,
+            fstrim_timer_unix_ms: row.get(35)?,
         },
         build: Build {
             target: row.get(16)?,
@@ -175,6 +179,7 @@ fn run_columns(row: &Row<'_>) -> rusqlite::Result<Option<RunColumns>> {
             alloc: row.get(31)?,
             lfs_pointers: row.get(32)?,
             lockfile: row.get(33)?,
+            previous_command: row.get(34)?,
         },
     }))
 }
@@ -221,7 +226,7 @@ fn load_iterations(
     children: bool,
 ) -> Result<Vec<Iteration>, StoreError> {
     let mut stmt = conn.prepare_cached(
-        "SELECT idx, outcome, verdict, failure, wall_us, record FROM iterations
+        "SELECT idx, outcome, verdict, failure, wall_us, record, host FROM iterations
          WHERE run_id = ?1 ORDER BY idx",
     )?;
     let rows = stmt.query_map([run_id], |row| {
@@ -232,11 +237,16 @@ fn load_iterations(
             row.get::<_, Option<String>>(3)?,
             row.get::<_, Option<i64>>(4)?,
             row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
         ))
     })?;
     let mut iterations = Vec::new();
     for row in rows {
-        let (idx, outcome, verdict, failure, wall_us, record) = row?;
+        let (idx, outcome, verdict, failure, wall_us, record, host) = row?;
+        let mut host: Option<HostTrace> = host.as_deref().map(json).transpose()?;
+        if children && let Some(host) = &mut host {
+            host.readings = load_readings(conn, run_id, idx)?;
+        }
         if index(idx)? != iterations.len() {
             return Err(unreadable("iteration order"));
         }
@@ -255,9 +265,54 @@ fn load_iterations(
             } else {
                 Vec::new()
             },
+            host,
         });
     }
     Ok(iterations)
+}
+
+/// An iteration's periodic host readings, by ordinal.
+fn load_readings(
+    conn: &Connection,
+    run_id: i64,
+    iteration: i64,
+) -> Result<Vec<Reading>, StoreError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT ordinal, at_us, dirty_kb, writeback_kb, sectors_written, writes_completed,
+                write_ticks_ms, in_flight, sectors_discarded
+         FROM host_readings WHERE run_id = ?1 AND iteration = ?2 ORDER BY ordinal",
+    )?;
+    let rows = stmt.query_map(params![run_id, iteration], |row| {
+        let sectors_written: Option<i64> = row.get(4)?;
+        let device = match sectors_written {
+            None => None,
+            Some(sectors_written) => Some(DeviceCounters {
+                sectors_written,
+                writes_completed: row.get(5)?,
+                write_ticks_ms: row.get(6)?,
+                in_flight: row.get(7)?,
+                sectors_discarded: row.get(8)?,
+            }),
+        };
+        Ok((
+            row.get::<_, i64>(0)?,
+            Reading {
+                at_us: row.get(1)?,
+                dirty_kb: row.get(2)?,
+                writeback_kb: row.get(3)?,
+                device,
+            },
+        ))
+    })?;
+    let mut readings = Vec::new();
+    for row in rows {
+        let (ordinal, reading) = row?;
+        if index(ordinal)? != readings.len() {
+            return Err(unreadable("host reading order"));
+        }
+        readings.push(reading);
+    }
+    Ok(readings)
 }
 
 /// A child row's columns, decoded after the row closure.

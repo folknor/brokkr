@@ -66,6 +66,26 @@ pub struct Conditions {
     pub avail_memory_mb: Option<i64>,
     /// The captured environment, credential values already redacted.
     pub captured_env: BTreeMap<String, String>,
+    /// The newest row of this user's command history when the run started:
+    /// the latest brokkr command to complete, as far as that file knows.
+    /// Absent when not recorded or the history held none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_command: Option<PreviousCommand>,
+    /// When systemd's `fstrim.timer` last triggered, from its stamp file's
+    /// mtime, in unix milliseconds: a timer firing, not a completed trim of
+    /// any particular filesystem. Absent when there is no stamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fstrim_timer_unix_ms: Option<i64>,
+}
+
+/// One command history row ([`Conditions::previous_command`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreviousCommand {
+    pub command: String,
+    /// When its row was written, at its end, to the second.
+    pub ended_unix_s: i64,
+    pub elapsed_ms: Option<i64>,
 }
 
 /// The build: what was asked for, always, and what resolution and the build
@@ -272,6 +292,193 @@ pub struct Iteration {
     pub record: Option<serde_json::Map<String, serde_json::Value>>,
     /// Every child, in launch order.
     pub children: Vec<Child>,
+    /// The host's memory writeback and scratch-device state around and
+    /// through the iteration. Absent means not observed: an iteration that
+    /// was never admitted, and every iteration stored before the field.
+    /// Omitted when absent, so such a document encodes as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostTrace>,
+}
+
+/// One iteration's host trace. Every time is `CLOCK_BOOTTIME` in
+/// microseconds, read just after the observation it stamps, so readings of
+/// one boot order and subtract across iterations and runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostTrace {
+    /// `/proc/sys/kernel/random/boot_id`; absent when unreadable.
+    pub boot_id: Option<String>,
+    /// The block device sampled for the iteration's scratch; absent when it
+    /// could not be resolved, and then no reading carries device counters.
+    pub device: Option<Device>,
+    /// The cell cursor as this iteration found it before writing its own.
+    pub previous: Option<Cursor>,
+    /// Whether this iteration's in-progress cursor was written. When not,
+    /// a later cell that names an earlier one as its predecessor may be
+    /// missing this one between them.
+    pub cursor_written: bool,
+    /// When `bench()` was called; absent when it never was. Child
+    /// `origin_offset_us` counts from here.
+    pub block_start_us: Option<i64>,
+    /// Read before `bench()` was called, and after it returned.
+    pub start: Option<Reading>,
+    pub end: Option<Reading>,
+    /// Read after the iteration's directory was released, the cursor's end.
+    pub released: Option<Reading>,
+    /// Whether the release completed: when not, the directory was left to a
+    /// later scan, so cleanup I/O may still follow `released`.
+    pub release_completed: bool,
+    /// The periodic readings in between, in order; read with children only.
+    pub readings: Vec<Reading>,
+    /// The run's reading budget ran out: periodic readings were dropped.
+    pub capped: bool,
+}
+
+/// A sampled block device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Device {
+    /// The kernel name, as under `/sys/class/block`.
+    pub name: String,
+    pub major: u32,
+    pub minor: u32,
+    pub layer: DeviceLayer,
+    /// `/sys/class/block/NAME/diskseq` where the kernel has it: the device
+    /// instance, distinct across re-creation at one number.
+    pub diskseq: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceLayer {
+    /// A whole disk: the filesystem's own, or the parent of its partition,
+    /// so its counters include every sibling partition.
+    Disk,
+    /// A mapped node (dm, md, loop): its own counters, not the physical
+    /// drive's.
+    Mapped,
+}
+
+impl DeviceLayer {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Disk => "disk",
+            Self::Mapped => "mapped",
+        }
+    }
+}
+
+/// One host reading. Each part is absent when its read failed, never zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reading {
+    pub at_us: i64,
+    /// `/proc/meminfo` `Dirty` and `Writeback`.
+    pub dirty_kb: Option<i64>,
+    pub writeback_kb: Option<i64>,
+    pub device: Option<DeviceCounters>,
+}
+
+/// A device's cumulative `/sys/class/block/NAME/stat` counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceCounters {
+    /// 512-byte sectors, credited on completion.
+    pub sectors_written: i64,
+    pub writes_completed: i64,
+    /// Milliseconds requests spent waiting and in service, summed.
+    pub write_ticks_ms: i64,
+    /// Reads and writes in flight.
+    pub in_flight: i64,
+    /// Absent on a kernel without discard statistics.
+    pub sectors_discarded: Option<i64>,
+}
+
+/// The bench cell cursor: the last script-bench iteration this user's
+/// brokkr started or ended on the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum Cursor {
+    /// Started and never ended: its end, and what it did, are unknown.
+    InProgress { cell: Cell },
+    Ended {
+        cell: Cell,
+        device: Option<Device>,
+        /// Its `released` reading.
+        reading: Reading,
+        release_completed: bool,
+    },
+}
+
+/// Which iteration a cursor names. Its run may never have been published.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cell {
+    pub run: String,
+    pub project: String,
+    pub bench: String,
+    /// From 0.
+    pub iteration: u32,
+    pub boot_id: Option<String>,
+}
+
+impl HostTrace {
+    /// What publication refuses of a trace; a writer checks its own first,
+    /// so a bad cursor file never costs it the run.
+    pub fn validate(&self) -> Result<(), String> {
+        let bounds = |r: &Reading| {
+            r.at_us >= 0
+                && r.dirty_kb.is_none_or(|v| v >= 0)
+                && r.writeback_kb.is_none_or(|v| v >= 0)
+                && r.device.is_none_or(|d| {
+                    d.sectors_written >= 0
+                        && d.writes_completed >= 0
+                        && d.write_ticks_ms >= 0
+                        && d.in_flight >= 0
+                        && d.sectors_discarded.is_none_or(|v| v >= 0)
+                })
+        };
+        let ordered: Vec<&Reading> = self
+            .start
+            .iter()
+            .chain(&self.readings)
+            .chain(&self.end)
+            .chain(&self.released)
+            .collect();
+        if ordered.iter().any(|r| !bounds(r)) {
+            return Err("a host reading out of range".to_owned());
+        }
+        if ordered.windows(2).any(|w| w[0].at_us > w[1].at_us) {
+            return Err("host readings out of order".to_owned());
+        }
+        if self.device.is_none() && ordered.iter().any(|r| r.device.is_some()) {
+            return Err("device counters without a sampled device".to_owned());
+        }
+        if self.block_start_us.is_some_and(|b| b < 0) {
+            return Err("a negative block start".to_owned());
+        }
+        if let Some(Cursor::Ended {
+            cell,
+            device,
+            reading,
+            ..
+        }) = &self.previous
+        {
+            if !bounds(reading) {
+                return Err("a previous cell reading out of range".to_owned());
+            }
+            if device.is_none() && reading.device.is_some() {
+                return Err("a previous cell's counters without its device".to_owned());
+            }
+            if cell.boot_id.is_some()
+                && cell.boot_id == self.boot_id
+                && self.start.as_ref().is_some_and(|s| reading.at_us > s.at_us)
+            {
+                return Err("a previous cell of this boot ending after this start".to_owned());
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1019,6 +1226,9 @@ impl Iteration {
             && record_depth(record) > MAX_RECORD_DEPTH
         {
             return Err(format!("record nests deeper than {MAX_RECORD_DEPTH}"));
+        }
+        if let Some(host) = &self.host {
+            host.validate().map_err(|e| format!("host: {e}"))?;
         }
         let mut occurrences: BTreeMap<&str, u32> = BTreeMap::new();
         for (idx, child) in self.children.iter().enumerate() {

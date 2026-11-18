@@ -166,6 +166,12 @@ fn context(out: &mut String, run: &StoredRun) {
         &c.avail_memory_mb
             .map_or_else(|| "(unknown)".to_owned(), |mb| format!("{mb} MB available")),
     );
+    for (i, line) in super::host::condition_lines(c, doc.started_unix_ms)
+        .iter()
+        .enumerate()
+    {
+        field(out, if i == 0 { "history" } else { "" }, line);
+    }
     for (i, (name, value)) in c.captured_env.iter().enumerate() {
         field(
             out,
@@ -429,6 +435,9 @@ fn iterations(out: &mut String, run: &StoredRun) {
             iteration_outcome(&iteration.outcome)
         )
         .expect("write to String is infallible");
+        for line in super::host::iteration_lines(iteration) {
+            writeln!(out, "  {line}").expect("write to String is infallible");
+        }
         if run.children_loaded {
             for (c, each) in iteration.children.iter().enumerate() {
                 child(out, c, each);

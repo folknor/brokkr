@@ -97,6 +97,14 @@ impl Source<'_> {
         }
     }
 
+    /// Run `run`'s host trace from its child's clock: a bench child's only.
+    pub(super) fn host(&self, run: usize) -> Option<crate::sidecar_fmt::HostProjection<'_>> {
+        match self {
+            Self::Typed { .. } => None,
+            Self::Bench(bench) => bench.host(run),
+        }
+    }
+
     /// The wall `--stalls` reads against: a typed run's sample span, a bench
     /// child's actual wall.
     pub(super) fn stall_wall_us(&self, run: usize, samples: &[Sample]) -> i64 {

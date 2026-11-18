@@ -11,5 +11,7 @@ pub(crate) use self::lock::{AcqId, AuthHash, MaintenancePhase, Nonce, RunToken};
 pub(crate) use self::lock::{
     CAPABILITY_ENV, GUARD_HANDSHAKE_PREFIX, GUARD_INFO_ARG, GUARD_PROTOCOL, LEASE_MARKER_ENV,
 };
-pub(crate) use self::lock::{activity, collector, observe, queue, queue_dir, report};
+pub(crate) use self::lock::{
+    activity, cell_cursor_path, collector, observe, queue, queue_dir, report,
+};
 pub(crate) use self::lock::{escape_value, unescape_value};

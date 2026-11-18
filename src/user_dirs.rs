@@ -32,6 +32,13 @@ pub(crate) fn queue_dir_at(home: Option<&Path>) -> Option<PathBuf> {
     paths::brokkr_state_dir_at(home).map(|dir| dir.join("queue"))
 }
 
+/// The bench cell cursor under `home`: the last script-bench iteration this
+/// user's brokkr started or ended on this host, beside the lock that
+/// serialises the iterations writing it.
+pub(crate) fn cell_cursor_at(home: Option<&Path>) -> Option<PathBuf> {
+    paths::brokkr_state_dir_at(home).map(|dir| dir.join("bench-cell.json"))
+}
+
 /// Liveness files used to identify orphaned test processes.
 pub(crate) fn test_runs_dir() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("test-runs"))

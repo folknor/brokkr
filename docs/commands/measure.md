@@ -364,6 +364,23 @@ clock as they were written, nothing rebased.
   takes no qualifier and is its best run; typed and bench sides mix, both
   being one process stream. `compare_summary` gains `a_iteration`/`a_child`
   (and `b_`) for a bench side, and the table heads it `uuid/ITER/CHILD`.
+- A child of an iteration stored with a host trace (`brokkr man bench`,
+  What a run stores) gets each phase's host window, the iteration's host
+  readings stamped inside the phase on the child's clock: a phase record
+  and a `--compare` side add `host` (`readings`, `capped` when the run's
+  readings ran out in that iteration so later ones are missing, `peak_dirty_kb`,
+  `peak_writeback_kb`, `peak_in_flight`, `device_written_kb`,
+  `device_discarded_kb`, `write_wait_ms`), and the `--human` tables a
+  `host:` line under the phase. The device figures are deltas between the
+  window's first and last readings, `null` with fewer than two, across a
+  counter reset, or (the wait) with no write completed; the wait is
+  block-layer write wait per completed request, queueing included, and a
+  request completing inside the phase may have waited before it. These are
+  host-wide readings: other work on the host and sibling partitions of the
+  disk count. The child's clock is placed on the trace's boot clock through
+  one anchor taken before `bench()`, so a host suspend during the iteration
+  misplaces the windows by its length. No sample field names them, so
+  `--fields`, `--where` and `--stat` do not.
 
 Every human table prints whole milliseconds, so a sub-millisecond phase of a
 short child reads `0ms` there; the JSONL carries microseconds.

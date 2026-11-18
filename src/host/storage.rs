@@ -159,12 +159,14 @@ fn block_device_info(device: &str) -> (Option<String>, Option<bool>) {
     let Some(name) = device.strip_prefix("/dev/") else {
         return (None, None);
     };
-    let parent = parent_block_device(name);
-    let model = std::fs::read_to_string(format!("/sys/block/{parent}/device/model"))
+    let Some(disk) = whole_disk(name) else {
+        return (None, None);
+    };
+    let model = std::fs::read_to_string(disk.join("device/model"))
         .ok()
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty());
-    let rotational = std::fs::read_to_string(format!("/sys/block/{parent}/queue/rotational"))
+    let rotational = std::fs::read_to_string(disk.join("queue/rotational"))
         .ok()
         .and_then(|s| match s.trim() {
             "0" => Some(false),
@@ -174,19 +176,17 @@ fn block_device_info(device: &str) -> (Option<String>, Option<bool>) {
     (model, rotational)
 }
 
-/// Strip a partition suffix to get the underlying block device name.
-fn parent_block_device(name: &str) -> String {
-    if let Some(idx) = name.rfind('p')
-        && idx > 0
-        && !name[idx + 1..].is_empty()
-        && name[idx + 1..].chars().all(|c| c.is_ascii_digit())
-    {
-        return name[..idx].to_owned();
-    }
-    let trimmed = name.trim_end_matches(|c: char| c.is_ascii_digit());
-    if trimmed.is_empty() {
-        name.to_owned()
+/// The sysfs node of the disk holding block device `name` (`/dev/` already
+/// stripped, a symlink such as `mapper/x` followed): a partition's parent,
+/// else the node itself. Read from sysfs, never from the name's spelling,
+/// which an unpartitioned `nvme0n1` or a `dm-0` defeats.
+fn whole_disk(name: &str) -> Option<PathBuf> {
+    let dev = std::fs::canonicalize(format!("/dev/{name}")).ok()?;
+    let kernel = dev.file_name()?.to_str()?;
+    let node = std::fs::canonicalize(format!("/sys/class/block/{kernel}")).ok()?;
+    if node.join("partition").exists() {
+        node.parent().map(Path::to_path_buf)
     } else {
-        trimmed.to_owned()
+        Some(node)
     }
 }

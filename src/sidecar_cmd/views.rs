@@ -55,7 +55,7 @@ pub(super) fn phase_summary(src: &Source<'_>, q: &SidecarQuery) -> Result<(), De
     if samples.is_empty() && process.wall_us().is_none() {
         output::result_msg("no sidecar samples for this result");
     } else {
-        print_phase_summary(&samples, &markers, process, q.human);
+        print_phase_summary(&samples, &markers, process, src.host(run), q.human);
     }
     print_call_timelines(
         &CallStreams {

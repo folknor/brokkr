@@ -19,8 +19,8 @@
 use std::collections::HashMap;
 
 use super::{
-    PhaseStats, Process, avg_cores_f64, avg_cores_str, build_phases, clk_tck_per_second,
-    phase_stats,
+    HostProjection, HostWindow, PhaseStats, Process, avg_cores_f64, avg_cores_str, build_phases,
+    clk_tck_per_second, host_human, host_json, phase_stats,
 };
 use crate::sidecar;
 
@@ -34,6 +34,8 @@ pub(crate) struct CompareSide<'a> {
     pub(crate) samples: &'a [sidecar::Sample],
     pub(crate) markers: &'a [sidecar::Marker],
     pub(crate) process: Process,
+    /// A script-bench child's iteration host trace, when it has one.
+    pub(crate) host: Option<HostProjection<'a>>,
 }
 
 impl CompareSide<'_> {
@@ -138,11 +140,12 @@ struct Side<'a> {
     start_us: i64,
     duration_us: i64,
     stats: PhaseStats,
+    host: Option<HostWindow>,
 }
 
 fn side<'a>(
     phases: &'a [(String, i64, i64)],
-    samples: &[sidecar::Sample],
+    from: &CompareSide<'_>,
     index: Option<usize>,
 ) -> Option<Side<'a>> {
     let index = index?;
@@ -152,7 +155,8 @@ fn side<'a>(
         name,
         start_us: *start_us,
         duration_us: end_us - start_us,
-        stats: phase_stats(samples, *start_us, *end_us),
+        stats: phase_stats(from.samples, *start_us, *end_us),
+        host: from.host.map(|h| h.window(*start_us, *end_us)),
     })
 }
 
@@ -169,8 +173,8 @@ pub(crate) fn print_compare_timeline(a: &CompareSide<'_>, b: &CompareSide<'_>, h
         .iter()
         .map(|pair| CompareRow {
             pair,
-            a: side(&phases_a, a.samples, pair.a),
-            b: side(&phases_b, b.samples, pair.b),
+            a: side(&phases_a, a, pair.a),
+            b: side(&phases_b, b, pair.b),
         })
         .collect();
     let clk_tck = clk_tck_per_second();
@@ -267,6 +271,11 @@ fn print_human(a: &CompareSide<'_>, b: &CompareSide<'_>, rows: &[CompareRow], cl
             human_cell(row.b.as_ref(), b.process, clk_tck),
             delta,
         );
+        for (label, s) in [("A", &row.a), ("B", &row.b)] {
+            if let Some(w) = s.as_ref().and_then(|s| s.host.as_ref()) {
+                println!("{:<name_width$}  {label} {}", "", host_human(w));
+            }
+        }
     }
 }
 
@@ -291,6 +300,9 @@ fn side_json(side: Option<&Side>, process: Process, clk_tck: i64) -> serde_json:
             map.insert("end_us".to_owned(), (s.start_us + s.duration_us).into());
             map.insert("duration_us".to_owned(), s.duration_us.into());
             map.insert("samples".to_owned(), s.stats.samples.into());
+            if let Some(w) = &s.host {
+                map.insert("host".to_owned(), host_json(w));
+            }
             if s.stats.samples == 0 {
                 for field in [
                     "peak_anon_kb",

@@ -8,6 +8,7 @@
 mod annotations;
 mod compare;
 mod config_diff;
+mod host;
 mod single;
 mod table;
 

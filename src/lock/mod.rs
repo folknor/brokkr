@@ -478,6 +478,12 @@ pub(crate) fn queue_dir() -> Option<PathBuf> {
     crate::user_dirs::queue_dir_at(lock_home().as_deref())
 }
 
+/// The bench cell cursor (`crate::bench::host_trace`), in the lock's
+/// namespace: only a holder of this lock writes it.
+pub(crate) fn cell_cursor_path() -> Option<PathBuf> {
+    crate::user_dirs::cell_cursor_at(lock_home().as_deref())
+}
+
 /// The home both lock files live under: `$HOME`. Under `cfg(test)` it is one
 /// scratch directory per test process instead, so no test takes, reads or
 /// drains the real lock or compile lease through this module, as

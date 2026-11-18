@@ -51,6 +51,8 @@ fn document(uuid: &str, project: &str) -> RunDocument {
             cpu_governor: None,
             avail_memory_mb: None,
             captured_env: BTreeMap::new(),
+            previous_command: None,
+            fstrim_timer_unix_ms: None,
         },
         build: Build {
             target: None,

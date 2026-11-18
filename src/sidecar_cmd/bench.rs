@@ -338,6 +338,17 @@ impl BenchRun {
             .collect()
     }
 
+    /// Iteration `run`'s host trace as its selected child sees it; `None`
+    /// for an iteration stored without one, or whose `bench()` never ran.
+    pub(super) fn host(&self, run: usize) -> Option<crate::sidecar_fmt::HostProjection<'_>> {
+        let trace = self.run.doc.iterations.get(run)?.host.as_ref()?;
+        let child = self.child_of(run)?;
+        Some(crate::sidecar_fmt::HostProjection {
+            trace,
+            child_zero_us: trace.block_start_us?.saturating_add(child.origin_offset_us),
+        })
+    }
+
     /// The process of iteration `run`'s child: its interval is known.
     pub(super) fn process(&self, run: usize) -> Process {
         self.child_of(run)

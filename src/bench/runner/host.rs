@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use super::PREVIEW_BYTES;
 use crate::bench::evidence;
+use crate::bench::host_trace;
 use crate::bench::lua::{self, Abort, CallOptions, CallOutcome, HandleRef, Word};
 use crate::bench::policy::{Calls, Declared};
 use crate::bench::resources::{self, Handle, Resources};
@@ -69,6 +70,8 @@ pub(super) struct IterationSetup<'a> {
     pub(super) measurement: store::Measurement,
     /// What the run may still keep.
     pub(super) budget: Budget,
+    /// The run so far: its uuid, project and bench name the cell cursor.
+    pub(super) run: &'a store::RunDocument,
 }
 
 /// What a run may still keep of its children's output, spent across its
@@ -79,6 +82,8 @@ pub(super) struct Budget {
     pub(super) reports: usize,
     /// Raw stderr tail bytes.
     pub(super) stderr: usize,
+    /// Periodic host readings.
+    pub(super) host_readings: usize,
 }
 
 impl Budget {
@@ -86,6 +91,7 @@ impl Budget {
     pub(super) const RUN: Self = Self {
         reports: RUN_REPORT_BYTES,
         stderr: store::STDERR_RUN_BYTES,
+        host_readings: crate::bench::host_trace::RUN_READINGS,
     };
 }
 
@@ -124,6 +130,7 @@ pub(super) fn run_iteration(
                     wall_us: None,
                     record: None,
                     children: Vec::new(),
+                    host: None,
                 },
                 since,
                 budget,
@@ -131,6 +138,16 @@ pub(super) fn run_iteration(
             );
         }
     };
+    let trace = TraceStart::begin(
+        setup.container,
+        host_trace::cell(
+            &setup.run.uuid,
+            &setup.run.project,
+            &setup.run.bench,
+            setup.index,
+        ),
+        budget.host_readings,
+    );
     // The inputs are the first handles, in order, as the args' handles
     // index them.
     let calls = Calls::new(resources.inputs().to_vec());
@@ -148,15 +165,7 @@ pub(super) fn run_iteration(
         since,
     };
     let (sample, mut host) = lua::run_sample(setup.script, setup.args, host);
-    if let Some(resources) = host.resources.take()
-        && let Err(error) = resources.release()
-    {
-        // Left to a later scan, which reclaims it once nothing holds it.
-        crate::output::warn(&format!(
-            "iteration {} kept for a later scan: {error}",
-            setup.index + 1
-        ));
-    }
+    let observed = trace.finish(&mut host, setup.index);
     // A stop pending at the end of the iteration interrupts it whatever the
     // sample said: a completed block ran under it, and a failure may be the
     // stop's own doing (a git call or a child it cut short).
@@ -191,11 +200,126 @@ pub(super) fn run_iteration(
                 .map(|w| i64::try_from(w.as_micros()).unwrap_or(i64::MAX)),
             record,
             children: host.children,
+            host: observed,
         },
         host.since,
         host.budget,
         sample.modules,
     )
+}
+
+/// What an admitted iteration observed of the host before `bench()`: the
+/// device, the cursor it found and replaced with its own in-progress one,
+/// and its start reading.
+struct TraceStart {
+    device: Option<store::Device>,
+    cell: store::Cell,
+    previous: Option<store::Cursor>,
+    cursor_written: bool,
+    start: store::Reading,
+    sampler: host_trace::Sampler,
+    /// An instant and the boot clock read together, to place the block.
+    anchor: (Instant, i64),
+}
+
+impl TraceStart {
+    /// After `bench()`: stop sampling, read the end, release the
+    /// iteration's directory, read again and record this cell's end.
+    fn finish(self, host: &mut IterationHost, index: usize) -> Option<store::HostTrace> {
+        let (readings, capped) = self.sampler.finish();
+        let end = host_trace::read(self.device.as_ref());
+        host.budget.host_readings = host.budget.host_readings.saturating_sub(readings.len());
+        let anchor = self.anchor;
+        let block_start_us = host.block_start.map(|at| {
+            let after = i64::try_from(at.saturating_duration_since(anchor.0).as_micros())
+                .unwrap_or(i64::MAX);
+            anchor.1.saturating_add(after)
+        });
+        let mut release_completed = true;
+        if let Some(resources) = host.resources.take()
+            && let Err(error) = resources.release()
+        {
+            release_completed = false;
+            // Left to a later scan, which reclaims it once nothing holds it.
+            crate::output::warn(&format!(
+                "iteration {} kept for a later scan: {error}",
+                index + 1
+            ));
+        }
+        let released = host_trace::read(self.device.as_ref());
+        if let Err(error) = host_trace::write_cursor(&store::Cursor::Ended {
+            cell: self.cell.clone(),
+            device: self.device.clone(),
+            reading: released.clone(),
+            release_completed,
+        }) {
+            crate::output::warn(&format!("bench cell cursor not written: {error}"));
+        }
+        let mut trace = store::HostTrace {
+            boot_id: self.cell.boot_id,
+            device: self.device,
+            previous: self.previous,
+            cursor_written: self.cursor_written,
+            block_start_us,
+            start: Some(self.start),
+            end: Some(end),
+            released: Some(released),
+            release_completed,
+            readings,
+            capped,
+        };
+        // A cursor file publication would refuse (another writer's, or
+        // damaged) is dropped rather than costing the run; a trace still
+        // refused after that is not stored.
+        if trace.validate().is_err() && trace.previous.take().is_some() {
+            crate::output::warn(
+                "bench cell cursor was not usable; its predecessor is not recorded",
+            );
+        }
+        match trace.validate() {
+            Ok(()) => Some(trace),
+            Err(error) => {
+                crate::output::warn(&format!("host trace not stored: {error}"));
+                None
+            }
+        }
+    }
+
+    fn begin(container: &Path, cell: store::Cell, budget: usize) -> Self {
+        let device = host_trace::resolve_device(container);
+        let previous = host_trace::read_cursor();
+        let cursor_written =
+            match host_trace::write_cursor(&store::Cursor::InProgress { cell: cell.clone() }) {
+                Ok(()) => true,
+                Err(error) => {
+                    // The older entry must not outlive this cell unseen: a
+                    // later one would take it as its predecessor across
+                    // whatever this one does.
+                    let cleared = host_trace::clear_cursor();
+                    crate::output::warn(&format!(
+                        "bench cell cursor not written: {error}{}",
+                        if cleared {
+                            "; the older entry was removed"
+                        } else {
+                            ""
+                        }
+                    ));
+                    false
+                }
+            };
+        let start = host_trace::read(device.as_ref());
+        let sampler = host_trace::Sampler::start(device.clone(), budget);
+        let anchor = (Instant::now(), host_trace::boottime_us());
+        Self {
+            device,
+            cell,
+            previous,
+            cursor_written,
+            start,
+            sampler,
+            anchor,
+        }
+    }
 }
 
 /// Why a completed sample of a `--hotpath` or `--alloc` run fails: no call

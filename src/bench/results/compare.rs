@@ -177,6 +177,14 @@ fn host_line(a: &StoredRun, b: &StoredRun) -> Option<String> {
             opt(cb.kernel.as_ref())
         ));
     }
+    // Each side's result iteration: the state the result itself ran under.
+    let (ra, rb) = (
+        a.best_iteration.and_then(|i| a.doc.iterations.get(i)),
+        b.best_iteration.and_then(|i| b.doc.iterations.get(i)),
+    );
+    if let (Some(ia), Some(ib)) = (ra, rb) {
+        parts.extend(super::host::compare_parts(ia, ib));
+    }
     (!parts.is_empty()).then(|| format!("  host: {}", parts.join(", ")))
 }
 

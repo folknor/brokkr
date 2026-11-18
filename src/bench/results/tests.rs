@@ -72,6 +72,7 @@ fn iteration(wall_us: i64, verdict: Option<&str>, record: &serde_json::Value) ->
             measured: false,
             cache: None,
         }],
+        host: None,
     }
 }
 
@@ -107,6 +108,8 @@ pub(crate) fn run(
             cpu_governor: Some("performance".into()),
             avail_memory_mb: Some(64_000),
             captured_env: BTreeMap::new(),
+            previous_command: None,
+            fstrim_timer_unix_ms: None,
         },
         build: Build {
             target: None,

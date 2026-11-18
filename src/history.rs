@@ -180,6 +180,27 @@ impl HistoryDb {
         Ok(())
     }
 
+    /// The newest row: the latest command to complete, its end to the
+    /// second (a row is written when its command ends).
+    pub fn latest(&self) -> Result<Option<crate::bench::store::PreviousCommand>, DevError> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT command, CAST(strftime('%s', timestamp) AS INTEGER), elapsed_ms
+                 FROM history ORDER BY id DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok(crate::bench::store::PreviousCommand {
+                        command: row.get(0)?,
+                        ended_unix_s: row.get(1)?,
+                        elapsed_ms: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     /// Look up a single entry by row id. Returns `Ok(None)` when the id
     /// doesn't exist.
     pub fn get_by_id(&self, id: i64) -> Result<Option<HistoryEntry>, DevError> {

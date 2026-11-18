@@ -6,8 +6,8 @@ use rusqlite::{Connection, params};
 use super::StoreError;
 use super::document::{
     CachePreparation, CaptureOutcome, Child, ChildEnding, Evidence, Executable, ExecutableIdentity,
-    HotpathCapture, Iteration, IterationOutcome, Record, RunDocument, RunOutcome, Sample,
-    StderrCapture, StderrTail,
+    HostTrace, HotpathCapture, Iteration, IterationOutcome, Record, RunDocument, RunOutcome,
+    Sample, StderrCapture, StderrTail,
 };
 
 /// A count or index in SQLite's integer domain.
@@ -74,6 +74,12 @@ fn insert_run(tx: &Connection, doc: &RunDocument, config_digest: &str) -> Result
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
+    let previous_command = doc
+        .conditions
+        .previous_command
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     tx.execute(
         "INSERT INTO runs (
             uuid, format, project, bench, checkout, hostname, git_commit, dirty, subject,
@@ -81,10 +87,10 @@ fn insert_run(tx: &Connection, doc: &RunDocument, config_digest: &str) -> Result
             captured_env, target, profile, features, default_features, resolved_bin,
             resolved_features, artifact, config_digest, iterations_requested, outcome,
             failure, best_iteration, pairing_key, measurement, alloc, lfs_pointers,
-            lockfile
+            lockfile, previous_command, fstrim_timer_unix_ms
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                    ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31,
-                   ?32, ?33)",
+                   ?32, ?33, ?34, ?35)",
         params![
             doc.uuid,
             doc.format,
@@ -119,6 +125,8 @@ fn insert_run(tx: &Connection, doc: &RunDocument, config_digest: &str) -> Result
             doc.measurement.columns().1,
             lfs_pointers,
             lockfile,
+            previous_command,
+            doc.conditions.fstrim_timer_unix_ms,
         ],
     )?;
     Ok(tx.last_insert_rowid())
@@ -157,9 +165,20 @@ fn insert_iteration(
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
+    // The trace without its periodic readings, which are rows of their own.
+    let host = iteration
+        .host
+        .as_ref()
+        .map(|host| {
+            serde_json::to_string(&HostTrace {
+                readings: Vec::new(),
+                ..host.clone()
+            })
+        })
+        .transpose()?;
     tx.execute(
-        "INSERT INTO iterations (run_id, idx, outcome, verdict, failure, wall_us, record)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO iterations (run_id, idx, outcome, verdict, failure, wall_us, record, host)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             run_id,
             int(idx),
@@ -167,9 +186,34 @@ fn insert_iteration(
             verdict,
             failure,
             iteration.wall_us,
-            record
+            record,
+            host
         ],
     )?;
+    if let Some(host) = &iteration.host {
+        let mut reading = tx.prepare_cached(
+            "INSERT INTO host_readings (run_id, iteration, ordinal, at_us, dirty_kb,
+                 writeback_kb, sectors_written, writes_completed, write_ticks_ms, in_flight,
+                 sectors_discarded)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )?;
+        for (ordinal, r) in host.readings.iter().enumerate() {
+            let d = r.device.as_ref();
+            reading.execute(params![
+                run_id,
+                int(idx),
+                int(ordinal),
+                r.at_us,
+                r.dirty_kb,
+                r.writeback_kb,
+                d.map(|d| d.sectors_written),
+                d.map(|d| d.writes_completed),
+                d.map(|d| d.write_ticks_ms),
+                d.map(|d| d.in_flight),
+                d.and_then(|d| d.sectors_discarded),
+            ])?;
+        }
+    }
     for (child_idx, child) in iteration.children.iter().enumerate() {
         let child_id = insert_child(tx, run_id, idx, child_idx, child)?;
         insert_evidence(tx, child_id, &child.evidence)?;
