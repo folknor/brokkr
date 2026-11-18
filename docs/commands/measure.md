@@ -114,7 +114,10 @@ live-tree arm does not (`brokkr man run`, `--commit`). A root `Cargo.lock`
 the commits do not track is seeded into each worktree from the live tree's
 as read at that arm's admission, and cargo may amend each copy to fit its
 manifests. A variant built in the live tree still stores, but its build
-differs from the baseline's in more than the commit. A
+differs from the baseline's in more than the commit. For a script bench,
+`brokkr bench --rounds N --commit <parent> --commit HEAD NAME` makes that A/B
+in one invocation, the cells interleaved and their schedule stored
+(`brokkr man bench`, Rounds). A
 dirty-tree cell that `--force` permits keeps its sidecar profile but has no
 results row: its id is named only on that run's `[sidecar]` line (below), and
 the `dirty` alias reaches only the latest such session.

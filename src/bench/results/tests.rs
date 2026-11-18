@@ -130,6 +130,7 @@ pub(crate) fn run(
         iterations_requested: 1,
         outcome: RunOutcome::Completed,
         iterations: vec![iteration(wall_us, None, &serde_json::json!({"nodes": 10}))],
+        schedule: None,
     }
 }
 
@@ -746,5 +747,77 @@ fn a_retired_bench_is_hidden_until_asked_for_and_marked_when_shown() {
     assert!(
         shown.contains("hidden      retired at 2025-11-01 12:26:40 on bygg: replaced by cat"),
         "{shown}"
+    );
+}
+
+/// A `--rounds` invocation's summary: each competitor's median, the
+/// per-round signs against the first over the rounds both hold, and the
+/// slots with no run named absent; a second invocation sharing the prefix
+/// asks for more digits.
+#[test]
+fn an_invocation_summary_pairs_rounds_and_names_what_is_missing() {
+    use super::super::store::{Axis, Phase, Plan, Schedule, Slot, position};
+    let path = scratch("rounds");
+    let plan = Plan {
+        axis: Axis::Param {
+            name: "tool".into(),
+        },
+        competitors: vec!["pbfhogg".into(), "osmium".into()],
+        workloads: vec![String::new()],
+        rounds: 3,
+        builds: vec![0, 0],
+    };
+    let cell = |tail: u8, invocation: &str, competitor: u32, round: u32, wall: i64| {
+        let mut doc = run(tail, "vs", 'a', 1_000 + i64::from(tail), wall);
+        doc.schedule = Some(Schedule {
+            invocation: invocation.into(),
+            plan: plan.clone(),
+            slot: Slot {
+                workload: 0,
+                competitor,
+                round,
+                position: position(competitor, 2, round),
+            },
+            phase: Phase::Measure,
+        });
+        doc
+    };
+    let id = format!("{}{}", "ab", "0".repeat(30));
+    publish(
+        &path,
+        &[
+            cell(1, &id, 0, 0, 1_000),
+            cell(2, &id, 1, 0, 2_000),
+            cell(3, &id, 1, 1, 2_200),
+            cell(4, &id, 0, 1, 1_100),
+            cell(5, &id, 0, 2, 3_000),
+        ],
+    );
+    let reader = reader(&path);
+    let out = super::format_rounds("ab", &reader.invocation("ab").unwrap());
+    assert!(
+        out.contains("3 rounds of 2 competitors by param tool, 1 workload"),
+        "{out}"
+    );
+    assert!(
+        out.contains("pbfhogg: median 1.100 ms of 3, 3 planned"),
+        "{out}"
+    );
+    assert!(
+        out.contains("osmium: median 2.100 ms of 2, 3 planned"),
+        "{out}"
+    );
+    assert!(
+        out.contains("osmium against pbfhogg: faster in 0, slower in 2, tied in 0 of 2 paired rounds, median paired difference +1.050 ms"),
+        "{out}"
+    );
+    assert!(out.contains("osmium round 3: absent"), "{out}");
+
+    let other = format!("{}{}", "ab", "1".repeat(30));
+    publish(&path, &[cell(6, &other, 0, 0, 1_000)]);
+    let out = super::format_rounds("ab", &reader.invocation("ab").unwrap());
+    assert!(
+        out.starts_with("2 --rounds invocations start with ab"),
+        "{out}"
     );
 }

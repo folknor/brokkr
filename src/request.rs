@@ -7,8 +7,16 @@ use crate::error::DevError;
 /// fixed-width compare operands have been resolved.
 pub(crate) enum ResultsView {
     Table,
-    Uuid { prefix: String },
-    Compare { commits: (String, String) },
+    Uuid {
+        prefix: String,
+    },
+    Compare {
+        commits: (String, String),
+    },
+    /// `--invocation ID`: one `--rounds` invocation's summary.
+    Invocation {
+        prefix: String,
+    },
 }
 
 /// The complete request for the `results` command.

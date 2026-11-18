@@ -33,6 +33,12 @@ impl Since {
         }
     }
 
+    /// The same commit and repo with no answers yet: what stands in while
+    /// this one is lent to a hook.
+    pub(super) fn blank(&self) -> Self {
+        Self::new(&self.repo, self.under_test.clone())
+    }
+
     /// Whether the commit under test descends from `sha` (or is it). The sha
     /// is resolved first, so one git cannot name is an error, never a no.
     pub(super) fn ask(&mut self, sha: &str) -> Result<bool, Abort> {

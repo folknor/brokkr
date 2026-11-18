@@ -80,6 +80,12 @@ fn insert_run(tx: &Connection, doc: &RunDocument, config_digest: &str) -> Result
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
+    let schedule = doc
+        .schedule
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let invocation = doc.schedule.as_ref().map(|s| s.invocation.as_str());
     tx.execute(
         "INSERT INTO runs (
             uuid, format, project, bench, checkout, hostname, git_commit, dirty, subject,
@@ -87,10 +93,10 @@ fn insert_run(tx: &Connection, doc: &RunDocument, config_digest: &str) -> Result
             captured_env, target, profile, features, default_features, resolved_bin,
             resolved_features, artifact, config_digest, iterations_requested, outcome,
             failure, best_iteration, pairing_key, measurement, alloc, lfs_pointers,
-            lockfile, previous_command, fstrim_timer_unix_ms
+            lockfile, previous_command, fstrim_timer_unix_ms, schedule, invocation
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                    ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31,
-                   ?32, ?33, ?34, ?35)",
+                   ?32, ?33, ?34, ?35, ?36, ?37)",
         params![
             doc.uuid,
             doc.format,
@@ -127,6 +133,8 @@ fn insert_run(tx: &Connection, doc: &RunDocument, config_digest: &str) -> Result
             lockfile,
             previous_command,
             doc.conditions.fstrim_timer_unix_ms,
+            schedule,
+            invocation,
         ],
     )?;
     Ok(tx.last_insert_rowid())

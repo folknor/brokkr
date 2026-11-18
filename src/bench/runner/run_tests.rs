@@ -341,14 +341,37 @@ impl Fixture {
         measurement: store::Measurement,
         params: &[&str],
     ) -> Ran {
-        self.invoke(log, bench, iterations, measurement, false, params)
+        self.invoke(log, bench, iterations, measurement, false, None, params)
     }
 
     /// `brokkr bench --dry-run BENCH PARAMS...`.
     fn dry(&self, log: &str, bench: &str, params: &[&str]) -> Ran {
-        self.invoke(log, bench, 1, store::Measurement::Timing, true, params)
+        self.invoke(
+            log,
+            bench,
+            1,
+            store::Measurement::Timing,
+            true,
+            None,
+            params,
+        )
     }
 
+    /// `brokkr bench --rounds N --versus PARAM BENCH PARAMS...`, one
+    /// iteration per cell.
+    fn rounds(&self, log: &str, bench: &str, rounds: u32, versus: &str, params: &[&str]) -> Ran {
+        self.invoke(
+            log,
+            bench,
+            0,
+            store::Measurement::Timing,
+            false,
+            Some((rounds, versus)),
+            params,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn invoke(
         &self,
         log: &str,
@@ -356,13 +379,16 @@ impl Fixture {
         iterations: u32,
         measurement: store::Measurement,
         dry_run: bool,
+        rounds: Option<(u32, &str)>,
         params: &[&str],
     ) -> Ran {
         let console = Console::open(log);
         let args = BenchArgs {
             name: Some(bench.to_owned()),
-            commit: None,
+            commits: Vec::new(),
             iterations: std::num::NonZeroU32::new(iterations),
+            rounds: rounds.and_then(|(n, _)| std::num::NonZeroU32::new(n)),
+            versus: rounds.map(|(_, v)| v.to_owned()),
             hotpath: measurement == store::Measurement::Hotpath,
             alloc: measurement == store::Measurement::Alloc,
             params: params.iter().map(|p| (*p).to_owned()).collect(),
@@ -644,6 +670,7 @@ fn bench_iteration_default_and_cli_override_reach_the_run_document() {
             override_count,
             store::Measurement::Timing,
             true,
+            None,
             &[],
         );
         assert!(dry.result.is_ok(), "{}", dry.console);
@@ -673,6 +700,7 @@ fn bench_iteration_default_and_cli_override_reach_the_run_document() {
         0,
         store::Measurement::Timing,
         true,
+        None,
         &[],
     );
     assert!(dry.result.is_ok(), "{}", dry.console);
@@ -724,6 +752,64 @@ fn every_arm_runs_and_is_stored_and_the_failed_ones_are_named() {
     let ran = fixture.bench("single", "probe", 1, &["--mode", "fail"]);
     assert_eq!(ran.error(), "bench probe failed");
     assert!(!ran.console.contains("arm 1/1"), "{}", ran.console);
+}
+
+/// `--rounds 3 --versus mode` runs each competitor once a round, the order
+/// reversed every other round, one iteration per cell, the build made once;
+/// every cell is stored with the whole plan and its slot, and a failing
+/// competitor's cells fail without stopping the rest.
+#[test]
+fn rounds_interleave_the_competitors_and_store_every_cell_with_its_slot() {
+    let _serial = crate::test_scratch::process_global_lock();
+    let fixture = Fixture::new("rounds");
+    let _hold = crate::lockfile::test_hold(
+        &fixture.detection.project_root,
+        &fixture.detection.build_root,
+    );
+    let ran = fixture.rounds("rounds", "probe", 3, "mode", &["--mode", "a,b"]);
+    assert!(ran.result.is_ok(), "{}", ran.console);
+    ran.says("build 1/1: probe for a");
+    assert!(!ran.console.contains("build 2/"), "{}", ran.console);
+    let mut runs = fixture.stored();
+    runs.sort_by_key(|run| run.started_unix_ms);
+    let order: Vec<(u32, &str)> = runs
+        .iter()
+        .map(|run| (run.schedule.as_ref().unwrap().slot.round, mode(run)))
+        .collect();
+    assert_eq!(
+        order,
+        [(0, "a"), (0, "b"), (1, "b"), (1, "a"), (2, "a"), (2, "b")]
+    );
+    let invocation = &runs[0].schedule.as_ref().unwrap().invocation;
+    for run in &runs {
+        let schedule = run.schedule.as_ref().unwrap();
+        assert_eq!(&schedule.invocation, invocation);
+        assert_eq!(schedule.plan.competitors, ["a", "b"]);
+        assert_eq!(schedule.phase, store::Phase::Measure);
+        assert_eq!(run.iterations_requested, 1);
+        assert_eq!(run.build.artifact, runs[0].build.artifact);
+        assert_eq!(run.outcome, store::RunOutcome::Completed);
+    }
+
+    let ran = fixture.rounds("rounds-fail", "probe", 2, "mode", &["--mode", "a,fail"]);
+    assert!(
+        ran.error()
+            .starts_with("bench probe: 2 failed: fail, round 1/2"),
+        "{}",
+        ran.error()
+    );
+    let ran = fixture.rounds("rounds-one", "probe", 2, "mode", &["--mode", "a"]);
+    assert!(
+        ran.error().contains("the competitors need two or more"),
+        "{}",
+        ran.error()
+    );
+    let ran = fixture.bench("rounds-only", "probe,probe", 1, &[]);
+    assert!(
+        ran.error().contains("--rounds, which was not given"),
+        "{}",
+        ran.error()
+    );
 }
 
 /// `--hotpath` builds with the bench's hotpath features and stores each

@@ -25,6 +25,7 @@ mod error;
 mod list;
 mod marks;
 mod read;
+mod schedule;
 mod schema;
 pub mod wire;
 mod write;
@@ -37,13 +38,14 @@ pub use document::{
     BoundParam, Build, CACHE_PROCEDURE, CacheFile, CacheMode, CachePreparation, CaptureOutcome,
     Cell, Child, ChildEnding, Clock, Conditions, Cursor, DOCUMENT_FORMAT, Device, DeviceCounters,
     DeviceLayer, Evidence, Executable, ExecutableIdentity, HostTrace, HotpathCapture, Iteration,
-    IterationOutcome, LfsPointer, LockSource, Lockfile, Loss, Measurement, ParamValue,
-    PreviousCommand, Reading, Record, ResolvedBuild, RunDocument, RunOutcome, STDERR_RUN_BYTES,
-    STDERR_TAIL_BYTES, Sample, SinkEnd, StderrCapture, StderrTail,
+    IterationOutcome, LfsPointer, LockSource, Lockfile, Loss, Measurement, PairingClass,
+    ParamValue, PreviousCommand, Reading, Record, ResolvedBuild, RunDocument, RunOutcome,
+    STDERR_RUN_BYTES, STDERR_TAIL_BYTES, Sample, SinkEnd, StderrCapture, StderrTail,
 };
 pub use error::StoreError;
 pub use list::{RunFilter, Selection, StoredRun};
 pub use marks::{Mark, MarkOrigin, MarkRequest, MarkView, Marked, Revision};
+pub use schedule::{Axis, MAX_ROUNDS, MAX_SLOTS, Phase, Plan, Schedule, Slot, position};
 
 /// What a publication did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -190,6 +192,7 @@ const SHIPPED_STEPS: &[&str] = &[
     "eecc78b71fb2120a1b8426973e4bffc3",
     "e0ba0dde66f541a52d4d43f90c8e1b72",
     "f9d7fcd7d7602a41fdb62258218ba5f3",
+    "b0acbce9c93771d0585279e262af7e74",
 ];
 
 #[cfg(test)]

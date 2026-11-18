@@ -22,6 +22,9 @@ brokkr bench NAME --help              # its annotations, build settings and para
 brokkr bench NAME --dataset denmark   # bind a param
 brokkr bench NAME --osc 4705..4710    # a collection: one run over all six
 brokkr bench NAME --dataset all       # fan out: one run per dataset
+brokkr bench --rounds 6 --versus tool NAME --tool a,b    # A/B: interleaved rounds
+brokkr bench --rounds 6 --commit main --commit HEAD NAME # A/B of two builds
+brokkr bench --rounds 6 cat-a,cat-b --dataset denmark    # A/B of two benches
 brokkr bench --dry-run NAME --row x   # check the invocation, build nothing
 brokkr bench --test                   # run the contract tests under bench_tests
 ```
@@ -40,11 +43,16 @@ collide with a param. brokkr's options:
   stored in the run's `build.lfs_pointers`. A root `Cargo.lock` the commit
   does not track is seeded from the live tree's (`brokkr man run`,
   `--commit`); every run that reaches its build, `--commit` or not, stores where its lock came from
-  and its digest after the build in `build.lockfile`.
+  and its digest after the build in `build.lockfile`. Given more than once,
+  only with `--rounds`, the commits are its competitors (Rounds).
 - `--iterations N` - how many iterations, overriding the bench table's
   `iterations` setting (default 3 when absent). Any positive u32 count is
   accepted, including one larger than the bench default. The result is the
-  fastest.
+  fastest. Under `--rounds`, per cell, default 1.
+- `--rounds N` - an A/B: run the competitors N times as interleaved rounds,
+  each cell its own run (Rounds). At most 10000.
+- `--versus PARAM` - with `--rounds`, the param whose values are the
+  competitors.
 - `--hotpath` - profile: build with the bench's `hotpath_features` (`brokkr
   man bench-config`) added, and require every call marked `hotpath`
   (`binary_with()`, below) to capture its report. Refused, before anything
@@ -434,6 +442,76 @@ HEAD is back at that commit by the next arm. HEAD moving
 while an arm iterates changes nothing it measured, since its children run
 the snapshot already built. A stop that lands while the last arm is being
 stored ends nothing: every arm ran and was stored.
+
+## Rounds
+
+`--rounds N` runs an A/B: **competitors** that differ on exactly one axis,
+interleaved, each **cell** (a competitor in a workload in a round) a run of
+its own. The axis is one of:
+
+- a param: `--versus PARAM`, PARAM given on the command line with two or
+  more values (`--tool pbfhogg,osmium`), each a competitor. PARAM must be a
+  scalar, not a collection.
+- builds: `--commit` given two or more times, each commit a competitor, each
+  built in its worktree. Two refs that resolve to one commit are refused. The
+  live tree is never a competitor here: the matched A/B of two builds is
+  both arms `--commit` (`brokkr man measure`), and a variant worth comparing
+  is committed locally.
+- benches: NAME a comma list (`cat-a,cat-b`). The params after it are bound
+  by every bench in the list, so a param one bench does not take, or a
+  `required` one it lacks, refuses the invocation: this form cannot give a
+  param to some benches only.
+
+Giving none of them, or more than one, is refused, as are a bench list, a
+repeated `--commit` or `--versus` without `--rounds`, and any of them
+without NAME.
+
+Whatever else fans out is the **workload**, and each workload's competitors
+are matched by the keys their params bound: under `--versus`, every param
+but PARAM (a param that depends on PARAM and binds different keys under
+each competitor leaves a competitor without a cell in some workload, which is
+refused); under several `--commit`, every param; for a bench list, the
+params the command line gave, every other bound param left to each bench,
+and a bench whose own param fans out under one workload is refused, since
+neither arm is then the match. Every competitor must have exactly one cell in
+every workload, else the invocation is refused. Matched by key is not
+matched by content: two benches may resolve one key to different files,
+which the summary names (`brokkr man results`, Script benches).
+
+Workloads run one after another; within one, round after round, each round
+running every competitor once back to back, in competitor order in the
+first round and reversed in the next, and so on. Over two rounds each
+competitor takes the same mean position and each pair of competitors runs
+once in each order; with two competitors that is ABBA. Nothing balances the
+cell before a round's first or after its last. A cell runs `--iterations`
+iterations, default 1: the round is the repetition. With `binary_with()`'s
+`cold` or `warm` on the measured call (Page cache), each cell starts from
+the cache state it asks for.
+
+Before anything is built, everything is prepared once, as for arms: every
+bench's params bound and `validate()` run, the inputs of every arm reserved
+and hashed, the preflight run for each bench and each commit its cells
+build, `since()` answering for that commit (its answers kept for the
+commit's cells). Then each distinct build is made once, in competitor order:
+one per commit, target, profile, features and the bench's barred profiling
+features, so competitors that differ only in a param share one. Without
+`--commit` the live HEAD is read before each build and must still be the
+commit resolved for the invocation, else the rest is refused, not run and
+not stored; the check after the build (The build) applies too. Every cell
+of a build runs its snapshot, so no cell follows a build and HEAD moving
+once the builds are made changes nothing measured.
+
+A build that fails is stored once, as a run of its own whose schedule marks
+it a build (What a run stores), attributed to the first cell it serves; its
+cells are blocked, never run and never stored, and the rest still run. A
+failed cell does not stop the rest either. The command fails once
+everything ran, naming the failed builds and cells. A stop or a run that
+cannot be stored ends the invocation after the run in flight is stored,
+naming how many cells were left. The last line names the invocation's
+id, which `brokkr results --invocation ID` summarizes.
+
+`--dry-run` prints the plan, each competitor, each workload and each build,
+and stops as for arms (Dry run).
 
 ## The build
 
@@ -925,7 +1003,7 @@ the protections do not cover.
 ## What a run stores
 
 Every attempted run is stored, a failed build or an interrupted iteration
-included, one per arm, with its bound params (each key, its `from` path and
+included, one per arm (under `--rounds`, one per cell and per failed build), with its bound params (each key, its `from` path and
 a file's digest), what it measured (timing, `--hotpath` or `--alloc`), every child's
 argv, ending, `/proc` samples, marker FIFO records and capture losses, a
 marked child's hotpath capture, a `program` child's executable path and
@@ -952,6 +1030,16 @@ stored fails the command naming its uuid; one whose storing may or may not
 have landed says so, naming the attempt whose outcome is unknown, and
 `brokkr results <uuid>` then shows whether it did.
 
+**Schedule.** A `--rounds` run (Rounds) also stores its schedule: the
+invocation's id, the whole plan (the axis, every competitor's and
+workload's label, the rounds, and which build each competitor runs), its own
+slot (workload, competitor, round and position in the round) and whether it
+records a cell or a build that failed or was interrupted. Every run of an
+invocation carries the same plan, so any one names every slot planned. A
+cell records the build it ran as its build made it, once, before the cells,
+including whether the live tree was dirty then; its conditions are its own.
+The pairing key does not include the schedule.
+
 **Where it goes.** The store is opened before anything is built: the local
 `bench.db`, or with `results_server` set, the server is checked to answer
 with this brokkr's protocol, so a server that cannot be reached fails the
@@ -964,8 +1052,8 @@ publication whose outcome is unknown always gets one more attempt past
 those limits. A
 Ctrl-C that stopped the run still leaves it one publication attempt; a
 Ctrl-C during the retries ends them once the attempt in flight returns.
-The whole invocation holds the brokkr lock, every arm's publication
-included.
+The whole invocation holds the brokkr lock, every arm's or cell's
+publication included.
 
 **Host state.** Each admitted iteration also stores what the host's
 writeback and its scratch drive were doing: the block device holding the

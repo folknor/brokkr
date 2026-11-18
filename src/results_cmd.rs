@@ -100,6 +100,10 @@ pub(crate) fn cmd_results(
     // unreadable results.db would: an unanswerable query is not an empty
     // answer.
     let bench = BenchReader::open(&q.project, dev_config.results_server.as_ref())?;
+    // Only the bench store holds invocations: results.db is never opened.
+    if let ResultsView::Invocation { prefix } = &q.view {
+        return show_invocation(bench.as_ref(), prefix);
+    }
     let bench_filter = bench_filter(q);
     // litehtml's `.brokkr/results.db` is its mechanical database, another
     // schema: it has no typed results, only script-bench runs.
@@ -190,6 +194,7 @@ pub(crate) fn cmd_results(
                 println!("(no results)");
             }
         }
+        ResultsView::Invocation { .. } => {}
         ResultsView::Table => {
             let bench_rows = match &bench {
                 Some(bench) => bench.table(&bench_filter)?,
@@ -199,6 +204,20 @@ pub(crate) fn cmd_results(
         }
     }
 
+    Ok(())
+}
+
+/// `--invocation ID`: one `--rounds` invocation's summary. Typed rows have
+/// no invocations, so only the bench store is read.
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
+fn show_invocation(bench: Option<&BenchReader>, prefix: &str) -> Result<(), DevError> {
+    match bench {
+        Some(bench) => println!(
+            "{}",
+            crate::bench::results::format_rounds(prefix, &bench.invocation(prefix)?)
+        ),
+        None => println!("no --rounds invocation of this project starts with {prefix}"),
+    }
     Ok(())
 }
 

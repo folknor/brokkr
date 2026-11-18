@@ -93,7 +93,26 @@ iteration and a run whose iterations disagreed are all stored. It holds:
   script's exact source and origin, and the composed brokkr.toml, keys
   sorted; `brokkr man bench`, What a run stores);
 - the iterations requested, the run's outcome (`completed`, `failed` with a
-  reason, `interrupted`), and every iteration that ran, in execution order.
+  reason, `interrupted`), and every iteration that ran, in execution order;
+- for a `brokkr bench --rounds` run only, its `schedule` (omitted
+  otherwise): `invocation`, the id its invocation's runs share (32 lowercase
+  hex); `plan`, the same in every run of the invocation (`axis`, `{"param":
+  {"name"}}`, `"build"` or `"bench"`; each competitor's and workload's label;
+  `rounds`; and `builds`, each competitor's build index, numbered from 0 in
+  the order competitors first need them); `slot`, `{workload, competitor,
+  round, position}`, the position the competitor's own index in an even
+  round and reversed in an odd one; and `phase`, `"measure"` for a cell or
+  `{"build": {"build"}}` for a build that failed or was interrupted,
+  attributed to the first slot it serves (workload 0, round 0, the first
+  competitor of that build). Publication refuses a plan of fewer than two
+  competitors, no workload, 0 or more than 10 000 rounds, more than 100 000
+  slots, builds not numbered so, a slot outside the plan or not at the
+  position its round gives, and a build-phase run that ran an iteration or
+  completed. The `runs` columns are `schedule` and `invocation`, the latter
+  indexed and NULL exactly when `schedule` is (schema step 12). One
+  invocation's runs agreeing on the plan, and holding each slot once, is the
+  writer's to keep; the reader (`brokkr results --invocation`) refuses runs
+  that do not.
 
 An iteration holds its outcome (`completed` with a verdict, where nil and
 `""` differ; `failed` with a reason; `interrupted`), its block wall from the
@@ -384,7 +403,9 @@ selects by uuid prefix, commit prefix (of the full sha), bench substring,
 captured env, a bound param's value (its keys joined by `,` in bound order),
 literal invocation terms (brokkr's argv, every child's argv and environment
 additions, the captured env, each element matched as stored rather than as
-JSON text), and whether the run has a result or a clean tree. The bench
+JSON text), whether the run has a result or a clean tree, and the
+`--rounds` invocation whose id starts with a prefix (`invocation_prefix`,
+which only a scheduled run answers). The bench
 substring matches the run's resolved name (Marks), and hidden runs are left
 out unless `hidden` is set; a uuid lookup sets it, so a hidden run is still
 found by its uuid. `Store::select` answers a `Selection`: the uuids, the

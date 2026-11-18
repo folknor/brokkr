@@ -355,8 +355,20 @@ CREATE TABLE host_readings (
 ) STRICT;
 ";
 
+/// Version 12: a `--rounds` invocation's schedule, a JSON object `{invocation,
+/// plan, slot, phase}`, its invocation also a column so one invocation's
+/// runs are selected by index; both NULL for every other run, which is every
+/// earlier one.
+const V12: &str = "
+ALTER TABLE runs ADD COLUMN schedule TEXT
+    CHECK (schedule IS NULL OR json_type(schedule) = 'object');
+ALTER TABLE runs ADD COLUMN invocation TEXT
+    CHECK ((invocation IS NULL) = (schedule IS NULL));
+CREATE INDEX runs_invocation ON runs(invocation) WHERE invocation IS NOT NULL;
+";
+
 /// The chain. Shipped steps are frozen; append only.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 

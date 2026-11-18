@@ -271,6 +271,25 @@ fn frozen_document() -> RunDocument {
             children: vec![child],
             host: Some(frozen_host()),
         }],
+        schedule: Some(super::store::Schedule {
+            invocation: "fe".repeat(16),
+            plan: super::store::Plan {
+                axis: super::store::Axis::Param {
+                    name: "tool".into(),
+                },
+                competitors: vec!["pbfhogg".into(), "osmium".into()],
+                workloads: vec!["row=cat".into(), "row=sort".into()],
+                rounds: 4,
+                builds: vec![0, 0],
+            },
+            slot: super::store::Slot {
+                workload: 1,
+                competitor: 0,
+                round: 3,
+                position: 1,
+            },
+            phase: super::store::Phase::Measure,
+        }),
     }
 }
 
@@ -373,10 +392,9 @@ fn frozen_marks() -> (MarkView, Vec<MarkRequest>) {
     (view, marks)
 }
 
-/// Every request and answer kind, encoded canonically, one per line.
-fn frozen_encoding() -> String {
-    let document = frozen_document();
-    let filter = RunFilter {
+/// The protocol's filter fixture, every condition set. Frozen with it.
+fn frozen_filter() -> RunFilter {
+    RunFilter {
         project: "pbfhogg".into(),
         uuid_prefix: Some("01".into()),
         commit_prefix: None,
@@ -388,7 +406,14 @@ fn frozen_encoding() -> String {
         with_result: true,
         clean: false,
         hidden: true,
-    };
+        invocation_prefix: Some("fe".into()),
+    }
+}
+
+/// Every request and answer kind, encoded canonically, one per line.
+fn frozen_encoding() -> String {
+    let document = frozen_document();
+    let filter = frozen_filter();
     let (view, marks) = frozen_marks();
     let revision = Revision { marks: 3, runs: 7 };
     let stored = StoredRun {

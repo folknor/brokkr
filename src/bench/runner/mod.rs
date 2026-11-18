@@ -22,6 +22,7 @@
 pub(crate) mod contract;
 mod host;
 mod preflight;
+mod rounds;
 #[cfg(test)]
 mod run_tests;
 mod stored_config;
@@ -42,11 +43,18 @@ use crate::project::Detection;
 
 /// A parsed `brokkr bench` invocation.
 pub(crate) struct BenchArgs {
-    /// The bench to run; `None` lists the benches.
+    /// The bench to run, or with `--rounds` a comma list of benches; `None`
+    /// lists the benches.
     pub(crate) name: Option<String>,
-    /// Run the commit's build, in a persistent worktree.
-    pub(crate) commit: Option<String>,
+    /// Run each commit's build, in a persistent worktree: at most one
+    /// without `--rounds`.
+    pub(crate) commits: Vec<String>,
     pub(crate) iterations: Option<std::num::NonZeroU32>,
+    /// `--rounds N`: run the competitors as N interleaved rounds
+    /// (`rounds`).
+    pub(crate) rounds: Option<std::num::NonZeroU32>,
+    /// `--versus PARAM`: the param whose values are the competitors.
+    pub(crate) versus: Option<String>,
     /// `--hotpath`: build with the bench's `hotpath_features` and require
     /// every marked call to capture.
     pub(crate) hotpath: bool,
@@ -67,12 +75,24 @@ impl BenchArgs {
         self.iterations
             .map_or(bench.iterations, std::num::NonZeroU32::get)
     }
+
+    /// The one `--commit`, outside `--rounds`, where only one is accepted.
+    fn commit(&self) -> Option<&str> {
+        self.commits.first().map(String::as_str)
+    }
 }
 
 /// `brokkr bench --test`: every contract-test file under `bench_tests`,
 /// run as `brokkr check`'s `bench` phase runs them, each failure printed.
 fn run_tests(args: &BenchArgs, detection: &Detection) -> Result<(), DevError> {
-    if args.name.is_some() || args.commit.is_some() || args.hotpath || args.alloc || args.dry_run {
+    if args.name.is_some()
+        || !args.commits.is_empty()
+        || args.rounds.is_some()
+        || args.versus.is_some()
+        || args.hotpath
+        || args.alloc
+        || args.dry_run
+    {
         return Err(DevError::Usage(
             "--test runs every contract test under bench_tests and takes no bench, params or \
              other option"
@@ -129,10 +149,33 @@ pub(crate) fn run(
     }
     let benches = &detection.config.benches;
     let Some(name) = args.name.as_deref() else {
+        if args.rounds.is_some() || args.versus.is_some() || args.commits.len() > 1 {
+            return Err(DevError::Usage(
+                "--rounds, --versus and a repeated --commit name a bench's competitors: give \
+                 the bench"
+                    .into(),
+            ));
+        }
         list(benches);
         return Ok(());
     };
-    let bench = find(benches, name)?;
+    if args.rounds.is_some() {
+        return rounds::run(args, name, detection, invocation);
+    }
+    if let Some(why) = rounds_only(args, name) {
+        return Err(DevError::Usage(why));
+    }
+    run_arms(args, name, detection, invocation)
+}
+
+/// `brokkr bench NAME` without `--rounds`: each arm its own run, in order.
+fn run_arms(
+    args: &BenchArgs,
+    name: &str,
+    detection: &Detection,
+    invocation: &crate::db::RunInvocation,
+) -> Result<(), DevError> {
+    let bench = find(&detection.config.benches, name)?;
     let measurement = measurement_of(args, bench)?;
     let given = params::parse(bench, &args.params)?;
     let hostname = crate::config::hostname()?;
@@ -213,7 +256,7 @@ pub(crate) fn run(
             args: bound.args(),
             inputs: bound.inputs(),
             config: std::sync::Arc::clone(&config),
-            committed: args.commit.is_some(),
+            committed: args.commit().is_some(),
             hostname: &hostname,
             container: &container,
             iterations: args.iteration_count(bench),
@@ -238,6 +281,25 @@ pub(crate) fn run(
         }
     }
     summary(name, total, &failed)
+}
+
+/// Why an invocation without `--rounds` is refused for using what only
+/// `--rounds` reads: a bench list, `--commit` twice or `--versus`.
+fn rounds_only(args: &BenchArgs, name: &str) -> Option<String> {
+    if name.contains(',') {
+        Some(format!(
+            "bench {name}: a list of benches is the competitors of --rounds, which was not given"
+        ))
+    } else if args.commits.len() > 1 {
+        Some(
+            "--commit given more than once names the competitors of --rounds, which was not given"
+                .into(),
+        )
+    } else if args.versus.is_some() {
+        Some("--versus names the competitors of --rounds, which was not given".into())
+    } else {
+        None
+    }
 }
 
 /// Publish one arm's run and report it. An error stops the invocation: a
@@ -317,13 +379,20 @@ fn fold(path: &Path) -> PathBuf {
 /// built or stored. Decided from the same tokens and table [`run`] reads, so
 /// the two agree; dispatch takes no lock, run log or tree for an invocation
 /// this says will not run.
-pub(crate) fn runs(benches: &BTreeMap<String, Bench>, tokens: &[String]) -> bool {
-    let Some((name, params)) = tokens.split_first() else {
+pub(crate) fn runs(benches: &BTreeMap<String, Bench>, tokens: &[String], rounds: bool) -> bool {
+    let Some((names, params)) = tokens.split_first() else {
         return false;
     };
-    benches
-        .get(name)
-        .is_some_and(|bench| params::parse(bench, params).is_ok_and(|given| !given.help))
+    // A bench list runs only under `--rounds`, when every bench in it
+    // would; without it, it is refused.
+    if names.contains(',') && !rounds {
+        return false;
+    }
+    names.split(',').all(|name| {
+        benches
+            .get(name)
+            .is_some_and(|bench| params::parse(bench, params).is_ok_and(|given| !given.help))
+    })
 }
 
 fn find<'a>(benches: &'a BTreeMap<String, Bench>, name: &str) -> Result<&'a Bench, DevError> {
@@ -454,13 +523,14 @@ fn preflight_and_digest(
     crate::serve::refuse_measurement("a script bench")?;
     let commit = crate::git::resolve_commit(
         detection.build_root.as_path(),
-        args.commit.as_deref().unwrap_or("HEAD"),
+        args.commit().unwrap_or("HEAD"),
     )?;
     // A stop during a preflight is recorded, so its child is stopped with its
     // process group and the Lua it runs sees it; one that lands as the
     // window closes is read in the same step that closes it.
     let guard = crate::shutdown::SigtermGuard::install();
-    let preflighted = preflight_arms(name, frozen, arms, labels, config, detection, &commit);
+    let mut since = host::Since::new(detection.build_root.as_path(), commit.clone());
+    let preflighted = preflight_arms(name, frozen, arms, labels, config, detection, &mut since);
     if guard.leave() {
         return Err(DevError::Interrupted);
     }
@@ -625,7 +695,7 @@ fn dry_run(
 ) -> Result<(), DevError> {
     let commit = crate::git::resolve_commit(
         detection.build_root.as_path(),
-        args.commit.as_deref().unwrap_or("HEAD"),
+        args.commit().unwrap_or("HEAD"),
     )?;
     params::digest_arms(
         arms,
@@ -643,7 +713,7 @@ fn dry_run(
         bench.target.as_deref().unwrap_or("[bin] default"),
         features.join(", "),
         crate::db::short_uuid(commit.as_str()),
-        if args.commit.is_some() {
+        if args.commit().is_some() {
             " in a worktree"
         } else {
             ""
@@ -707,12 +777,11 @@ fn preflight_arms(
     labels: &[String],
     config: &std::sync::Arc<lua::Value>,
     detection: &Detection,
-    commit: &crate::git::Commit,
+    since: &mut host::Since,
 ) -> Result<Vec<BTreeSet<String>>, DevError> {
     if !frozen.script.has_preflight() {
         return Ok(vec![BTreeSet::new(); arms.len()]);
     }
-    let mut since = host::Since::new(detection.build_root.as_path(), commit.clone());
     let mut refusals = Vec::new();
     let mut modules = Vec::with_capacity(arms.len());
     for (index, bound) in arms.iter().enumerate() {
@@ -722,7 +791,7 @@ fn preflight_arms(
         let host = preflight::PreflightHost {
             config: std::sync::Arc::clone(config),
             cwd: detection.project_root.as_path().to_path_buf(),
-            since,
+            since: std::mem::replace(since, since.blank()),
             inputs: bound.inputs(),
         };
         let (ran, host) = lua::run_hook(
@@ -731,7 +800,7 @@ fn preflight_arms(
             &bound.preflight_args(),
             host,
         );
-        since = host.since;
+        *since = host.since;
         modules.push(ran.modules);
         judge(
             lua::Hook::Preflight,
@@ -757,7 +826,7 @@ fn admit_next(
     if crate::shutdown::should_unwind() {
         return Err(DevError::Interrupted);
     }
-    if args.commit.is_some() {
+    if args.commit().is_some() {
         return Ok(());
     }
     let head = crate::git::resolve_commit(detection.build_root.as_path(), "HEAD")?;
@@ -1015,6 +1084,14 @@ fn unix_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
+/// The profile `bench` builds with: its own, else the project's default.
+fn profile_of(detection: &Detection, bench: &Bench) -> crate::build::RustProfile {
+    bench
+        .profile
+        .clone()
+        .unwrap_or_else(|| crate::runnables::build_profile(detection.config.bin.as_ref(), None))
+}
+
 /// Everything one attempt is made of before it runs.
 struct Attempt<'a> {
     detection: &'a Detection,
@@ -1051,6 +1128,27 @@ impl Attempt<'_> {
         // Every module the preflight or an iteration asked for, loaded or
         // not, is stored with its source once the attempt is decided.
         let mut modules = self.preflight_modules.clone();
+        if let Some(program) = self.build_into(commit, tree, keep, &mut document) {
+            let since = host::Since::new(self.detection.build_root.as_path(), commit.clone());
+            self.iterate(&program, &mut document, &mut modules, since);
+        }
+        self.settle_config(&mut document, &modules);
+        Ok(document)
+    }
+
+    /// The worktree when the attempt has a commit, then the build into
+    /// `document`: the snapshot every child runs, or `None` with the
+    /// document's outcome decided. The iterations run after the worktree is
+    /// released: they run the snapshot from the live project root and read
+    /// nothing of the worktree.
+    fn build_into(
+        &self,
+        commit: &crate::git::Commit,
+        tree: &crate::tree_policy::TreePolicy,
+        keep: usize,
+        document: &mut store::RunDocument,
+    ) -> Option<PathBuf> {
+        let mut program = None;
         let worktree = crate::context::with_worktree(
             Some(&self.detection.project),
             &self.detection.project_root,
@@ -1075,14 +1173,10 @@ impl Attempt<'_> {
                     source: lock_source(build_root.lock_source()),
                     digest: None,
                 });
-                self.execute(build_root.as_path(), commit, &mut document, &mut modules);
+                program = self.execute(build_root.as_path(), commit, document);
                 Ok(())
             },
         );
-        if !modules.is_empty() {
-            document.config =
-                stored_config::render(self.detection, &self.bench.name, self.frozen, &modules);
-        }
         if let Err(error) = worktree {
             // A git call cut short by the stop reports a spawn or subprocess
             // error, not an interrupt.
@@ -1094,8 +1188,18 @@ impl Attempt<'_> {
                         reason: format!("worktree: {}", reason_of(&error)),
                     }
                 };
+            return None;
         }
-        Ok(document)
+        program
+    }
+
+    /// The stored config once the attempt is decided: rendered again with
+    /// every module the preflight or an iteration asked for.
+    fn settle_config(&self, document: &mut store::RunDocument, modules: &BTreeSet<String>) {
+        if !modules.is_empty() {
+            document.config =
+                stored_config::render(self.detection, &self.bench.name, self.frozen, modules);
+        }
     }
 
     /// The document as the attempt starts it: identity, conditions and the
@@ -1157,18 +1261,18 @@ impl Attempt<'_> {
             iterations_requested: self.iterations,
             outcome: store::RunOutcome::Interrupted,
             iterations: Vec::new(),
+            schedule: None,
         }
     }
 
-    /// Build in `build_root` (the live checkout or the `--commit` worktree)
-    /// and run, deciding the document's outcome.
+    /// Build in `build_root` (the live checkout or the `--commit` worktree):
+    /// the snapshot, or `None` with the document's outcome decided.
     fn execute(
         &self,
         build_root: &Path,
         commit: &crate::git::Commit,
         document: &mut store::RunDocument,
-        modules: &mut BTreeSet<String>,
-    ) {
+    ) -> Option<PathBuf> {
         let profile = self.profile();
         let features = document.build.features.clone();
         let program = match self.build(build_root, &profile, &features, document) {
@@ -1182,13 +1286,11 @@ impl Attempt<'_> {
                             reason: format!("build: {}", reason_of(&error)),
                         }
                     };
-                return;
+                return None;
             }
         };
-        if !self.built_as_recorded(build_root, commit, document) {
-            return;
-        }
-        self.iterate(&program, commit, document, modules);
+        self.built_as_recorded(build_root, commit, document)
+            .then_some(program)
     }
 
     /// Whether the build just made is still what the document records,
@@ -1256,9 +1358,7 @@ impl Attempt<'_> {
     }
 
     fn profile(&self) -> crate::build::RustProfile {
-        self.bench.profile.clone().unwrap_or_else(|| {
-            crate::runnables::build_profile(self.detection.config.bin.as_ref(), None)
-        })
+        profile_of(self.detection, self.bench)
     }
 
     /// Resolve and build the target, snapshot it, and fill in the document's
@@ -1349,21 +1449,24 @@ impl Attempt<'_> {
     /// Nor does the arm compare what scripts record across iterations: an
     /// identity a harness reports about its own choices is the harness's to
     /// keep deterministic, or to bind as a param.
+    ///
+    /// `since` answers the script's `since()` for the commit under test and
+    /// is handed back with what it learned, so the runs of one commit in one
+    /// invocation share one set of answers.
     fn iterate(
         &self,
         program: &Path,
-        commit: &crate::git::Commit,
         document: &mut store::RunDocument,
         modules: &mut BTreeSet<String>,
-    ) {
+        mut since: host::Since,
+    ) -> host::Since {
         let state = crate::clean::layout::ProjectState::new(self.detection.project_root.as_path());
-        let mut since = host::Since::new(self.detection.build_root.as_path(), commit.clone());
         let mut budget = host::Budget::RUN;
         let total = self.iterations;
         for index in 0..total {
             if crate::shutdown::should_unwind() {
                 document.outcome = store::RunOutcome::Interrupted;
-                return;
+                return since;
             }
             let (iteration, returned, budget_left, required) =
                 host::run_iteration(host::IterationSetup {
@@ -1410,11 +1513,11 @@ impl Attempt<'_> {
                     document.outcome = store::RunOutcome::Failed {
                         reason: format!("{label}: {reason}"),
                     };
-                    return;
+                    return since;
                 }
                 store::IterationOutcome::Interrupted => {
                     document.outcome = store::RunOutcome::Interrupted;
-                    return;
+                    return since;
                 }
             }
         }
@@ -1456,6 +1559,7 @@ impl Attempt<'_> {
                 ),
             }
         };
+        since
     }
 }
 

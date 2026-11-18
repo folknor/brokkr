@@ -70,6 +70,7 @@ fn document(uuid: &str, project: &str) -> RunDocument {
         iterations_requested: 1,
         outcome: RunOutcome::Interrupted,
         iterations: Vec::new(),
+        schedule: None,
     }
 }
 

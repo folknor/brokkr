@@ -235,8 +235,17 @@ mod tests {
             ])
             .unwrap(),
         );
-        assert_eq!((commit.as_deref(), iterations), (Some("abc"), Some(5)));
+        assert_eq!((commit, iterations), (vec!["abc".to_owned()], Some(5)));
         assert_eq!(rest, ["cat", "--help", "--commit", "x"]);
+        // `--rounds` competitors: --commit repeats, --versus needs --rounds.
+        let (commits, _, _) = bench(
+            parse([
+                "brokkr", "bench", "--rounds", "2", "--commit", "a", "--commit", "b", "cat",
+            ])
+            .unwrap(),
+        );
+        assert_eq!(commits, ["a", "b"]);
+        assert!(parse(["brokkr", "bench", "--versus", "tool", "cat"]).is_err());
         let (_, iterations, rest) = bench(parse(["brokkr", "bench"]).unwrap());
         assert_eq!((iterations, rest.len()), (None, 0));
         assert!(parse(["brokkr", "bench", "--iterations", "0", "cat"]).is_err());

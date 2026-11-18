@@ -64,6 +64,7 @@ static RUN: std::sync::LazyLock<store::RunDocument> =
         iterations_requested: 1,
         outcome: store::RunOutcome::Interrupted,
         iterations: Vec::new(),
+        schedule: None,
     });
 
 fn script(source: &str) -> lua::Script {

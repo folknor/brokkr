@@ -43,6 +43,9 @@ pub struct RunFilter {
     /// Hidden runs (invalidated, or under a retired name) too; without it
     /// they are left out.
     pub hidden: bool,
+    /// The run belongs to the `--rounds` invocation whose id starts with
+    /// this, ASCII case ignored.
+    pub invocation_prefix: Option<String>,
 }
 
 /// What a selection found, and the revision and marks it was made at: a
@@ -152,6 +155,12 @@ fn candidates(
     if let Some(prefix) = &filter.uuid_prefix {
         let n = bind(&mut params, prefix.to_ascii_lowercase());
         clauses.push(format!("substr(uuid, 1, length(?{n})) = ?{n}"));
+    }
+    if let Some(prefix) = &filter.invocation_prefix {
+        let n = bind(&mut params, prefix.to_ascii_lowercase());
+        clauses.push(format!(
+            "invocation IS NOT NULL AND substr(invocation, 1, length(?{n})) = ?{n}"
+        ));
     }
     if let Some(prefix) = &filter.commit_prefix {
         let n = bind(&mut params, prefix.to_ascii_lowercase());

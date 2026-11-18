@@ -9,10 +9,12 @@ mod annotations;
 mod compare;
 mod config_diff;
 mod host;
+mod rounds;
 mod single;
 mod table;
 
 pub(crate) use compare::format_compare;
+pub(crate) use rounds::format_rounds;
 pub(crate) use single::{ending as child_ending, format_single};
 pub(crate) use table::format_table;
 
@@ -306,6 +308,29 @@ impl BenchReader {
         selection.uuids.truncate(filter.limit);
         Ok(Listing {
             runs: self.load(&selection.uuids, false)?,
+            marks: selection.marks,
+        })
+    }
+
+    /// Every run of the `--rounds` invocations whose id starts with `prefix`,
+    /// hidden or not and uncapped, read at one revision: a summary needs
+    /// every cell to say which are missing. `results`' filters do not apply,
+    /// since a filtered cell would read as absent.
+    pub(crate) fn invocation(&self, prefix: &str) -> Result<Listing, DevError> {
+        require_prefix(prefix, "invocation")?;
+        let selection = self.select_at(
+            &RunFilter {
+                project: self.project.clone(),
+                invocation_prefix: Some(prefix.to_owned()),
+                hidden: true,
+                ..RunFilter::default()
+            },
+            None,
+        )?;
+        // With children: a result's wall and its kind (a measured call's or
+        // the block's) are read from them.
+        Ok(Listing {
+            runs: self.load(&selection.uuids, true)?,
             marks: selection.marks,
         })
     }

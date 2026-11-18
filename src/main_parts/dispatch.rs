@@ -292,6 +292,8 @@ pub(super) fn run(
         Command::Bench(cli::BenchCmd {
             commit,
             iterations,
+            rounds,
+            versus,
             hotpath,
             alloc,
             dry_run,
@@ -300,8 +302,10 @@ pub(super) fn run(
         }) => crate::bench::runner::run(
             &crate::bench::runner::BenchArgs {
                 name: bench.first().cloned(),
-                commit: commit.clone(),
+                commits: commit.clone(),
                 iterations: *iterations,
+                rounds: *rounds,
+                versus: versus.clone(),
                 hotpath: *hotpath,
                 alloc: *alloc,
                 params: bench.iter().skip(1).cloned().collect(),
@@ -481,6 +485,7 @@ fn run_project(
             query,
             commit,
             compare,
+            invocation: rounds_invocation,
             command,
             mode,
             dataset,
@@ -555,7 +560,9 @@ fn run_project(
                 grep_v,
                 limit,
             };
-            let view = if let Some(prefix) = query {
+            let view = if let Some(prefix) = rounds_invocation.clone() {
+                crate::request::ResultsView::Invocation { prefix }
+            } else if let Some(prefix) = query {
                 crate::request::ResultsView::Uuid { prefix }
             } else if let Some(values) = compare {
                 crate::request::ResultsView::Compare {

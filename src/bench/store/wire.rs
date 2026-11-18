@@ -18,7 +18,7 @@ use super::marks::{MarkRequest, Marked, Revision};
 use super::{Published, Store, StoreError};
 
 /// The protocol both sides speak. A request naming another is refused.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// The header carrying [`PROTOCOL_VERSION`], on every request and on every
 /// answer the server itself writes.
@@ -366,4 +366,5 @@ pub(crate) const SHIPPED_PROTOCOLS: &[&str] = &[
     "383819e5a115ff02500d2b4d2e351da6",
     "6a652ad9dc62bea16e41d59f565a41cb",
     "d32e251e2c669867f51d727f77cf80ca",
+    "20213aae4341a92e40fb67591d87a787",
 ];

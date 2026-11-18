@@ -597,6 +597,31 @@ key is compared whether hidden or not, so a hidden run can stand in for an
 older visible one, and a `hidden on A` or `hidden on B` line names the
 compared run and the mark hiding it.
 
+**`--invocation ID`.** One `brokkr bench --rounds` invocation (`brokkr man
+bench`, Rounds), named by a prefix of its id, summarized on the plan its
+runs carry: every run of it is read, hidden or not, at one revision, and no
+other filter applies (each conflicts with it), since a cell filtered away
+would read as missing. A prefix naming several invocations lists them, and
+one naming none says so. results.db is not opened. Runs that disagree on the
+plan, two runs for one slot, a cell of a build stored as failed, a cell
+after the stop a run records, or two runs recording a stop are refused as
+not one invocation's. The summary names the benches, start and host, the
+axis, rounds and workloads, each competitor with its build and commit, each
+build that failed or was interrupted, how many runs a mark hides, and
+whether a cell ran a dirty tree. Then per workload: each competitor's median
+result over its cells with a result (an even count's middle two averaged,
+rounded down) against the rounds planned; each later competitor against the
+first, over the rounds where both hold a result, how often it was faster,
+slower and tied, of how many, and the median paired difference; when the
+results are not one kind (a different pairing class, or a measured call's
+wall against a block's) nothing is compared and the summary says why. Then
+the params whose files or `from` path differ between competitors under the
+same key, the competing param aside, a param bound on one side only named so;
+and each planned cell without a result: failed or interrupted (with its
+run), blocked by a failed build, not run because the invocation stopped at
+a run it names, or absent, which says nothing of why (a crash, a
+publication still in doubt). The summary is derived, never stored.
+
 **Marks.** What is said about runs after the fact is stored in the bench
 store beside them (`reference/bench-store.md`, Marks), never in
 `brokkr.toml` and never by editing a run, so it holds locally and through a

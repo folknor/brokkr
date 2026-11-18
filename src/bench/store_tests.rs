@@ -328,7 +328,71 @@ pub(super) fn document(uuid: &str) -> RunDocument {
             completed(200, Some("")),
             completed(200, Some("")),
         ],
+        schedule: None,
     }
+}
+
+/// A `--rounds` cell's schedule: slot `competitor` of two in round `round`.
+fn schedule(invocation: &str, competitor: u32, round: u32) -> super::store::Schedule {
+    super::store::Schedule {
+        invocation: invocation.to_owned(),
+        plan: super::store::Plan {
+            axis: super::store::Axis::Param {
+                name: "tool".to_owned(),
+            },
+            competitors: vec!["a".to_owned(), "b".to_owned()],
+            workloads: vec![String::new()],
+            rounds: 2,
+            builds: vec![0, 0],
+        },
+        slot: super::store::Slot {
+            workload: 0,
+            competitor,
+            round,
+            position: super::store::position(competitor, 2, round),
+        },
+        phase: super::store::Phase::Measure,
+    }
+}
+
+#[test]
+fn a_scheduled_run_reads_back_whole_and_its_invocation_selects_it() {
+    let mut store = store("scheduled");
+    let invocation = "fedcba9876543210fedcba9876543210";
+    let mut doc = document("0123456789abcdef0123456789abcdef");
+    doc.schedule = Some(schedule(invocation, 1, 1));
+    store.publish(&doc).unwrap();
+    store
+        .publish(&document("1123456789abcdef0123456789abcdef"))
+        .unwrap();
+    assert_eq!(store.load(&doc.uuid).unwrap(), Some(doc.clone()));
+    let selected = store
+        .select(
+            &super::store::RunFilter {
+                project: doc.project.clone(),
+                invocation_prefix: Some("FEDCBA".to_owned()),
+                ..super::store::RunFilter::default()
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(selected.uuids, vec![doc.uuid.clone()]);
+}
+
+#[test]
+fn a_schedule_out_of_its_plan_is_refused() {
+    let mut store = store("bad_schedule");
+    let mut doc = document("0123456789abcdef0123456789abcdef");
+    let mut bad = schedule("fedcba9876543210fedcba9876543210", 1, 1);
+    // Round 1 reverses the order, so competitor 1 runs first.
+    bad.slot.position = 1;
+    doc.schedule = Some(bad);
+    assert!(matches!(store.publish(&doc), Err(StoreError::Refused(_))));
+    let mut build = schedule("fedcba9876543210fedcba9876543210", 0, 0);
+    build.phase = super::store::Phase::Build { build: 0 };
+    doc.schedule = Some(build);
+    // A build-phase run never completed: it records a build that did not.
+    assert!(matches!(store.publish(&doc), Err(StoreError::Refused(_))));
 }
 
 #[test]
@@ -885,7 +949,10 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         store
             .conn()
             .execute_batch(
-                "DROP TABLE host_readings;
+                "DROP INDEX runs_invocation;
+                 ALTER TABLE runs DROP COLUMN invocation;
+                 ALTER TABLE runs DROP COLUMN schedule;
+                 DROP TABLE host_readings;
                  ALTER TABLE iterations DROP COLUMN host;
                  ALTER TABLE runs DROP COLUMN fstrim_timer_unix_ms;
                  ALTER TABLE runs DROP COLUMN previous_command;
@@ -910,7 +977,7 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     assert!(store.marks(&doc.project).unwrap().is_empty());
     assert_eq!(store.load(&doc.uuid).unwrap(), Some(doc));
 }

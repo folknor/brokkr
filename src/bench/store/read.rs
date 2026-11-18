@@ -45,7 +45,8 @@ pub(super) fn load_run(
                     r.features, r.default_features, r.resolved_bin, r.resolved_features,
                     r.artifact, c.text, r.iterations_requested, r.outcome, r.failure,
                     r.config_digest, r.pairing_key, r.best_iteration, r.measurement, r.alloc,
-                    r.lfs_pointers, r.lockfile, r.previous_command, r.fstrim_timer_unix_ms
+                    r.lfs_pointers, r.lockfile, r.previous_command, r.fstrim_timer_unix_ms,
+                    r.schedule
              FROM runs r JOIN configs c ON c.digest = r.config_digest
              WHERE r.uuid = ?1",
             [uuid],
@@ -84,6 +85,7 @@ pub(super) fn load_run(
     doc.build.lfs_pointers = cols.lfs_pointers.as_deref().map(json).transpose()?;
     doc.build.lockfile = cols.lockfile.as_deref().map(json).transpose()?;
     doc.conditions.previous_command = cols.previous_command.as_deref().map(json).transpose()?;
+    doc.schedule = cols.schedule.as_deref().map(json).transpose()?;
     doc.params = load_params(conn, run_id)?;
     doc.iterations = load_iterations(conn, run_id, children)?;
     let (config_digest, pairing_key, best) = derived;
@@ -113,6 +115,7 @@ struct RunJson {
     lfs_pointers: Option<String>,
     lockfile: Option<String>,
     previous_command: Option<String>,
+    schedule: Option<String>,
 }
 
 struct RunColumns {
@@ -166,6 +169,7 @@ fn run_columns(row: &Row<'_>) -> rusqlite::Result<Option<RunColumns>> {
         iterations_requested: row.get(24)?,
         outcome,
         iterations: Vec::new(),
+        schedule: None,
     };
     Ok(Some(RunColumns {
         doc,
@@ -180,6 +184,7 @@ fn run_columns(row: &Row<'_>) -> rusqlite::Result<Option<RunColumns>> {
             lfs_pointers: row.get(32)?,
             lockfile: row.get(33)?,
             previous_command: row.get(34)?,
+            schedule: row.get(36)?,
         },
     }))
 }

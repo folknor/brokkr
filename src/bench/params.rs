@@ -34,6 +34,18 @@ pub(crate) struct Given {
     values: BTreeMap<String, Vec<String>>,
 }
 
+impl Given {
+    /// Whether the command line gave `name`.
+    pub(crate) fn gives(&self, name: &str) -> bool {
+        self.values.contains_key(name)
+    }
+
+    /// Every param the command line gave, by name.
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.values.keys().map(String::as_str)
+    }
+}
+
 /// Read the tokens after NAME: `--NAME VALUE` or `--NAME=VALUE`, a param as
 /// often as it is given; `--help` or `-h` wherever a param's name could
 /// stand. A token taken as a value is data, whatever it looks like.

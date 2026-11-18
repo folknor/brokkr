@@ -55,6 +55,10 @@ pub struct RunDocument {
     /// Every iteration that ran, in execution order. One that never started
     /// is not here.
     pub iterations: Vec<Iteration>,
+    /// Where the run sits in a `--rounds` invocation; absent for any other
+    /// run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<super::schedule::Schedule>,
 }
 
 /// The host's state when the run started.
@@ -927,6 +931,19 @@ impl RunDocument {
         }
         self.validate_build()?;
         self.validate_params()?;
+        if let Some(schedule) = &self.schedule {
+            schedule
+                .validate()
+                .map_err(|e| refuse(format!("schedule: {e}")))?;
+            if matches!(schedule.phase, super::schedule::Phase::Build { .. })
+                && (!self.iterations.is_empty() || matches!(self.outcome, RunOutcome::Completed))
+            {
+                return Err(refuse(
+                    "a build-phase run ran iterations or completed: it records a build that \
+                     failed or was interrupted",
+                ));
+            }
+        }
         if self.iterations_requested == 0 {
             return Err(refuse("iterations_requested is 0"));
         }

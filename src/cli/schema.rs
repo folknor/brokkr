@@ -285,7 +285,7 @@ In depth: `brokkr man results`."
             .multiple(false)
             .conflicts_with_all([
                 "query", "commit", "compare", "command", "mode", "dataset", "meta", "env",
-                "param", "grep", "grep_v", "limit", "top", "hidden",
+                "param", "grep", "grep_v", "limit", "top", "hidden", "invocation",
             ])
     ))]
     // The marks that carry a reason.
@@ -1097,14 +1097,27 @@ pub(crate) struct CritCmd {
 #[derive(Args)]
 pub(crate) struct BenchCmd {
     /// Build and run this commit, in a persistent worktree, with the
-    /// working tree's benches.
+    /// working tree's benches. With --rounds, given more than once, the
+    /// commits are the competitors.
     #[arg(long, value_name = "REF")]
-    pub(crate) commit: Option<String>,
+    pub(crate) commit: Vec<String>,
 
     /// Iterations to run; defaults to the bench setting, otherwise 3.
-    /// The result is the fastest.
+    /// The result is the fastest. With --rounds, per cell, default 1.
     #[arg(long, value_name = "N")]
     pub(crate) iterations: Option<std::num::NonZeroU32>,
+
+    /// A/B: run the competitors N times as interleaved rounds, the order
+    /// reversed every other round, each cell its own run. The
+    /// competitors are --versus's values, several --commit, or NAME as
+    /// a comma list of benches.
+    #[arg(long, value_name = "N")]
+    pub(crate) rounds: Option<std::num::NonZeroU32>,
+
+    /// With --rounds: the param whose values are the competitors; any
+    /// other param that fans out is the workload.
+    #[arg(long, value_name = "PARAM", requires = "rounds")]
+    pub(crate) versus: Option<String>,
 
     /// Profile: build with the bench's hotpath_features and require
     /// every call marked hotpath to capture its report.
@@ -1126,7 +1139,7 @@ pub(crate) struct BenchCmd {
     /// Run the project's contract tests, the Lua files under
     /// bench_tests, against scripted fixtures: no build, no data, no
     /// lock. `brokkr check`'s bench phase runs them too.
-    #[arg(long, conflicts_with_all = ["dry_run", "hotpath", "alloc", "commit"])]
+    #[arg(long, conflicts_with_all = ["dry_run", "hotpath", "alloc", "commit", "rounds"])]
     pub(crate) test: bool,
 
     /// The bench to run, then its own params; clap reads nothing after
@@ -1194,6 +1207,15 @@ pub(crate) struct ResultsCmd {
     /// Compare two commits side-by-side
     #[arg(long, num_args = 2, value_names = ["COMMIT_A", "COMMIT_B"])]
     pub(crate) compare: Option<Vec<String>>,
+
+    /// Summarize one `brokkr bench --rounds` invocation by its id
+    /// prefix: each competitor's median and per-round sign, and every
+    /// planned cell without a result. Takes no filter.
+    #[arg(long, value_name = "ID", conflicts_with_all = [
+        "query", "commit", "compare", "command", "mode", "dataset", "meta", "env",
+        "param", "grep", "grep_v",
+    ])]
+    pub(crate) invocation: Option<String>,
 
     /// Filter by command (substring match, e.g. "check" matches "check-refs")
     #[arg(long)]

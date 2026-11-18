@@ -178,8 +178,10 @@ impl CommandSpec {
         match command {
             super::Command::Bench(super::BenchCmd { dry_run: true, .. })
             | super::Command::Bench(super::BenchCmd { test: true, .. }) => true,
-            super::Command::Bench(super::BenchCmd { bench, .. }) => {
-                benches.is_none_or(|benches| !crate::bench::runner::runs(benches, bench))
+            super::Command::Bench(super::BenchCmd { bench, rounds, .. }) => {
+                benches.is_none_or(|benches| {
+                    !crate::bench::runner::runs(benches, bench, rounds.is_some())
+                })
             }
             // Listing and stopping serves: the registry's own flocks govern
             // them, never the global lock (`crate::serve`).
@@ -219,9 +221,11 @@ impl CommandSpec {
                 }
                 super::Command::Build(super::BuildCmd { commit, .. })
                 | super::Command::Crit(super::CritCmd { commit, .. })
-                | super::Command::Bench(super::BenchCmd { commit, .. })
                 | super::Command::Sync(super::SyncCmd { commit, .. })
                 | super::Command::Corpus(super::CorpusCmd { commit, .. }) => Ok(commit.is_some()),
+                // Every build is a worktree's once one commit is given, the
+                // `--rounds` competitors included.
+                super::Command::Bench(super::BenchCmd { commit, .. }) => Ok(!commit.is_empty()),
                 _ => Err(crate::error::DevError::Internal(
                     "command has direct worktree policy but carries no direct commit field".into(),
                 )),
