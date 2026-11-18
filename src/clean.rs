@@ -4,8 +4,6 @@ use std::path::Path;
 
 pub(crate) mod layout;
 
-pub(crate) const CORPUS_CALIBRAND_DIR: &str = "corpus-calibrands";
-
 use crate::config;
 use crate::context::{bootstrap, bootstrap_config};
 use crate::error::DevError;
@@ -22,8 +20,6 @@ pub(crate) struct CleanOpts {
     /// The dispatch site already reported the cargo sweep.
     pub(crate) cargo_swept: bool,
     pub(crate) worktrees: bool,
-    pub(crate) archives: bool,
-    pub(crate) keep: usize,
     pub(crate) dry_run: bool,
 }
 
@@ -201,8 +197,6 @@ pub(crate) fn cmd_clean(
     let CleanOpts {
         cargo_swept,
         worktrees,
-        archives,
-        keep,
         dry_run,
     } = opts;
     let c = Cleaner::new(dry_run);
@@ -255,19 +249,6 @@ pub(crate) fn cmd_clean(
     clean_scratch(project, &paths, &c)?;
     clean_sidecar_fifos(&state, &c)?;
 
-    // Elivagar's default `-o` target for `pmtiles-corpus mutate` is a
-    // brokkr-designated scratch location. `ocean-build_tmp` is not passed by
-    // brokkr and belongs to the external tool, so clean leaves it alone.
-    if *project == Project::Elivagar {
-        let elivagar = layout::ElivagarLayout::new(&paths);
-        if c.reserved_dir(&elivagar.corpus_calibrands())? {
-            output::run_msg(&format!("{} corpus-calibrands", c.past()));
-        }
-        if archives {
-            clean_archives(&paths, keep, &c)?;
-        }
-    }
-
     clean_artefact_trees(project, &state, &c)?;
 
     if c.dir(&state.test_hung_dir())? {
@@ -281,19 +262,12 @@ pub(crate) fn cmd_clean(
 
     // An empty routine sweep says so once, instead of printing nothing (which
     // reads as "did it run?"). Cargo and the deep flags report their own work.
-    if !cargo_swept && !worktrees && !archives && !dry_run && c.hits.get() == 0 {
+    if !cargo_swept && !worktrees && !dry_run && c.hits.get() == 0 {
         output::run_msg("nothing to clean");
     }
 
     if worktrees {
         // Deep clean: `--worktrees` reclaims the expensive *persistent* state.
-        // The durable tilegen output store is elivagar's analog of piners'
-        // `runs.db` (the archives `regress` diffs), so a routine `brokkr clean`
-        // spares it - retention already bounds its growth. Only the explicit
-        // deep clean wipes it wholesale, alongside the worktrees.
-        if *project == Project::Elivagar {
-            clean_elivagar_outputs(&paths, &c)?;
-        }
         // Legacy sibling worktrees (from before the `~/.brokkr/worktrees`
         // container) count and go too, or the move would orphan them.
         let found =
@@ -358,21 +332,6 @@ fn clean_scratch(
     paths: &config::ResolvedPaths,
     c: &Cleaner,
 ) -> Result<(), DevError> {
-    if *project == Project::Elivagar {
-        let elivagar = layout::ElivagarLayout::new(paths);
-        if c.reserved_dir(elivagar.scratch())? {
-            if !c.dry_run {
-                std::fs::create_dir_all(elivagar.scratch())?;
-            }
-            output::run_msg(&format!("{} scratch", c.past()));
-        }
-        let tmp_dir = elivagar.tilegen_tmp();
-        if tmp_dir.as_path() != elivagar.scratch() && c.reserved_dir(&tmp_dir)? {
-            output::run_msg(&format!("{} tilegen_tmp", c.past()));
-        }
-        return Ok(());
-    }
-
     if *project == Project::Nidhogg {
         // The ingest outputs the retired nidhogg commands left, by the names
         // NidhoggLayout constructs. The similarly named project-root tmp
@@ -614,66 +573,6 @@ fn clean_artefact_trees(
     Ok(())
 }
 
-/// Deep-clean (`--worktrees`) the durable tilegen output store: removes every
-/// canonical `<dataset>-<variant>-<commit>.pmtiles` archive, i.e. `--archives`
-/// with a keep window of zero. It used to remove every `*.pmtiles` in the
-/// output dir, which broke the constructed-name rule `clean_archives` states:
-/// with `output = "data"` it would have taken the hand-built ocean artifact
-/// `ocean-tiles.pmtiles` too. Skipped when the output dir coincides with
-/// scratch (already wiped by the caller).
-fn clean_elivagar_outputs(paths: &config::ResolvedPaths, c: &Cleaner) -> Result<(), DevError> {
-    let elivagar = layout::ElivagarLayout::new(paths);
-    if elivagar.output() == elivagar.scratch() {
-        return Ok(());
-    }
-    clean_archives(paths, 0, c)
-}
-
-/// `--archives`: prune canonical `<dataset>-<variant>-<commit>.pmtiles` archives
-/// in the durable output store, keeping the newest `keep` per (dataset,
-/// variant). Group membership and retention order come from the same
-/// `ArchiveStore::prune()` used after tilegen admission. It constructs known
-/// `(dataset, variant)` name shapes - filenames are never parsed back, since
-/// dataset names carry hyphens. Anything outside the configured archive
-/// namespace (hand-named files, the ocean artifact, pre-rename archives) stays.
-fn clean_archives(paths: &config::ResolvedPaths, keep: usize, c: &Cleaner) -> Result<(), DevError> {
-    let elivagar = layout::ElivagarLayout::new(paths);
-    let output_dir = elivagar.output();
-    let groups = elivagar.datasets().iter().flat_map(|(dataset, config)| {
-        config.pbf.keys().map(|variant| {
-            crate::elivagar::archive_store::ArchiveGroup::new(dataset.clone(), variant.clone())
-        })
-    });
-    let store = crate::elivagar::archive_store::ArchiveStore::new(output_dir.to_path_buf())
-        .with_groups(groups);
-    let mut removal_error = None;
-    let removed = store.prune(keep, |path| {
-        if removal_error.is_some() {
-            return false;
-        }
-        match c.file(path) {
-            Ok(removed) => removed,
-            Err(error) => {
-                removal_error = Some(error);
-                false
-            }
-        }
-    })?;
-    if let Some(error) = removal_error {
-        return Err(DevError::Config(format!(
-            "cannot prune archives in {}: {error}",
-            output_dir.display()
-        )));
-    }
-    if removed > 0 {
-        output::run_msg(&format!(
-            "{} {}",
-            c.verb(),
-            output::count(removed, "archive")
-        ));
-    }
-    Ok(())
-}
 /// Remove the per-sweep isolated target dirs (`<target>/rustflags-<hash>`) that
 /// a `rustflags` `[[check]]` entry mints (see `check_cmd::sweep_env`'s
 /// `isolated_target_dir`). They are reproducible build scratch - a full rebuild

@@ -170,22 +170,10 @@ const TOPICS: &[Topic] = &[
         commands: &[CommandId::Env],
     },
     Topic {
-        name: "elivagar-config",
-        summary: "[<host>.tilegen.*] blocks: the elivagar tilegen contract",
-        content: include_str!("../docs/brokkr.toml.elivagar.md"),
-        commands: &[CommandId::Tilegen],
-    },
-    Topic {
         name: "pbfhogg",
         summary: "pbfhogg script benches and generic commands",
         content: include_str!("../docs/projects/pbfhogg.md"),
         commands: &[CommandId::Bench],
-    },
-    Topic {
-        name: "elivagar",
-        summary: "elivagar commands, regress, the pmtiles corpus, the durable tilegen output store",
-        content: include_str!("../docs/projects/elivagar.md"),
-        commands: &[CommandId::Tilegen],
     },
     Topic {
         name: "visual",

@@ -28,8 +28,8 @@ use crate::error::DevError;
 /// `prev.*` describes the preceding run - so a child's diagnostic spelled that
 /// way must not land as one. The filter lives here, at the scrape, and not on
 /// a row's kv as a whole: brokkr appends its own `meta.*` pairs to a result
-/// after the scrape (capture's exit code, the timing source, elivagar's
-/// detected mode), and a row-level check cannot tell them apart.
+/// after the scrape (capture's exit code, the timing source), and a row-level
+/// check cannot tell them apart.
 pub(crate) fn kv_line(line: &str) -> Option<(&str, &str)> {
     let (key, value) = field(line)?;
     if crate::db::KvKey::from_stored(key).class() != crate::db::KvClass::Counter {

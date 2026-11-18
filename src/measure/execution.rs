@@ -54,6 +54,7 @@ pub struct Iteration {
 }
 
 impl Iteration {
+    #[cfg(test)]
     pub fn from_result(result: BenchResult) -> Self {
         Self {
             result: Some(result),
@@ -186,7 +187,6 @@ impl MeasurementLoop<'_> {
 /// configured with.
 fn apply_wall_source(source: WallSource, iteration: &mut Iteration) -> Result<(), DevError> {
     match source {
-        WallSource::Closure => Ok(()),
         WallSource::External => match iteration.wall {
             Some(wall) => {
                 if let Some(result) = &mut iteration.result {

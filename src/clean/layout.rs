@@ -161,12 +161,6 @@ impl ProjectState {
         self.root.join("serve")
     }
 
-    /// Spill directory for the corpus digest's external sort. Each sorter
-    /// makes its own subdirectory here and removes it when dropped.
-    pub(crate) fn corpus_sort_dir(&self) -> PathBuf {
-        self.root.join("corpus-sort")
-    }
-
     pub(crate) fn ratatoskr(&self) -> RatatoskrLayout {
         RatatoskrLayout::new(&self.root)
     }
@@ -273,74 +267,6 @@ impl LitehtmlLayout {
     /// fixture's directory; one subdirectory per fixture, empty between runs.
     pub(crate) fn capture_staging(&self) -> &Path {
         &self.capture_staging
-    }
-}
-
-/// Elivagar's designated scratch and durable-output locations.
-pub(crate) struct ElivagarLayout<'a> {
-    paths: &'a config::ResolvedPaths,
-}
-
-impl<'a> ElivagarLayout<'a> {
-    pub(crate) fn new(paths: &'a config::ResolvedPaths) -> Self {
-        Self { paths }
-    }
-
-    pub(crate) fn scratch(&self) -> &Path {
-        &self.paths.scratch_dir
-    }
-
-    pub(crate) fn data_dir(&self) -> &Path {
-        &self.paths.data_dir
-    }
-
-    pub(crate) fn tilegen_output(&self) -> PathBuf {
-        self.scratch().join("bench-self-output.pmtiles")
-    }
-
-    pub(crate) fn tilegen_tmp(&self) -> PathBuf {
-        // The `--tmp-dir` argument passed to elivagar, under the data dir.
-        Self::tilegen_tmp_in(&self.paths.data_dir)
-    }
-
-    pub(crate) fn tilegen_tmp_in(data_dir: &Path) -> PathBuf {
-        data_dir.join("tilegen_tmp")
-    }
-
-    pub(crate) fn corpus_calibrands(&self) -> PathBuf {
-        Self::corpus_calibrands_in(&self.paths.data_dir)
-    }
-
-    pub(crate) fn corpus_calibrands_in(data_dir: &Path) -> PathBuf {
-        data_dir.join(super::CORPUS_CALIBRAND_DIR)
-    }
-
-    pub(crate) fn output(&self) -> &Path {
-        &self.paths.output_dir
-    }
-
-    pub(crate) fn planetiler_output(&self) -> PathBuf {
-        self.scratch().join("planetiler-bench.pmtiles")
-    }
-
-    pub(crate) fn planetiler_tmp(&self) -> PathBuf {
-        self.scratch().join("planetiler_tmp")
-    }
-
-    pub(crate) fn planetiler_sources(&self) -> PathBuf {
-        self.paths.data_dir.join("sources")
-    }
-
-    pub(crate) fn planetiler_primed_marker(&self) -> PathBuf {
-        self.planetiler_sources().join(".brokkr-primed")
-    }
-
-    pub(crate) fn tilemaker_output(&self) -> PathBuf {
-        self.scratch().join("tilemaker-bench.pmtiles")
-    }
-
-    pub(crate) fn datasets(&self) -> &HashMap<String, config::Dataset> {
-        &self.paths.datasets
     }
 }
 

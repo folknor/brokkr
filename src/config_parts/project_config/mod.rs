@@ -1,5 +1,4 @@
 pub mod dellingr;
-pub mod elivagar;
 pub mod litehtml;
 pub mod mogwai;
 pub mod piners;

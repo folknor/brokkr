@@ -313,23 +313,15 @@ gate or cannot name it.
 
 - A configured path can name it (a host's `scratch = ".brokkr"`, or another
   project's absolute scratch pointing here), so every recursive removal of a
-  configured directory goes through the overlap gate: the measured runner's scratch trees in every
-  project; in `brokkr clean`, elivagar's scratch, `tilegen_tmp` and corpus
-  calibrands and the ingest outputs the retired nidhogg commands left;
-  elivagar's tilegen removal of its
-  tmp dir. When that tmp dir is the scratch dir itself elivagar empties it
-  in the child, so it is checked against the gate before the launch; a check
-  suffices there because the global lock admits no new iteration between
-  the check and the child, and a pin that exists is refused. The gate is
-  per user, so another project's operand is refused as this project's is.
-- brokkr's other recursive removals and directory renames (tool caches,
-  staging directories, test-hung snapshots, the artifact store, litehtml
-  caches) target a fixed name under a fixed or configured directory, which
-  equals the container or an ancestor only if that fixed name is a
-  checkout's ancestor's, or a configured scratch puts the container inside
-  such a target (a scratch equal to or beneath a tool install or cache
-  under the data dir, such as `planetiler-bench-classes`, whose pruning
-  removes every entry but one); such a collision is outside the guarantee.
+  configured directory goes through the overlap gate: in `brokkr clean`, the
+  ingest outputs the retired nidhogg commands left. The gate is per user, so
+  another project's operand is refused as this project's is.
+- brokkr's other recursive removals and directory renames (staging
+  directories, test-hung snapshots, the artifact store, litehtml caches)
+  target a fixed name under a fixed or configured directory, which equals the
+  container or an ancestor only if that fixed name is a checkout's
+  ancestor's, or a configured scratch puts the container inside such a
+  target; such a collision is outside the guarantee.
   A container beside such a target, the default `data/scratch` or a
   scratch of `data` included, is covered.
   Worktree removal, whose target is a checkout, is gated already.

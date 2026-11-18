@@ -6,7 +6,7 @@ use super::bootstrap::{
 };
 use crate::clean::CleanOpts;
 use crate::clean::{cargo_clean_package, cmd_clean};
-use crate::cli::{Cli, Command, VerifyCommand};
+use crate::cli::{Cli, Command};
 use crate::command_args::{profile_choice, resolve_features};
 use crate::config::project_config::ProjectConfig;
 use crate::context::with_worktree;
@@ -15,14 +15,12 @@ use crate::error::DevError;
 use crate::generic_hotpath_cmd::cmd_hotpath_generic;
 use crate::lock_cmd::{cmd_kill, cmd_lock};
 use crate::passthrough_cmd::{RunOptions, cmd_run};
-use crate::pmtiles_stats_cmd::cmd_pmtiles_stats;
 use crate::project::Project;
 use crate::request::{CorpusQuery, ResultsQuery, SidecarQuery};
 use crate::visual_approve_cmd::cmd_approve;
 use crate::{
-    check_cmd, cli, context, crit_cmd, elivagar, history_cmd, invalidate_cmd, litehtml, lockfile,
-    measure, mogwai, output, piners, project, ratatoskr, results_cmd, runnables, sidecar_cmd,
-    sluggrs, test_cmd,
+    check_cmd, cli, context, crit_cmd, history_cmd, invalidate_cmd, litehtml, lockfile, mogwai,
+    output, piners, project, ratatoskr, results_cmd, runnables, sidecar_cmd, sluggrs, test_cmd,
 };
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
@@ -441,98 +439,18 @@ fn run_project(
             &detection.build_root,
             &detection.config_sources,
         ),
-        // ----- elivagar commands -----
-        Command::Tilegen {
-            mode,
-            dataset,
-            variant,
-            skip_to,
-        } => {
-            // The pipeline contract comes from the named block. Input
-            // assertions are attached later to the resolved PBF entry.
-            let tilegen = elivagar::resolve_tilegen(dev_config, elivagar::DEFAULT_TILEGEN)?;
-            let cmd = elivagar::commands::ElivagarCommand::Built(
-                elivagar::commands::BuiltCommand::MainBinary {
-                    tilegen,
-                    skip_to: skip_to.as_deref(),
-                },
-            );
-            run_measured(&mode, detection, &dataset, &variant, invocation, |req| {
-                measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd))
-            })
-        }
-        Command::PmtilesWriter { mode, tiles } => {
-            let cmd = elivagar::commands::ElivagarCommand::Built(
-                elivagar::commands::BuiltCommand::Example(
-                    elivagar::commands::ExampleCommand::PmtilesWriter { tiles },
-                ),
-            );
-            run_measured(
-                &mode,
-                detection,
-                cli::DEFAULT_DATASET,
-                cli::DEFAULT_RAW_VARIANT,
-                invocation,
-                |req| measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd)),
-            )
-        }
-        Command::NodeStore { mode, nodes } => {
-            let cmd = elivagar::commands::ElivagarCommand::Built(
-                elivagar::commands::BuiltCommand::Example(
-                    elivagar::commands::ExampleCommand::NodeStore { nodes },
-                ),
-            );
-            run_measured(
-                &mode,
-                detection,
-                cli::DEFAULT_DATASET,
-                cli::DEFAULT_RAW_VARIANT,
-                invocation,
-                |req| measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd)),
-            )
-        }
-        Command::ElivPlanetiler {
-            mode,
-            dataset,
-            variant,
-        } => {
-            let cmd = elivagar::commands::ElivagarCommand::External(
-                elivagar::commands::ExternalTool::Planetiler,
-            );
-            run_measured(&mode, detection, &dataset, &variant, invocation, |req| {
-                measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd))
-            })
-        }
-        Command::ElivTilemaker {
-            mode,
-            dataset,
-            variant,
-        } => {
-            let cmd = elivagar::commands::ElivagarCommand::External(
-                elivagar::commands::ExternalTool::Tilemaker,
-            );
-            run_measured(&mode, detection, &dataset, &variant, invocation, |req| {
-                measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd))
-            })
-        }
-
         // ----- mogwai commands -----
-        // Dataset/variant stay empty: brokkr does not know what a mogwai
-        // surface reads. An input the argv names is captured verbatim with it;
-        // one the surface defaults internally is named nowhere in the row.
+        // brokkr does not know what a mogwai surface reads. An input the argv
+        // names is captured verbatim with it; one the surface defaults
+        // internally is named nowhere in the row.
         Command::Mogwai { mode, target, args } => {
-            run_measured(&mode, detection, "", "", invocation, |req| {
+            run_measured(&mode, detection, invocation, |req| {
                 mogwai::cmd::run(req, target.as_deref(), &args)
             })
         }
 
-        // ----- sluggrs commands -----
         // ----- generic commands -----
-        Command::GenericHotpath {
-            mode,
-            dataset,
-            variant,
-        } => run_measured(&mode, detection, &dataset, &variant, invocation, |req| {
+        Command::GenericHotpath { mode } => run_measured(&mode, detection, invocation, |req| {
             if req.dry_run {
                 return Err(DevError::Usage(
                     "--dry-run is not yet supported for generic-hotpath".into(),
@@ -544,37 +462,6 @@ fn run_project(
                 ));
             }
             cmd_hotpath_generic(req)
-        }),
-
-        // ----- suites -----
-        Command::Suite {
-            mode,
-            name,
-            dataset,
-            variant,
-        } => run_measured(&mode, detection, &dataset, &variant, invocation, |req| {
-            if req.dry_run {
-                return Err(DevError::Usage(
-                    "--dry-run is not yet supported for suites".into(),
-                ));
-            }
-            if !matches!(
-                req.mode,
-                measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
-            ) {
-                return Err(DevError::Usage(
-                    "suite mode only supports wall-clock timing".into(),
-                ));
-            }
-            match name.as_str() {
-                "elivagar" => {
-                    project::require(project, &Project::Elivagar, "suite elivagar")?;
-                    elivagar::cmd::bench_all(req)
-                }
-                other => Err(DevError::Usage(format!(
-                    "unknown suite: {other} (expected: elivagar)"
-                ))),
-            }
         }),
         Command::Passthrough {
             features,
@@ -817,8 +704,15 @@ fn run_project(
             all,
             dry_run,
         } => {
+            if archives || keep.is_some() {
+                return Err(DevError::Usage(
+                    "brokkr clean --archives and --keep are retired: elivagar-devkit's \
+                     clean prunes elivagar's tilegen archive store"
+                        .into(),
+                ));
+            }
             let _lock = context::reenter_command_lock()?;
-            // `--all` folds in the worktrees, archives, and cargo sweeps.
+            // `--all` folds in the worktrees and cargo sweeps.
             let cargo = if all {
                 Some(cargo.unwrap_or(None))
             } else {
@@ -841,213 +735,10 @@ fn run_project(
                 CleanOpts {
                     cargo_swept,
                     worktrees: worktrees || all,
-                    archives: archives || all,
-                    keep,
                     dry_run,
                 },
             )
         }
-        Command::Verify {
-            verbose,
-            verify:
-                VerifyCommand::ElivVerify {
-                    dataset,
-                    variant,
-                    commit,
-                    file,
-                    geometry_stats,
-                    unique_payloads,
-                },
-        } => {
-            let features = resolve_features(dev_config, &[]);
-            output::set_quiet(!verbose);
-            // `verify pmtiles` only reads an archive, with the current binary,
-            // so it belongs to the resolver family (pmtiles-inspect/diag/svg/
-            // regress): no historical worktree, and its own `--commit` picks
-            // the file. It builds elivagar, so it takes the command lock.
-            let _lock = context::reenter_command_lock()?;
-            // The build and the verifier child both poll the shutdown flag.
-            let _interrupts = crate::shutdown::SigtermGuard::install();
-            elivagar::cmd::verify(
-                dev_config,
-                &detection.project_root,
-                &detection.build_root,
-                detection.config_sources.included(),
-                &dataset,
-                &variant,
-                commit.as_deref(),
-                file.as_deref(),
-                &features,
-                geometry_stats,
-                unique_payloads,
-            )
-        }
-        Command::CompareTiles {
-            file_a,
-            file_b,
-            sample,
-        } => {
-            // Native since the corpus redesign: it opens the two archives
-            // in-process, so there is no cargo build and no `cargo metadata`
-            // bootstrap to serialize behind the lock.
-            elivagar::cmd::compare_tiles(&file_a, &file_b, sample)
-        }
-        Command::PmtilesInspect {
-            dataset,
-            variant,
-            commit,
-            file,
-        } => {
-            // The lock serializes this with builds: it builds elivagar with
-            // cargo in the build tree.
-            let _lock = context::reenter_command_lock()?;
-            let _interrupts = crate::shutdown::SigtermGuard::install();
-            elivagar::cmd::inspect(
-                dev_config,
-                &detection.project_root,
-                &detection.build_root,
-                detection.config_sources.included(),
-                &dataset,
-                &variant,
-                commit.as_deref(),
-                file.as_deref(),
-            )
-        }
-        Command::Diag {
-            dataset,
-            variant,
-            commit,
-            file,
-            z,
-            x,
-            y,
-        } => {
-            let _lock = context::reenter_command_lock()?;
-            let _interrupts = crate::shutdown::SigtermGuard::install();
-            elivagar::cmd::diag(
-                dev_config,
-                &detection.project_root,
-                &detection.build_root,
-                detection.config_sources.included(),
-                &dataset,
-                &variant,
-                commit.as_deref(),
-                file.as_deref(),
-                z,
-                x,
-                y,
-            )
-        }
-        Command::Svg {
-            dataset,
-            variant,
-            commit,
-            file,
-            z,
-            x,
-            y,
-            width,
-            height,
-            layers,
-            output,
-        } => {
-            let _lock = context::reenter_command_lock()?;
-            let _interrupts = crate::shutdown::SigtermGuard::install();
-            elivagar::cmd::svg(
-                dev_config,
-                &detection.project_root,
-                &detection.build_root,
-                detection.config_sources.included(),
-                &dataset,
-                &variant,
-                commit.as_deref(),
-                file.as_deref(),
-                z,
-                x,
-                y,
-                width,
-                height,
-                layers.as_deref(),
-                output.as_deref(),
-            )
-        }
-        Command::Regress {
-            dataset,
-            variant,
-            commit,
-            file,
-            against_variant,
-            against_commit,
-            against,
-            tol,
-            max_moved,
-            max_examples,
-            overlay,
-            overlay_max,
-            json,
-        } => {
-            // Regress takes the command lock its spec gives it, though neither
-            // the archive resolution nor the in-process diff runs cargo.
-            // `operational`: a failure before any verdict (lock, resolution)
-            // exits regress's "could not complete" code, not 1.
-            elivagar::cmd::operational(elivagar::regress::INCOMPLETE_EXIT, || {
-                let _lock = context::reenter_command_lock()?;
-                elivagar::cmd::regress(
-                    dev_config,
-                    &detection.project_root,
-                    &detection.build_root,
-                    detection.config_sources.included(),
-                    &dataset,
-                    &variant,
-                    commit.as_deref(),
-                    file.as_deref(),
-                    &against_variant,
-                    against_commit.as_deref(),
-                    against.as_deref(),
-                    tol,
-                    max_moved,
-                    max_examples,
-                    overlay.as_deref(),
-                    overlay_max,
-                    json,
-                )
-            })
-        }
-        Command::PmtilesCorpus { cmd } => {
-            elivagar::cmd::operational(elivagar::corpus::INCOMPLETE_EXIT, || {
-                let _lock = context::reenter_command_lock()?;
-                elivagar::cmd::corpus(
-                    dev_config,
-                    &detection.project_root,
-                    &detection.build_root,
-                    detection.config_sources.included(),
-                    &cmd,
-                )
-            })
-        }
-        Command::DownloadOcean => {
-            let _lock = context::reenter_command_lock()?;
-            let _interrupts = crate::shutdown::SigtermGuard::install();
-            elivagar::cmd::download_ocean(dev_config, &detection.project_root)
-        }
-        Command::OceanBuild { dry_run } => {
-            let _lock = context::reenter_command_lock()?;
-            let _interrupts = crate::shutdown::SigtermGuard::install();
-            elivagar::ocean_build::run(
-                dev_config,
-                project,
-                &detection.project_root,
-                &detection.build_root,
-                dry_run,
-                Some(&_lock),
-            )
-        }
-        Command::DownloadNaturalEarth => {
-            let _lock = context::reenter_command_lock()?;
-            let _interrupts = crate::shutdown::SigtermGuard::install();
-            elivagar::cmd::download_natural_earth(dev_config, &detection.project_root)
-        }
-        Command::PmtilesStats { files } => cmd_pmtiles_stats(project, &files),
         // ----- visual testing commands (litehtml + sluggrs) -----
         Command::Visual { args, litehtml } => {
             // `visual` builds the renderer with cargo, so it takes the global
@@ -1172,11 +863,9 @@ fn run_project(
             selectors,
         } => litehtml::cmd::outline(project_root, &input, depth, full, selectors),
         // ----- sluggrs-only commands -----
-        Command::Hotpath { mode, target } => {
-            run_measured(&mode, detection, "", "", invocation, |req| {
-                sluggrs::hotpath::cmd(req, &target)
-            })
-        }
+        Command::Hotpath { mode, target } => run_measured(&mode, detection, invocation, |req| {
+            sluggrs::hotpath::cmd(req, &target)
+        }),
         // ----- ratatoskr-only commands -----
         Command::Service {
             script,

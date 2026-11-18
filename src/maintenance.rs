@@ -3,9 +3,8 @@
 //!
 //! Each target is named by construction by the store that makes it, and is
 //! made only by a command that holds the brokkr lock: a harness session
-//! directory (`check`, `test`), a nextest-lane generated config (`check`), a
-//! corpus-sort spill directory (`pmtiles-corpus`), an artifact staging copy
-//! (`build`, `run`). A fresh exclusive hold proves that no such command is
+//! directory (`check`, `test`), a nextest-lane generated config (`check`), an
+//! artifact staging copy (`build`, `run`). A fresh exclusive hold proves that no such command is
 //! live, and [`MaintenancePhase`], which only dispatch's own fresh
 //! acquisition carries, and only once, is consumed here before the command
 //! runs, so nothing this command makes can be swept. Removing a session's path
@@ -61,10 +60,6 @@ fn leftovers(state_root: Option<&Path>) -> Vec<PathBuf> {
                 crate::check_cmd::is_generated_config_name(&base, name)
             }));
         }
-        found.extend(children(
-            &state.corpus_sort_dir(),
-            crate::elivagar::corpus::sort::is_spill_dir_name,
-        ));
         found.extend(children(
             &state.artifacts_dir(),
             crate::runnables::is_staging_copy_name,
@@ -140,7 +135,6 @@ mod tests {
     #[test]
     fn each_store_recognises_only_its_own_leftover_names() {
         use crate::check_cmd::is_generated_config_name as config;
-        use crate::elivagar::corpus::sort::is_spill_dir_name as spill;
         use crate::runnables::is_staging_copy_name as staging;
         use crate::test_runner::is_session_dir_name as session;
         let synth = ProjectState::new(Path::new("/s")).nextest_synth_file();
@@ -152,8 +146,6 @@ mod tests {
         assert!(config(synth, "nextest-synth.4242-3.toml"));
         assert!(!config(synth, "nextest-synth.toml"));
         assert!(!config(synth, "nextest-sweep-env.4242-3.toml"));
-        assert!(spill("brokkr-corpus-sort-4242-7"));
-        assert!(!spill("brokkr-corpus-sort-x-7"));
         assert!(staging(".staging-4242-pbfhogg"));
         assert!(!staging(".staging-x-pbfhogg"));
         assert!(!staging(".staging-4242-"));
@@ -165,8 +157,6 @@ mod tests {
     fn leftovers_are_found_by_name_in_their_stores_only() {
         let root = crate::test_scratch::scratch("maintenance", "leftovers");
         let state = ProjectState::new(&root);
-        std::fs::create_dir_all(state.corpus_sort_dir().join("brokkr-corpus-sort-9-1")).unwrap();
-        std::fs::create_dir_all(state.corpus_sort_dir().join("mine")).unwrap();
         std::fs::create_dir_all(state.artifacts_dir()).unwrap();
         std::fs::write(state.artifacts_dir().join(".staging-9-tool"), b"x").unwrap();
         std::fs::write(state.root().join("nextest-synth.9-2.toml"), b"x").unwrap();
@@ -178,7 +168,6 @@ mod tests {
         found.sort();
         let mut expected = vec![
             state.artifacts_dir().join(".staging-9-tool"),
-            state.corpus_sort_dir().join("brokkr-corpus-sort-9-1"),
             state.root().join("nextest-synth.9-2.toml"),
         ];
         expected.sort();

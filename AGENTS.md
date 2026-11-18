@@ -18,7 +18,7 @@ The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bar
 - `docs/brokkr.toml.conventions.md` - convention gates: gremlins, textlint, script checks, manifest, rustdoc, fixture lints, dependency rules.
 - `docs/brokkr.toml.bench.md` - script bench config: `[bench.*]`, params and binding, the resolved view, `[bench_params.*]`, `[data]`, `bench_lib`, the `bench` check phase.
 - `docs/brokkr.toml.sweeps.md` - `[[check]]` and `[[lint_sweep]]` sweeps, `[test]` profiles, `[[quarantine]]`.
-- `docs/brokkr.toml.elivagar.md`, `docs/brokkr.toml.datasets.md`, `docs/brokkr.toml.piners.md` - project config blocks.
+- `docs/brokkr.toml.datasets.md`, `docs/brokkr.toml.piners.md` - project config blocks.
 - `docs/commands/check.md` - using `brokkr check`.
 - `docs/commands/check.test-lanes.md` - check's test phase and its lanes.
 - `docs/commands/check.hygiene.md` - time ceilings, `brokkr lock` and the lock queue, `brokkr kill`'s scope, strays and orphans, the rustc guard.
@@ -44,7 +44,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `src/lock/`, `src/hold.rs`, `src/guard.rs`, `src/stray.rs`, `src/test_orphans.rs` - the global lock, compile capability, rustc guard and reapers.
 - `src/measure/`, `src/harness.rs`, `src/db/`, `src/sidecar.rs` - measurement and result stores; `src/bench/store/` is the per-user store of script-bench runs, served over HTTP by `src/bin/results_server/` and reached by `src/bench/remote.rs`.
 - `src/bench/` - script benches: `runner/` runs `brokkr bench NAME`, `lua.rs` is the only seam to the dellingr VM.
-- `src/<project>/` - project-specific commands (pbfhogg has no typed command module).
+- `src/<project>/` - project-specific commands (pbfhogg, elivagar and nidhogg have no typed command module).
 
 ## Shared commands quick reference
 
@@ -57,7 +57,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `lock`, `strays [--kill]`, `guard [--install|--remove]`, `kill [--hard] [--project NAME | --all]` - lock status and queue, process hygiene, and stopping this project's commands (another project's only when named).
 - `sidecar <uuid>` - sidecar profiler data.
 - `fmt` - locked `cargo fmt` wrapper.
-- Project-specific: `corpus-results`, `mogwai`, `hotpath`, `pmtiles-stats`, `pmtiles-corpus`, `ocean-build` - see the project docs.
+- Project-specific: `corpus-results`, `mogwai`, `hotpath` - see the project docs.
 
 ## Conventions
 

@@ -9,10 +9,10 @@ pub(crate) use tree_state::TreeState;
 
 /// Width, in hex digits, of every abbreviated commit hash brokkr stores or
 /// names something by: results rows, `--commit` worktree names, bench
-/// baselines, tilegen archives. Matches the crate's own `build.rs` stamp.
+/// baselines. Matches the crate's own `build.rs` stamp.
 ///
 /// Fixed rather than `git rev-parse --short`'s default, which grows with the
-/// repo (7, then 8, ...): the same commit got a new worktree/baseline/archive
+/// repo (7, then 8, ...): the same commit got a new worktree/baseline
 /// name once the repo crossed a threshold, orphaning the old one, and a hash
 /// copied at one width failed to find artefacts named at another. Truncation
 /// of the full hash, not `--short=9`, because `--short=N` still lengthens an
@@ -125,7 +125,7 @@ impl fmt::Display for ShortCommit {
 
 /// Resolve `rev` to the commit it names, peeling tags. The single entry point
 /// for turning a user-typed revision into brokkr's commit identity, so a hash
-/// pasted at any width names the same worktree, baseline and archive.
+/// pasted at any width names the same worktree and baseline.
 pub fn resolve_commit(repo: &Path, rev: &str) -> Result<Commit, DevError> {
     let spec = format!("{rev}^{{commit}}");
     let output = crate::output::child::command_output(
@@ -217,18 +217,6 @@ pub struct GitInfo {
     pub subject: String,
     /// True when the tree is clean under the measurement policy.
     pub is_clean: bool,
-}
-
-/// Collect git information from the working directory without loading brokkr
-/// configuration. The root `brokkr.toml` remains exempt from the measurement
-/// policy; included files count as ordinary changes because their paths are
-/// unavailable without config provenance, so `is_clean` here is only fit for
-/// a caller that does not read it (one that wants the commit alone). Anything
-/// that gates on or records cleanliness must use
-/// [`collect_with_config_paths`] with the composed config's included files
-/// (`DevConfig::included_config_files`, or `Detection::config_sources`).
-pub fn collect(workspace_root: &Path) -> Result<GitInfo, DevError> {
-    collect_with_config_paths(workspace_root, &[])
 }
 
 /// Collect git information using the already-resolved paths of included

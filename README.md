@@ -13,16 +13,12 @@ cargo install --path ~/Programs/brokkr
 
 ## How it works
 
-Run `brokkr` from any project root. It reads `./brokkr.toml` to detect the project and resolve datasets, paths, and host-specific configuration. Project-specific commands are gated by that detected project, so a tilegen command from pbfhogg's root produces a clear error. Shared Rust tooling such as `check` also works in any Rust+git repo, with or without `brokkr.toml`.
+Run `brokkr` from any project root. It reads `./brokkr.toml` to detect the project and resolve datasets, paths, and host-specific configuration. Project-specific commands are gated by that detected project, so a ratatoskr command such as `sync` from pbfhogg's root produces a clear error. Shared Rust tooling such as `check` also works in any Rust+git repo, with or without `brokkr.toml`.
 
 ```
 cd ~/Programs/pbfhogg
 brokkr bench                                      # list script benches
 brokkr bench NAME                                 # run a declared bench
-
-cd ~/Programs/elivagar
-brokkr tilegen --dataset denmark --bench            # full pipeline benchmark
-brokkr pmtiles-writer --hotpath                     # micro-benchmark hotpath
 
 cd ~/Programs/litehtml-rs
 brokkr visual --all                                 # visual reference tests
@@ -102,17 +98,7 @@ results remain readable.
 
 ### elivagar
 
-| Command | Description |
-|---------|-------------|
-| `tilegen` | Full tile generation pipeline (with all pipeline flags) |
-| `pmtiles-writer` | PMTiles writer micro-benchmark (`--tiles N`) |
-| `node-store` | SortedNodeStore micro-benchmark (`--nodes N`) |
-| `planetiler` | Planetiler comparison |
-| `tilemaker` | Tilemaker comparison |
-
-`suite elivagar` runs the full benchmark suite.
-
-**Other**: `compare-tiles`, `download-ocean`, `download-natural-earth`, `pmtiles-stats` (PMTiles v3 file statistics).
+brokkr has no elivagar commands. elivagar keeps its tooling in-tree: its own crates (the corpus gate, `elivagar-devkit`, datasets, and `elivagar-tools`, which installs the competitor tools) run through the generic `run`, and it measures through script benches (`brokkr bench`, including `brokkr bench planetiler` and `brokkr bench tilemaker`). Its host keys (`[<host>.tilegen.<name>]`, `output`, and the PBF entry's `locations_on_ways` and `force_sorted`) still load, and its script benches read them from the resolved view. Historical typed-command results remain readable.
 
 ### nidhogg
 
@@ -229,11 +215,11 @@ brokkr results --compare a65a 911c                  # compare two commits side-b
 
 Columns that drive the filters:
 
-- `command` - the bare subcommand id (`read`, `cat`, `diff-snapshots`, `tilegen`, …); no `bench `/`hotpath ` prefix.
+- `command` - the bare subcommand id (`read`, `cat`, `diff-snapshots`, `tilegen`, … on historical rows); no `bench `/`hotpath ` prefix.
 - `mode` - the measurement mode only (`bench` / `hotpath` / `alloc`).
-- `cli_args` - literal subprocess argv (pbfhogg/elivagar). Every flag and axis the user passed is here verbatim.
+- `cli_args` - literal subprocess argv. Every flag and axis the user passed is here verbatim.
 - `brokkr_args` - literal `brokkr <...>` invocation the user typed. Same-column-dual-view, recorded so `--grep` can find either.
-- `meta.*` (via `--meta KEY=VALUE`) - runtime observations only: resolved paths, detected modes, cache hit/miss. Anything derivable from `cli_args` or `brokkr_args` is NOT duplicated here. `meta.` prefix is implicit; multiple `--meta` flags AND together; rows missing the requested key are silently excluded. Available keys depend on the command - e.g. `diff` emits `meta.merged_cache` + `meta.merged_cache_age_s`; elivagar's `tilegen` emits `meta.locations_on_ways_detected`; historical `meta.format`/`meta.index_type`/`meta.start_stage` keys were migrated out in v13 (they live in `cli_args` now).
+- `meta.*` (via `--meta KEY=VALUE`) - runtime observations only: resolved paths, detected modes, cache hit/miss. Anything derivable from `cli_args` or `brokkr_args` is NOT duplicated here. `meta.` prefix is implicit; multiple `--meta` flags AND together; rows missing the requested key are silently excluded. Available keys depend on the command - e.g. historical pbfhogg `diff` rows carry `meta.merged_cache` + `meta.merged_cache_age_s`, and historical elivagar `tilegen` rows `meta.locations_on_ways_detected`; historical `meta.format`/`meta.index_type`/`meta.start_stage` keys were migrated out in v13 (they live in `cli_args` now).
 
 Use `--grep` for anything that's a flag/axis (`--grep zstd:1`, `--grep 'snapshot 20260411'`, `--grep 'index-type external'`). Use `--meta` for genuine runtime observations.
 
@@ -266,17 +252,14 @@ Sidecar-only UUIDs (dirty-tree or failed runs with no results DB row) are picked
 By default, every measurable command builds and runs once with timing output - no DB, no harness overhead:
 
 ```
-brokkr tilegen --dataset denmark
-# [run] /path/to/elivagar tilegen ...
-# ... command output ...
-# [run] elapsed=1234ms
+brokkr mogwai -- gen --type summary --seed 1
 ```
 
 Add `--bench` to enable the full harness with DB storage:
 
 ```
-brokkr tilegen --dataset denmark --bench    # benchmark and store per-iteration results
-brokkr tilegen --dataset denmark --bench 10 # 10 runs
+brokkr mogwai --bench -- gen --type summary --seed 1     # benchmark and store per-iteration results
+brokkr mogwai --bench 10 -- gen --type summary --seed 1  # 10 runs
 ```
 
 For ad-hoc passthrough with raw args: `brokkr passthrough -- <args>`.

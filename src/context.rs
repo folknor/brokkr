@@ -100,7 +100,6 @@ pub(crate) fn bootstrap_config(
 /// One lock, path resolution and measurement provenance for a command.
 /// A build is optional; external tools and HTTP lifecycles use the same session.
 pub(crate) struct MeasurementSession {
-    pub(crate) paths: config::ResolvedPaths,
     pub(crate) harness: harness::BenchHarness,
     /// The artifact a build-shaped session produced; its identity is on the
     /// harness, which stamps every row with it.
@@ -141,23 +140,8 @@ pub(crate) fn worktree_keep(dev_config: &config::DevConfig) -> Result<usize, Dev
 }
 
 impl MeasurementSession {
-    /// Create a measurement session using the dirty-tree policy for this request.
-    /// The policy must be applied before `BenchHarness` is constructed, since
-    /// its constructor performs the dirty-tree check.
-    pub(crate) fn new_for_request(
-        req: &crate::measure::MeasureRequest<'_>,
-    ) -> Result<Self, DevError> {
-        Self::new(
-            req.dev_config,
-            req.project.clone(),
-            req.project_root,
-            req.build_root,
-            DirtyPolicy::for_request(req).allowed(),
-            req.stop_marker.map(str::to_owned),
-        )
-        .and_then(|ctx| ctx.with_request(req))
-    }
-
+    /// The dirty-tree policy must be applied before `BenchHarness` is
+    /// constructed, since its constructor performs the dirty-tree check.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         dev_config: &config::DevConfig,
@@ -189,7 +173,6 @@ impl MeasurementSession {
             stop_marker,
         )?;
         Ok(Self {
-            paths,
             harness,
             binary: None,
         })
@@ -351,12 +334,6 @@ impl MeasurementSession {
             .as_ref()
             .map(|artifact| artifact.path.as_path())
             .ok_or_else(|| DevError::Internal("session has no built executable".into()))
-    }
-
-    /// The built executable as the measure runner hands it to a plan, tagged
-    /// with its resolved path.
-    pub(crate) fn executable(&self) -> Result<crate::measure::Executable<'_>, DevError> {
-        Ok(crate::measure::Executable::new(self.binary()?))
     }
 }
 

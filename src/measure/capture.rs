@@ -115,26 +115,11 @@ impl BenchHarness {
         })
     }
 
-    /// A fresh path for one instrumented child's hotpath report, unique per
-    /// launch, so a child that outlived its run can never write the next
-    /// run's report. The caller removes it after capturing the sample.
-    pub(crate) fn new_hotpath_report_path(&self) -> Result<std::path::PathBuf, DevError> {
-        let token = crate::lockfile::RunToken::mint()
-            .ok_or_else(|| DevError::Internal("no entropy for a hotpath report name".into()))?;
-        let name = crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES.hotpath_report_filename;
-        let (stem, ext) = name.rsplit_once('.').unwrap_or((name, "json"));
-        Ok(self
-            .state
-            .root()
-            .join(format!("{stem}-{}.{ext}", token.as_str())))
-    }
-
     /// Capture an instrumented child. A missing or malformed report fails the
     /// iteration, while its output and sidecar remain available for diagnosis.
     /// An unreserved launch: the report has one fixed name, cleared before and
-    /// after, so a killed run leaves at most that one file; a reserved launch
-    /// uses [`capture_hotpath_into`](Self::capture_hotpath_into) with a fresh
-    /// name it declares. Beyond the shared spawn policy, the child gets only
+    /// after, so a killed run leaves at most that one file. Beyond the shared
+    /// spawn policy, the child gets only
     /// the profiler's variables and the marker FIFO; it completes on exit 0
     /// or a fired `--stop` marker, and runs without a deadline.
     pub fn capture_hotpath(
@@ -169,17 +154,13 @@ impl BenchHarness {
     }
 
     /// [`capture_hotpath`](Self::capture_hotpath) writing the report to
-    /// `report`, a fresh path the caller removes afterwards.
+    /// `report`, a path the caller removes afterwards.
     ///
-    /// There is no per-command environment here, by design: a project
-    /// variable set beside the planned invocation is invisible to dry run and
-    /// to the row, while that invocation's own environment is refused by the
-    /// measure runner. elivagar's `ELIVAGAR_NODE_STATS=1` was the last one,
-    /// set on every tilegen hotpath and alloc run long after elivagar
-    /// deleted its reader (elivagar ab935ff); a variable a command needs
-    /// belongs in its invocation.
+    /// There is no per-command environment here, by design: a variable set
+    /// beside the invocation is invisible to dry run and to the row, so a
+    /// variable a command needs belongs in its invocation.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn capture_hotpath_into(
+    fn capture_hotpath_into(
         &self,
         program: &Path,
         args: &[&str],

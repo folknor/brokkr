@@ -216,12 +216,12 @@ the holder itself over its control socket, so it works from the host against a
 sandboxed holder and between sandboxes:
 
 ```
-[lock]    brokkr (holding 29m24s, own CPU 1.2s, own RSS 19 MB): elivagar verify pmtiles ...
+[lock]    brokkr (holding 29m24s, own CPU 1.2s, own RSS 19 MB): elivagar bench tilegen ...
 [lock]    root: ...
-[lock]    doing: verify pmtiles (29m10s)
-[lock]      verify (3m02s)
+[lock]    doing: bench tilegen (29m10s)
+[lock]      iteration (3m02s)
 [lock]    processes: 1 observed (sampled 248ms ago over 254ms): 0.98 cores, summed RSS 4.1 GB
-[lock]      PID 4242 elivagar ... - 0.98 cores, CPU 2m55s, RSS 4.1 GB, up 3m02s, io r 2.1 GB w 800 MB [under verify pmtiles]
+[lock]      PID 4242 elivagar ... - 0.98 cores, CPU 2m55s, RSS 4.1 GB, up 3m02s, io r 2.1 GB w 800 MB [under bench tilegen]
 [lock]    cgroup brokkr-...: CPU 1h02m since entry 29m ago, now 1.01 cores, 3 member process(es)
 [lock]    last marker: STAGE2_START (12s ago)
 ```

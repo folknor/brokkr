@@ -215,15 +215,6 @@ pub(crate) fn cache_domain_cores_or_default_at(
     u32::try_from(n).unwrap_or(u32::MAX).max(1)
 }
 
-/// Threads this process may run in parallel, or a fixed guess of 4 when the
-/// platform cannot say. The one place that guess lives.
-pub(crate) fn available_parallelism_or_default() -> usize {
-    available_parallelism_or_default_with(
-        DEFAULT_CPU_TOPOLOGY_TUNABLES.fallback_parallelism,
-        std::thread::available_parallelism,
-    )
-}
-
 /// Resolve the fallback with an injectable OS probe and its explicit default.
 pub(crate) fn available_parallelism_or_default_with(
     fallback: usize,

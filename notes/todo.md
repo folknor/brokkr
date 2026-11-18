@@ -501,16 +501,12 @@ With 55+ top-level commands, `--help` is a wall of text. `display_order` groups 
 
 ## CLI sync backlog
 
-### elivagar: memory-budget run flags not exposed
+### `BenchConfig::external_build` and `arm_qualifier` have no producer left
 
-`--sort-budget`, `--way-budget`, `--rel-budget`, `--assemble-budget` -
-tuning knobs that aren't forwarded through `bench self` / `hotpath` /
-`alloc`. Lower priority than the structural flags which are already
-wired (tile-format, tile-compression, compress-sort-chunks, in-memory,
-locations-on-ways). No schema changes needed: `bench_self.rs` stores
-flags as `meta.*` kv pairs in `run_kv` and the full command line in
-`cli_args`. New flags just need CLI plumbing + `KvPair::text("meta.<flag>",
-...)` entries in the metadata vec.
+With elivagar's typed commands gone, every `BenchConfig` sets both to `None`
+(generic-hotpath, mogwai, sluggrs hotpath, ratatoskr sync). They and the
+recording path's handling of them could go; the stored `cargo_profile`
+values `java`/`cmake` and qualified arm keys must keep reading either way.
 
 ### `dataset` column is derived from the filename, not stored
 

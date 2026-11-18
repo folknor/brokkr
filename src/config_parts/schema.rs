@@ -1771,13 +1771,10 @@ pub struct ProfileDef {
 
 /// A single PBF file entry (one variant like raw, indexed, altw).
 ///
-/// `locations_on_ways` and `force_sorted` are assertions about *this file*,
-/// not about a pipeline config: one says the PBF carries node coordinates
-/// embedded in ways, the other that its nodes are monotonic. Elivagar reads
-/// both from the PBF header and the flags only force what the header fails to
-/// declare, so they belong with the variant that has the property rather than
-/// in a `[<host>.tilegen.<name>]` block - a block would otherwise have to know
-/// which variant it was about to be run against.
+/// `locations_on_ways` and `force_sorted` are assertions about *this file*:
+/// one says the PBF carries node coordinates embedded in ways, the other that
+/// its nodes are monotonic. brokkr reads neither; elivagar's own tools read
+/// them from the composed config.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
@@ -1785,10 +1782,8 @@ pub struct PbfEntry {
     pub file: String,
     pub xxhash: Option<FileDigest>,
     pub seq: Option<u64>,
-    /// Force `--locations-on-ways` when the PBF header does not declare it.
     #[serde(default)]
     pub locations_on_ways: bool,
-    /// Force the compact node store without the PBF sort header.
     #[serde(default)]
     pub force_sorted: bool,
     /// Accepted and validated for config compatibility; unused by brokkr.
@@ -2047,71 +2042,6 @@ impl Dataset {
     }
 }
 
-/// One ocean input, in elivagar's `--ocean` spec spelling.
-///
-/// Shapefiles name the zoom band they serve; the artifact is a bare path. The
-/// band is part of the statement rather than implied by the flag name, so the
-/// recorded invocation says what coverage it claims.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OceanSpec {
-    /// `z0-z14:<file.shp>` - one shapefile serves every zoom.
-    ShapefileAll(String),
-    /// `z0-z7:<file.shp>` - the pre-generalized low-zoom shapefile.
-    ShapefileLow(String),
-    /// `z8-z14:<file.shp>` - the full-resolution shapefile.
-    ShapefileHigh(String),
-    /// `<file.pmtiles>` - the precomputed world-ocean artifact.
-    Artifact(String),
-}
-
-impl OceanSpec {
-    /// Parse one brokkr.toml `ocean` entry.
-    ///
-    /// Paths are bare (relative to the host's `data` dir) here; the `data/`
-    /// prefix in elivagar's own docs belongs to raw shell invocations. Every
-    /// other path in brokkr.toml resolves against `data`, and a `data/`-
-    /// prefixed one would silently break on a host whose data dir is not
-    /// literally `data`.
-    pub fn parse(raw: &str) -> Result<Self, String> {
-        match raw.split_once(':') {
-            Some(("z0-z14", f)) => Ok(Self::ShapefileAll(f.to_owned())),
-            Some(("z0-z7", f)) => Ok(Self::ShapefileLow(f.to_owned())),
-            Some(("z8-z14", f)) => Ok(Self::ShapefileHigh(f.to_owned())),
-            Some((band, _)) => Err(format!(
-                "unknown zoom band '{band}': elivagar implements one split, at \
-                 z7/z8, so the only accepted bands are z0-z14, z0-z7 and z8-z14"
-            )),
-            None if raw.ends_with(".pmtiles") => Ok(Self::Artifact(raw.to_owned())),
-            None if raw.ends_with(".shp") => Err(format!(
-                "shapefile '{raw}' needs a zoom band prefix (z0-z14:, z0-z7: or z8-z14:)"
-            )),
-            None => Err(format!(
-                "'{raw}' is neither a zoom-banded shapefile nor a .pmtiles artifact"
-            )),
-        }
-    }
-
-    /// The bare path this spec names.
-    pub fn file(&self) -> &str {
-        match self {
-            Self::ShapefileAll(f)
-            | Self::ShapefileLow(f)
-            | Self::ShapefileHigh(f)
-            | Self::Artifact(f) => f,
-        }
-    }
-
-    /// Re-render as an elivagar `--ocean` value, with `file` substituted.
-    pub fn render(&self, file: &str) -> String {
-        match self {
-            Self::ShapefileAll(_) => format!("z0-z14:{file}"),
-            Self::ShapefileLow(_) => format!("z0-z7:{file}"),
-            Self::ShapefileHigh(_) => format!("z8-z14:{file}"),
-            Self::Artifact(_) => file.to_owned(),
-        }
-    }
-}
-
 impl DevConfig {
     /// Worktree retention for `hostname`, or the default.
     pub fn worktree_keep(&self, hostname: &str) -> usize {
@@ -2128,13 +2058,9 @@ impl DevConfig {
 pub struct HostConfig {
     pub data: Option<String>,
     pub scratch: Option<String>,
-    /// Durable, commit-addressable tilegen output store (map-data projects).
-    /// Defaults to `data/tilegen`. Kept SEPARATE from `scratch` on purpose:
-    /// elivagar wipes its `--tmp-dir` (`<data>/tilegen_tmp`) at every run
-    /// start, and on some hosts `scratch` is configured to that same dir, so
-    /// renamed `<dataset>-<commit>.pmtiles` archives written into scratch were
-    /// destroyed by the next run. `output` is never wiped by a run; retention
-    /// bounds its growth instead.
+    /// elivagar's durable tilegen output store. brokkr reads nothing from it;
+    /// elivagar's own tools read it from the resolved view, which defaults
+    /// it to `data/tilegen`.
     pub output: Option<String>,
     pub target: Option<String>,
     /// How many persistent `--commit` worktrees to keep for this project
@@ -2147,7 +2073,7 @@ pub struct HostConfig {
     /// Retired: it bounded pbfhogg's verify reference cache, which no
     /// command writes any more. Still accepted so a config that sets it loads;
     /// nothing reads it.
-    pub verify_reference_budget: Option<crate::elivagar::tilegen_config::ByteSize>,
+    pub verify_reference_budget: Option<ByteSize>,
     /// A port for the project's own tools: nidhogg's read it from the
     /// composed config. No built-in command reads it; a script bench sees it
     /// in the resolved view.
@@ -2158,11 +2084,55 @@ pub struct HostConfig {
     pub features: Vec<String>,
     #[serde(default)]
     pub datasets: HashMap<String, Dataset>,
-    /// Named elivagar tilegen contracts (map-data projects). `tilegen` selects
-    /// `default`; there is no override flag, and no block is an error rather
-    /// than an implicit bare run.
+    /// `[<host>.tilegen.<name>]` blocks. elivagar's own tools read them, a
+    /// script bench through the resolved view; brokkr keeps them as opaque
+    /// tables so a host that declares one loads.
     #[serde(default)]
-    pub tilegen: HashMap<String, project_config::elivagar::TilegenConfig>,
+    pub tilegen: toml::Table,
+}
+
+/// A byte count parsed from a config string: raw bytes, or an `M`/`G`
+/// (MiB/GiB) suffix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ByteSize(usize);
+
+impl std::str::FromStr for ByteSize {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        const MIB: usize = 1_024 * 1_024;
+
+        let value = value.trim();
+        let (digits, multiplier) = if let Some(digits) =
+            value.strip_suffix('M').or_else(|| value.strip_suffix('m'))
+        {
+            (digits, MIB)
+        } else if let Some(digits) = value.strip_suffix('G').or_else(|| value.strip_suffix('g')) {
+            (digits, MIB * 1_024)
+        } else {
+            (value, 1)
+        };
+        let digits = digits
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| format!("expected bytes, MiB (M), or GiB (G), got {value:?}"))?;
+        digits
+            .checked_mul(multiplier)
+            .map(Self)
+            .ok_or_else(|| format!("byte size overflows this platform: {value:?}"))
+    }
+}
+
+impl<'de> Deserialize<'de> for ByteSize {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(D::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2225,10 +2195,6 @@ pub struct ResolvedPaths {
     pub hostname: String,
     pub data_dir: PathBuf,
     pub scratch_dir: PathBuf,
-    /// Durable tilegen output store (default `<root>/data/tilegen`). Distinct
-    /// from `scratch_dir` so run-to-run tmp wipes never destroy archives that
-    /// `--commit` resolution and `regress`/`bless` depend on.
-    pub output_dir: PathBuf,
     pub drives: Option<DriveConfig>,
     pub features: Vec<String>,
     pub datasets: HashMap<String, Dataset>,

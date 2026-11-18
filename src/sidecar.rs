@@ -1072,14 +1072,6 @@ fn read_proc_status(pid: u32) -> Option<ProcStatus> {
     parse_proc_status(&contents)
 }
 
-/// This process's peak resident set (`VmHWM`, kB) through the same status
-/// parser the sampler uses. `None` when it cannot be read or is not reported.
-pub(crate) fn self_peak_rss_kb() -> Option<u64> {
-    let contents = fs::read_to_string("/proc/self/status").ok()?;
-    let kb = parse_proc_status(&contents)?.vm_hwm_kb;
-    u64::try_from(kb).ok().filter(|kb| *kb > 0)
-}
-
 fn parse_proc_status(contents: &str) -> Option<ProcStatus> {
     let mut status = ProcStatus {
         vm_rss_kb: 0,

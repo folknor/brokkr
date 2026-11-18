@@ -1343,7 +1343,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 drives: None,
                 features: Vec::new(),
                 datasets: host_ds,
-                tilegen: HashMap::new(),
+                tilegen: toml::Table::new(),
                 worktree_keep: None,
                 verify_reference_budget: None,
             },
@@ -1387,7 +1387,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 drives: None,
                 features: Vec::new(),
                 datasets: HashMap::new(),
-                tilegen: HashMap::new(),
+                tilegen: toml::Table::new(),
                 worktree_keep: None,
                 verify_reference_budget: None,
             },
@@ -1450,7 +1450,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 drives: None,
                 features: Vec::new(),
                 datasets: host_ds,
-                tilegen: HashMap::new(),
+                tilegen: toml::Table::new(),
                 worktree_keep: None,
                 verify_reference_budget: None,
             },
@@ -1500,7 +1500,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 drives: None,
                 features: Vec::new(),
                 datasets: host_ds,
-                tilegen: HashMap::new(),
+                tilegen: toml::Table::new(),
                 worktree_keep: None,
                 verify_reference_budget: None,
             },
@@ -1672,7 +1672,7 @@ xxhash = "000000000000000000000000feedface"
             drives: None,
             features: Vec::new(),
             datasets: HashMap::new(),
-            tilegen: HashMap::new(),
+            tilegen: toml::Table::new(),
                 worktree_keep: None,
                 verify_reference_budget: None,
         };
@@ -1720,7 +1720,7 @@ xxhash = "000000000000000000000000feedface"
             drives: None,
             features: Vec::new(),
             datasets: HashMap::new(),
-            tilegen: HashMap::new(),
+            tilegen: toml::Table::new(),
                 worktree_keep: None,
                 verify_reference_budget: None,
         };
@@ -3007,123 +3007,34 @@ profile = "corpus"
     }
 
     // -----------------------------------------------------------------------
-    // [<host>.tilegen.<name>] ocean statements
+    // elivagar's host keys, read by its own tools
     // -----------------------------------------------------------------------
 
-    fn hosts_with_ocean(ocean: &[&str]) -> HashMap<String, HostConfig> {
-        let mut tilegen = HashMap::new();
-        tilegen.insert(
-            "default".into(),
-            project_config::elivagar::TilegenConfig {
-                ocean: ocean
-                    .iter()
-                    .map(|spec| OceanSpec::parse(spec).expect("valid ocean spec"))
-                    .collect(),
-                ..Default::default()
-            },
-        );
-        let mut hosts = HashMap::new();
-        hosts.insert(
-            "myhost".into(),
-            HostConfig {
-                data: None,
-                scratch: None,
-                output: None,
-                target: None,
-                port: None,
-                drives: None,
-                features: Vec::new(),
-                datasets: HashMap::new(),
-                tilegen,
-                worktree_keep: None,
-                verify_reference_budget: None,
-            },
-        );
-        hosts
-    }
-
-    const LOW: &str = "z0-z7:simplified.shp";
-    const HIGH: &str = "z8-z14:full.shp";
-    const ALL: &str = "z0-z14:full.shp";
-    const ARTIFACT: &str = "ocean-tiles.pmtiles";
-
+    /// elivagar's tools read `[<host>.tilegen.<name>]`, `output` and the PBF
+    /// entry's `locations_on_ways` and `force_sorted` from the composed
+    /// config, so a host declaring them keeps loading. A tilegen block alone
+    /// is host content, not an empty section.
     #[test]
-    fn ocean_accepts_the_two_legal_partitions() {
-        assert!(validate_tilegen(&hosts_with_ocean(&[LOW, HIGH])).is_ok());
-        assert!(validate_tilegen(&hosts_with_ocean(&[ALL])).is_ok());
-        assert!(validate_tilegen(&hosts_with_ocean(&[LOW, HIGH, ARTIFACT])).is_ok());
-        assert!(validate_tilegen(&hosts_with_ocean(&[ALL, ARTIFACT])).is_ok());
-    }
-
-    /// Omitting `ocean` entirely is the statement elivagar's removed
-    /// `--no-ocean` used to make, so it must stay legal.
-    #[test]
-    fn ocean_absent_means_no_ocean() {
-        assert!(validate_tilegen(&hosts_with_ocean(&[])).is_ok());
-    }
-
-    /// The z7/z8 split is the only one `ocean::selected_pass_grid` implements.
-    /// A partial partition must be refused rather than quietly served at z7.
-    #[test]
-    fn ocean_rejects_a_partial_partition() {
-        let err = validate_tilegen(&hosts_with_ocean(&[LOW])).unwrap_err();
-        assert!(format!("{err}").contains("partition z0-z14 exactly"));
-
-        let err = validate_tilegen(&hosts_with_ocean(&[HIGH])).unwrap_err();
-        assert!(format!("{err}").contains("partition z0-z14 exactly"));
-    }
-
-    #[test]
-    fn ocean_rejects_an_unimplemented_band() {
-        let err = OceanSpec::parse("z0-z5:simplified.shp").unwrap_err();
-        assert!(err.contains("z0-z5"));
-    }
-
-    #[test]
-    fn ocean_rejects_overlapping_bands() {
-        let err = validate_tilegen(&hosts_with_ocean(&[ALL, LOW, HIGH])).unwrap_err();
-        assert!(format!("{err}").contains("partition z0-z14 exactly"));
-    }
-
-    #[test]
-    fn ocean_rejects_a_band_named_twice() {
-        let err = validate_tilegen(&hosts_with_ocean(&[LOW, "z0-z7:other.shp", HIGH])).unwrap_err();
-        assert!(format!("{err}").contains("named twice"));
-    }
-
-    /// The artifact is a cache over the shapefiles, not a substitute: an
-    /// extract computes its boundary band from them, and the artifact's key is
-    /// validated by re-hashing them.
-    #[test]
-    fn ocean_rejects_a_lone_artifact() {
-        let err = validate_tilegen(&hosts_with_ocean(&[ARTIFACT])).unwrap_err();
-        assert!(format!("{err}").contains("cannot stand alone"));
-    }
-
-    #[test]
-    fn ocean_rejects_two_artifacts() {
-        let err =
-            validate_tilegen(&hosts_with_ocean(&[LOW, HIGH, ARTIFACT, "other.pmtiles"])).unwrap_err();
-        assert!(format!("{err}").contains("at most one"));
-    }
-
-    #[test]
-    fn ocean_rejects_a_shapefile_without_a_band() {
-        let err = OceanSpec::parse("full.shp").unwrap_err();
-        assert!(err.contains("needs a zoom band prefix"));
-    }
-
-    #[test]
-    fn ocean_spec_round_trips_its_band() {
-        assert_eq!(OceanSpec::parse(LOW).unwrap().file(), "simplified.shp");
-        assert_eq!(
-            OceanSpec::parse(LOW).unwrap().render("/data/simplified.shp"),
-            "z0-z7:/data/simplified.shp"
-        );
-        assert_eq!(
-            OceanSpec::parse(ARTIFACT).unwrap().render("/data/ocean-tiles.pmtiles"),
-            "/data/ocean-tiles.pmtiles"
-        );
+    fn elivagar_host_keys_still_load() {
+        let body = r#"
+project = "elivagar"
+[h.tilegen.default]
+ocean = ["z0-z7:simplified.shp", "z8-z14:full.shp"]
+compression_level = 6
+sort_budget = "1G"
+[o]
+output = "data/tilegen"
+[d.datasets.dk.pbf.raw]
+file = "dk.pbf"
+locations_on_ways = true
+force_sorted = true
+"#;
+        let root: toml::Value = toml::from_str(body).unwrap();
+        let hosts = parse_hosts(root.as_table().unwrap()).unwrap();
+        assert!(hosts["h"].tilegen.contains_key("default"));
+        assert_eq!(hosts["o"].output.as_deref(), Some("data/tilegen"));
+        let raw = &hosts["d"].datasets["dk"].pbf["raw"];
+        assert!(raw.locations_on_ways && raw.force_sorted);
     }
 
     // -------------------------------------------------------------------
@@ -3406,7 +3317,8 @@ profile = "corpus"
         assert_eq!(cfg.hosts["pbfhogg"].data.as_deref(), Some("d"));
         assert!(project_config::ProjectConfig::parse(&Project::Pbfhogg, &table).is_ok());
         // Under another project too: a host named pbfhogg is not a section.
-        let elivagar = root_table("project = \"elivagar\"\n[pbfhogg]\ndata = \"d\"\n");
-        assert!(project_config::ProjectConfig::parse(&Project::Elivagar, &elivagar).is_ok());
+        let other = root_table("project = \"elivagar\"\n[pbfhogg]\ndata = \"d\"\n");
+        let elivagar = Project::Other("elivagar".into());
+        assert!(project_config::ProjectConfig::parse(&elivagar, &other).is_ok());
     }
 }

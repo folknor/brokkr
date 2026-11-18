@@ -77,7 +77,6 @@ pub(super) fn all_or_none(walls_us: Vec<Option<i64>>) -> Vec<i64> {
 pub enum WallSource {
     External,
     SelfReported,
-    Closure,
     /// All iterations must have the requested span. Missing markers fail the
     /// measurement rather than comparing a span against a whole-process wall.
     MarkerSpan {

@@ -102,23 +102,6 @@ impl fmt::Debug for Sha256 {
     }
 }
 
-impl Sha256 {
-    /// Compute SHA-256 from a stream without requiring a platform hashing
-    /// executable or buffering the whole input in memory.
-    pub(crate) fn from_reader(mut reader: impl Read) -> std::io::Result<Self> {
-        let mut state = Sha256State::new();
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let read = reader.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            state.update(&buffer[..read]);
-        }
-        Ok(state.finish())
-    }
-}
-
 /// Incremental SHA-256, for a caller that hashes a framed encoding rather
 /// than one stream (the install tree fingerprint).
 pub(crate) struct Sha256State {
@@ -435,24 +418,6 @@ impl fmt::Display for PathDigest {
 // XXH128 file verification with mtime cache
 // ---------------------------------------------------------------------------
 
-/// Verify a parsed file pin against a regular file.
-pub fn verify_file_digest(
-    path: &Path,
-    expected: &FileDigest,
-    project_root: &Path,
-    origin: Option<&str>,
-) -> Result<(), DevError> {
-    match cached_path_digest(path, project_root)? {
-        PathDigest::File(actual) if actual.value() == expected.value() => Ok(()),
-        actual => Err(hash_mismatch(
-            path,
-            &expected.to_string(),
-            &actual.to_string(),
-            origin,
-        )),
-    }
-}
-
 fn hash_mismatch(path: &Path, expected: &str, actual: &str, origin: Option<&str>) -> DevError {
     let mut msg = format!(
         "hash mismatch for {}\n  expected: {expected}\n  actual:   {actual}",
@@ -498,7 +463,7 @@ pub fn cached_path_digest(path: &Path, project_root: &Path) -> Result<PathDigest
 }
 
 /// One hash cache shared across many file verifications: loaded once, saved
-/// once when dropped. [`verify_file_digest`] loads and saves the cache per
+/// once when dropped. [`cached_path_digest`] loads and saves the cache per
 /// call, which across a few thousand pins means re-parsing the whole cache a
 /// few thousand times; a session pays that once. Same stamp, settle and key
 /// rules - only the load/save scope differs. Dropped on an error return too,
@@ -935,13 +900,18 @@ mod sha256_tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
 
+    /// Fed in uneven chunks, so a block split across updates is carried over.
     fn digest(bytes: &[u8]) -> String {
-        Sha256::from_reader(bytes).unwrap().to_string()
+        let mut state = Sha256State::new();
+        for chunk in bytes.chunks(1_000) {
+            state.update(chunk);
+        }
+        state.finish().to_string()
     }
 
     /// FIPS 180-2 vectors: the empty message, one block, the two-block
     /// padding case (56 bytes leaves no room for the length), and a message
-    /// longer than the reader's buffer so block carry-over across reads runs.
+    /// longer than one update so block carry-over across updates runs.
     #[test]
     fn matches_the_published_vectors() {
         assert_eq!(

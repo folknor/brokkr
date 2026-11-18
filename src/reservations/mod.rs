@@ -39,8 +39,8 @@
 //! leftover scratch and verify output, worktrees, and the
 //! iterations of a script bench of any project, and the recursive removals
 //! of every configured directory such an iteration can sit under (any
-//! project's measured scratch trees, elivagar's scratch, `tilegen_tmp` and
-//! calibrands, the ingest outputs the retired nidhogg commands left).
+//! project's measured scratch trees, the ingest outputs the retired nidhogg
+//! commands left).
 //! brokkr's own fixed-name state files stay outside it, so a lease store problem never stops them; a broken
 //! store does keep those configured trees, which is the safe direction.
 //!
@@ -59,9 +59,7 @@ mod launch;
 mod paths;
 mod store;
 
-pub(crate) use guard::{
-    check_unreserved, is_refusal, mutate, remove_dir_all, remove_file, remove_reserved_tree,
-};
+pub(crate) use guard::{is_refusal, mutate, remove_dir_all, remove_file, remove_reserved_tree};
 pub(crate) use iteration::{Call, Iteration, NameArea, Names, Preview, Spool, open_input};
 pub(crate) use launch::{
     LaunchSpec, PRIVATE_DIR_PLACEHOLDER, ReadHold, hold_reads, inherit_in_child, take_armed,

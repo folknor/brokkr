@@ -332,18 +332,9 @@ pub fn raw_stdout(text: &str) {
     raw_stdout_bytes(text.as_bytes());
 }
 
-/// Replay captured stderr without adding or removing bytes.
-pub fn raw_stderr(text: &str) {
-    raw_stderr_bytes(text.as_bytes());
-}
-
 /// Raw pipe chunks retain arbitrary bytes, including split UTF-8 sequences.
 pub fn raw_stdout_bytes(bytes: &[u8]) {
     emit_bytes(Stream::Out, bytes);
-}
-
-pub fn raw_stderr_bytes(bytes: &[u8]) {
-    emit_bytes(Stream::Err, bytes);
 }
 
 fn emit_bytes(stream: Stream, bytes: &[u8]) {
@@ -357,11 +348,6 @@ fn emit_bytes(stream: Stream, bytes: &[u8]) {
 /// Test narration is the requested command result, visible in quiet mode too.
 pub fn test_msg(msg: &str) {
     emit_tag("[test]", msg);
-}
-
-/// Print a block on stderr through the renderer and run log.
-pub fn plain_stderr(msg: &str) {
-    emit_text(Stream::Err, &prefixed("", msg));
 }
 
 pub fn build_msg(msg: &str) {
@@ -394,18 +380,9 @@ pub fn bench_msg(msg: &str) {
     emit_progress(&tag_prefix("[bench]"), msg);
 }
 
-pub fn verify_msg(msg: &str) {
-    let text = prefixed(&tag_prefix("[verify]"), msg);
-    emit_text(Stream::Out, &text);
-}
-
 /// Interpretation notes must remain visible even on a quiet measured run.
 pub fn hotpath_msg(msg: &str) {
     emit_tag("[hotpath]", msg);
-}
-
-pub fn download_msg(msg: &str) {
-    emit_tag("[download]", msg);
 }
 
 /// A planned action under `--dry-run`, tagged `[dry-run]` rather than `[run]`
@@ -731,7 +708,6 @@ mod channel_tests {
                 strays_msg,
                 guard_msg,
                 hotpath_msg,
-                download_msg,
                 litehtml_msg,
                 sluggrs_msg,
                 ratatoskr_msg,
@@ -744,7 +720,6 @@ mod channel_tests {
             ] {
                 printer("logged action");
             }
-            verify_msg("verify detail");
             // Simulate a drawn terminal status line even though stdout is a pipe.
             RENDER.lock().unwrap().drawn = true;
             test_msg("clears status");
@@ -755,7 +730,6 @@ mod channel_tests {
                 warn_forced("renderer busy during shutdown");
             }
             raw_stdout("raw stdout without newline");
-            raw_stderr("raw stderr without newline");
             close_run_log();
             return;
         }
@@ -781,8 +755,7 @@ mod channel_tests {
         assert!(stdout.contains("[result]  unretrievable result\n"));
         assert!(stdout.contains("[warn]    visible warning\n"));
         assert!(stdout.contains("\r\x1b[2K[test]    clears status\n"));
-        assert!(stdout.contains("[verify]  verify detail\n"));
-        assert_eq!(log.matches("logged action").count(), 14);
+        assert_eq!(log.matches("logged action").count(), 13);
         assert!(!log.contains('\x1b'));
         assert!(stderr.contains("[sidecar] query provenance\n"));
         assert!(stderr.contains("[sidecar] unstored session\n"));
@@ -793,8 +766,7 @@ mod channel_tests {
         assert!(!stdout.contains("renderer busy during shutdown"));
         assert!(stderr.contains("[warn]    renderer busy during shutdown\n"));
         assert!(stdout.contains("raw stdout without newline"));
-        assert!(stderr.ends_with("raw stderr without newline"));
-        assert!(log.ends_with("raw stdout without newlineraw stderr without newline"));
+        assert!(log.ends_with("raw stdout without newline"));
     }
 
     #[test]

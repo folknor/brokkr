@@ -1345,8 +1345,8 @@ pub fn run_passthrough_in(
     let _guard = crate::shutdown::SigtermGuard::install();
     let policy = crate::process::spawn::ChildPolicy::from_cargo_profile(profile);
     let cmd = policy.command(program, args, dir, env, ChildIsolation::Inherit)?;
-    // A passthrough child (elivagar `regress`, elivagar run-mode dispatch) is a
-    // real, long-running workload with no sidecar window around it. Historically
+    // A passthrough child (`brokkr passthrough`) can be a real, long-running
+    // workload with no sidecar window around it. Historically
     // this used a bare `cmd.status()`, which left brokkr with the default
     // SIGTERM disposition: a `brokkr kill` (SIGTERM to brokkr's PID only) then
     // terminated brokkr and orphaned the child, which kept running. Install a
@@ -1411,6 +1411,7 @@ pub(crate) fn command_output(
 }
 
 /// Run a caller-configured plain command with its chosen inherited streams.
+#[cfg(test)]
 pub(crate) fn command_status(command: &mut std::process::Command) -> std::io::Result<ExitStatus> {
     run_prepared_plain(command, ChildOptions::DEFAULT).map(|output| output.status)
 }

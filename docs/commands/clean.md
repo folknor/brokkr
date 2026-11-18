@@ -1,7 +1,7 @@
 # brokkr clean
 
 ```
-brokkr clean [--worktrees] [--cargo [PKG]] [--archives [--keep N]] [--all] [--dry-run]
+brokkr clean [--worktrees] [--cargo [PKG]] [--all] [--dry-run]
 ```
 
 Remove the scratch and temporary files a brokkr project accumulates. Runs in
@@ -22,19 +22,12 @@ are not resolved by this lock-time gate.
 brokkr-designated directory or by a name brokkr can *construct*.** It never
 parses a filename to decide whether it owns it.
 
-That distinction is the whole safety property, and it is load-bearing in the
-one place it would be tempting to skip: the durable archive store, where names
-look like `<dataset>-<variant>-<commit>.pmtiles`. Dataset names contain
-hyphens, so a filename cannot be split back into its parts unambiguously - and
-a prefix test alone would let the variant `raw` claim `raw-fast`'s archives and
-delete them. `ArchiveStore::prune()` builds each configured `(dataset,
-variant)` name shape and matches forward. Anything the constructed matcher does
-not claim is preserved unconditionally, because a file brokkr cannot name by
-construction is outside the store's ownership.
-
-The same rule is why an explicit `-o` output path is never touched while the
-*default* `-o` directory is: one is a location brokkr designated, the other is
-your file in a place you chose.
+That distinction is the whole safety property. Names built from configured
+values are matched forward, never split back: dataset names contain hyphens,
+so a filename cannot be parsed into its parts unambiguously, and a prefix test
+alone would let one name claim a dash-extending sibling's files. Anything the
+constructed matcher does not claim is preserved unconditionally, because a
+file brokkr cannot name by construction is outside its ownership.
 
 ## Permanently out of scope
 
@@ -92,7 +85,7 @@ Some files exist only while their writer runs, and a writer killed with
 SIGKILL leaves them behind. These, made only by commands that hold the brokkr
 lock, are removed by store maintenance (`src/maintenance.rs`) the next time
 dispatch takes a fresh hold for a command whose spec locks (`check`, `test`,
-`build`, `run`, `clean`, `verify` and the measured commands; not `crit`,
+`build`, `run`, `clean` and the measured commands; not `crit`,
 `fmt` or `env`, which lock inside their own handler), before that command
 does anything, with one line saying how many went and the allocated bytes
 observed. `clean --dry-run` only lists them:
@@ -101,8 +94,6 @@ observed. `clean --dry-run` only lists them:
 - `.brokkr/nextest-synth.<pid>-<n>.toml` and
   `.brokkr/nextest-sweep-env.<pid>-<n>.toml`, one private config file per
   nextest-lane read.
-- `.brokkr/corpus-sort/brokkr-corpus-sort-<pid>-<id>/`, the spill directory of
-  one elivagar corpus sort, which can be large.
 - `.brokkr/artifacts/.staging-<pid>-<name>`, a `brokkr build` snapshot's
   partial copy.
 
@@ -114,8 +105,7 @@ Nothing sweeps these, and they can accumulate:
   exclusion, and a lockless `brokkr env` writes the hash cache, so no sweep
   can prove one dead.
 - `.brokkr/hotpath-report.json`, at most one: each hotpath capture removes it
-  before and after the run. `.brokkr/hotpath-report-<token>.json`, a reserved
-  launch's report, goes with that launch's lease instead.
+  before and after the run.
 
 ## Routine clean
 
@@ -133,12 +123,8 @@ Bare `brokkr clean`, in order:
   and each lease kept is named with why (see the ownership protocol in
   `reference/bench-resources.md`). Script-bench iterations live under
   `bench-iterations/` under the host's scratch, which clean never removes
-  by name; elivagar's scratch wipe goes through the reservation gate, so a
-  live iteration there keeps it.
-- **Scratch**, whose shape differs per project: elivagar's scratch dir (the
-  host `scratch`, where tilegen writes before the rename into the durable
-  store) is wiped and recreated, and `<data>/tilegen_tmp` (the `--tmp-dir`
-  brokkr hands elivagar) is removed. In nidhogg, the `run-ingest-output/`,
+  by name.
+- **Scratch**, whose shape differs per project. In nidhogg, the `run-ingest-output/`,
   `bench-ingest-output/` and `hotpath-ingest-output/` directories the retired
   nidhogg commands left in scratch are removed. Those
   removals go through the reservation gate, since a configured directory
@@ -165,9 +151,9 @@ Bare `brokkr clean`, in order:
   the window before it opens one is covered by `.brokkr/.sidecar.lock`, which
   each creator holds shared across it and the sweep exclusive (clean waits
   for it); the lock file stays.
-- **Elivagar also**: `corpus-calibrands/` (the default `-o` for
-  `pmtiles-corpus mutate`), through the reservation gate like scratch. The `ocean-build_tmp`, `.ingest_tmp`, and
-  `.tilegen_tmp` names are not brokkr-designated paths and are left alone.
+- **Elivagar**: nothing. elivagar-devkit's own clean took over what brokkr
+  swept for it (scratch, `tilegen_tmp`, `corpus-calibrands/`, the corpus-sort
+  spill directories and the tilegen archive store).
 - **Run-artefact trees**: the named `.brokkr/ratatoskr/{service,service-mock,sync,mock}/`
   trees and child directories under `.brokkr/piners/corpus/` (the `gate.db`
   and `runs.db` paths are protected), `.brokkr/test-hung/`, the isolated
@@ -188,10 +174,7 @@ Bare `brokkr clean`, in order:
   `prepare` or `visual` does not reinstall its dependencies. The capture
   script is stored in this same versioned cache, not as `.brokkr/capture.js`.
 
-A routine clean **spares the durable tilegen output archives**
-(`<output>/<dataset>-<variant>-<commit>.pmtiles`). They are reproducible but
-expensive, retention already bounds their growth, and they are what `regress`
-diffs. If persistent worktrees exist, a routine clean names them and points
+If persistent worktrees exist, a routine clean names them and points
 at `--worktrees` rather than removing them. A routine clean that finds
 nothing prints `nothing to clean` unless a cargo sweep already reported its
 work; a `--dry-run` reports only what it would remove.
@@ -202,15 +185,10 @@ No clean runs after an interrupted command (Ctrl-C, `brokkr kill`). A sweep
 there would run after the command released the brokkr lock, while another
 brokkr may already be using the same paths, and the routine set holds what
 runs keep on purpose for later: hung-test snapshots, the run directories of
-failed corpus and ratatoskr runs, an elivagar archive whose
-promotion failed, caches. Instead a measured attempt that a stop ends
-discards its own scratch output as it unwinds, still under its hold
-(`src/measure/runner.rs`): the plan's scratch directories, elivagar's partial archive and `tilegen_tmp`, and an external tool's
-declared outputs. It does so only once a preparation has cleared those
-paths, and never for a stop during promotion, after execution completed; a
-path it cannot remove is named and kept. Other disposable working state an
-interrupted command leaves on disk (an unmeasured command's output) sits under a fixed name its next run clears, or goes with
-the next `brokkr clean`. What a stop records on purpose stays: the partial
+failed corpus and ratatoskr runs, caches. A script-bench iteration's
+directory goes with its lease instead. Other disposable working state an
+interrupted command leaves on disk sits under a fixed name its next run
+clears, or goes with the next `brokkr clean`. What a stop records on purpose stays: the partial
 sidecar data under `dirty`, the history entry, and every retained
 diagnostic above.
 
@@ -227,17 +205,10 @@ to name is the *failing* one, which is usually a workspace member rather than
 the project-name default. See `docs/commands/check.test-lanes.md` (`brokkr man
 test-lanes build-errors`).
 
-## `--archives [--keep N]`
+## `--archives` and `--keep`, retired
 
-**[elivagar]** Prune the canonical archives in the durable output store to the
-newest `N` (default 2) **per `(dataset, variant)` pair**. Scoping to the pair
-means building one variant can never evict another's archives at the same
-commit.
-
-The default of 2 is the tier-3 workflow's shape: the current build plus one
-comparand. Group membership follows the constructed-name rule above, so
-hand-named files, the toml-contract ocean artifact `data/ocean-tiles.pmtiles`,
-and pre-rename `<dataset>-<commit>` archives all survive untouched.
+elivagar's archive pruning moved to elivagar-devkit's clean. Both flags are
+refused with a message saying so, rather than parsed and ignored.
 
 ## `--worktrees`
 
@@ -279,18 +250,9 @@ why the count reads `removed N of M worktrees found` whenever those differ.
 each worktree carries an isolated target dir: on the nautilus workload, ~1.3G
 apiece.
 
-On elivagar this also empties the durable output store - every canonical
-archive, not the keep-N pruning of `--archives` (it is `--archives --keep 0`).
-The deep clean is the one place the store is treated as what it is,
-reproducible; rerun `tilegen` to get an archive back. It still follows the
-constructed-name rule: only `<dataset>-<variant>-<commit>.pmtiles` names built
-from configured datasets go, so a hand-named file or the ocean artifact
-survives even when `output` points at the data dir. Skipped when the output dir
-coincides with scratch, which the routine pass already wiped.
-
 ## `--all` and `--dry-run`
 
-`--all` is `--worktrees` + `--archives` + `--cargo` (default package).
+`--all` is `--worktrees` + `--cargo` (default package).
 
 `--dry-run` lists what would go without deleting anything - the output says
 `would remove` / `would clean` where a real run says `removed` / `cleaned`.

@@ -219,8 +219,8 @@ invocation, and it can still pair with a new row of a different one (an old
 Reading a row's `arm_key` beside its `brokkr_args` shows which case it is;
 the argv alone does not, since the positional boundary is not stored.
 
-Historical pbfhogg typed-command rows retain their qualifiers and migration
-behavior below; no new typed pbfhogg rows are produced.
+Historical pbfhogg and elivagar typed-command rows retain their qualifiers
+and migration behavior below; no new typed rows of either are produced.
 
 A measurement-defining choice that reaches the subprocess argv from config
 rather than from the brokkr argv cannot show in the argv key, so the row
@@ -236,7 +236,7 @@ share one argv), and the strategy when one argv ran every strategy
 `strategy=...`), joined by `;` in that order. An extract
 row from before the bbox and strategy qualifiers existed carries neither, so
 it does not pair with a newer row that does. A pbfhogg `digest` without
-`--form` carries the form it measured (`form=full` or `form=content`). An elivagar `tilegen` row, the `suite
+`--form` carries the form it measured (`form=full` or `form=content`). A historical elivagar `tilegen` row, the `suite
 elivagar` self arm's included, carries every flag its tilegen block and input
 assertions passed (`tilegen=` and a JSON array of them, ocean entries under
 their brokkr.toml names rather than the host's resolved paths; an empty block
@@ -364,10 +364,9 @@ before its matching `cfg(...)` tables, and a target source that comes to no
 flags falls through to `build.rustflags`. The environment sources do not: a
 set `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS`, empty or not, wins outright. Unit side, from cargo's own record of
 the measured executable: `opt_level`, `debuginfo`, `debug_assertions`,
-`overflow_checks`. A suite building several binaries attributes each row to
-the build it measured - pbfhogg's osmpbf baseline is its own crate and records
-its own - and a row measuring an installed tool (osmium, planetiler,
-tilemaker) or a binary brokkr did not build records none. The namespace is
+`overflow_checks`. A row measuring a binary brokkr did not build records
+none; the retired suites attributed each row to the build it measured, and
+their rows of installed tools (osmium, planetiler, tilemaker) carry none. The namespace is
 brokkr's alone: a `provenance.*` pair the measured program prints is dropped
 with a warning, as is one in any other brokkr namespace (`brokkr man
 output-channels`). `brokkr results <uuid>` lists the pairs as `build ...` fields.

@@ -20,11 +20,8 @@ The rest of the universal schema is split by subject:
 
 Project-specific config blocks live in their own docs, so a checkout only ever
 reads the ones that apply to it:
-- Datasets (`[<host>.datasets.*]` pbf/osc/pmtiles/polygon) and the `--variant` /
-  `--osc-seq` / `--tiles` flags -> `docs/brokkr.toml.datasets.md` (map-data
-  projects only; `brokkr man datasets`)
-- `[<host>.tilegen.*]` -> `docs/brokkr.toml.elivagar.md`
-  (`brokkr man elivagar-config`)
+- Datasets (`[<host>.datasets.*]` pbf/osc/pmtiles/polygon) ->
+  `docs/brokkr.toml.datasets.md` (`brokkr man datasets`)
 - `[litehtml]` -> `docs/projects/litehtml.md`
 - `[sluggrs]` -> `docs/projects/sluggrs.md`
 - `[ratatoskr]` and `[ratatoskr.harness]` -> `docs/projects/ratatoskr.md`
@@ -206,7 +203,6 @@ project = "pbfhogg"
 [plantasjen]
 data = "data"
 scratch = "data/scratch"
-output = "data/tilegen"   # durable tilegen output store (map-data projects)
 target = "target"
 worktree_keep = 6         # persistent --commit worktrees kept before LRU eviction
 drives.source = "nvme"
@@ -215,8 +211,6 @@ features = ["linux-direct-io", "linux-io-uring"]
 
 # Map-data projects add [<host>.datasets.*] tables here -
 # see docs/brokkr.toml.datasets.md
-# elivagar adds [<host>.tilegen.*] blocks -
-# see docs/brokkr.toml.elivagar.md
 # A hostname colliding with a reserved section can use [host.<name>],
 # e.g. [host.test].
 ```
@@ -240,30 +234,20 @@ where a misspelled hostname shows up. Since legacy hostnames are open-ended, a t
 valid host shape is necessarily interpreted as a host even if its name
 resembles a misspelled section. Datasets are host-scoped (no global
 `[datasets]` section). Path resolution: host config -> defaults (`data/`,
-`data/scratch/`, `data/tilegen/`), from the config alone. `target` is read by
+`data/scratch/`), from the config alone. `target` is read by
 `brokkr env`'s storage report and by `brokkr clean`, which looks for pbfhogg's
 leftover verify output under it; absent, both use cargo's target dir. Builds always
-use cargo's. `output` is the durable
-tilegen output store (map-data projects): `ArchiveStore` admits each successful
-tilegen archive as `<output>/<dataset>-<variant>-<commit>.pmtiles` (the
-latest one: a rerun at the same commit replaces it, whatever tilegen block
-built either; `docs/projects/elivagar.md`), and
-`pmtiles-inspect`/`diag`/`svg`/`regress`/`pmtiles-corpus` resolve it by
-`--variant` + `--commit`. It is kept SEPARATE from `scratch`
-on purpose - elivagar wipes its `--tmp-dir` (`<data>/tilegen_tmp`) every run,
-and on some hosts `scratch` points at that same dir, so archives written into
-scratch were destroyed by the next run. `brokkr` refuses to write outputs into
-a dir that coincides with scratch/tmp; the store keeps the last 5 archives per
-`(dataset, variant)` pair - scoped so that building one variant can never evict
-another's archives at the same commit. Group membership is decided by
-constructing the name shape and requiring a hyphen-free commit token after it,
-never by parsing a filename back: dataset names carry hyphens, and a prefix test
-alone would let a variant claim a dash-extending sibling's files (`raw`
-swallowing `raw-fast`) and evict them. `brokkr clean --archives` uses the same
-store pruning operation with its configured keep count and dry-run policy.
+use cargo's.
+
+**elivagar's host keys.** `output` (elivagar's durable tilegen output store)
+and `[<host>.tilegen.<name>]` blocks are elivagar's own: brokkr reads neither,
+but keeps accepting both so an elivagar host loads. A tilegen block is an
+opaque table, any contents, and counts as host content. A script bench sees
+both in the resolved view's `host` table, with `output` resolved and
+defaulted to `data/tilegen` (`brokkr man bench-config`).
 
 **Host feature policy.** Host `features` are added to measured-request builds
-through the shared build context, to the `passthrough` and `verify` paths,
+through the shared build context, to the `passthrough` path,
 and to a script bench's build (`brokkr bench`, before the bench's own
 `features`). Standalone `run`, `install`, `check`, `clippy`,
 `test`, and Criterion `crit` use their own cargo/default or sweep feature

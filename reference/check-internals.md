@@ -817,8 +817,6 @@ values are not copied here.
 | Process cleanup | ancestry and descendant depth limits in `src/stray.rs`; orphan grace and reap policy in `src/test_orphans.rs`; child OOM adjustment in `src/oom.rs` |
 | User-facing defaults | worktree retention in `src/worktree_record.rs`; short config-filter rejection in `src/config_parts/parser.rs`; `brokkr wc` default in `src/wc.rs`; man section-index threshold in `src/man.rs` |
 | Check/test accounting retention | `ACCOUNTING_RUNS_KEPT` in `src/check_cmd/accounting/journal.rs`; the pruning selector accepts an explicit retention count for focused checks |
-| External tool versions | release and checksum pins in `src/tools.rs` |
-| Tilegen archive retention | `TILEGEN_RETENTION` in `src/elivagar/archive_store.rs` (the older `OUTPUT_RETENTION` name is no longer present) |
 
 ### A failure no diagnostic explains
 

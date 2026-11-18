@@ -6,9 +6,6 @@ use super::validation::{
 };
 use clap::{ArgGroup, Args, Parser, Subcommand};
 
-pub(crate) const DEFAULT_DATASET: &str = "denmark";
-pub(crate) const DEFAULT_RAW_VARIANT: &str = "raw";
-pub(crate) const DEFAULT_INDEXED_VARIANT: &str = "indexed";
 /// Version banner: semver plus the short git hash (with a `-dirty` suffix for
 /// an unclean tree) and the UTC build time, stamped at compile time by
 /// `build.rs`. e.g. `0.1.0 (abc123def 2026-07-12 12:34:56 UTC)`. Fed to clap's
@@ -610,103 +607,14 @@ In depth: `brokkr man clippy`."
     /// Show environment information
     #[command(display_order = 1)]
     Env,
-    // ----- elivagar commands (display_order = 3) -----
-    /// Full tile generation pipeline
-    ///
-    /// Pipeline configuration lives entirely in `[<host>.tilegen.default]` in
-    /// brokkr.toml - ocean inputs, tile format, budgets, geometry. There are
-    /// no override flags: either it is explicit in the block, or it is not
-    /// set. What remains here is the input axis (dataset/variant), the
-    /// measurement mode, and the per-invocation resume point.
-    ///
-    /// In depth: `brokkr man elivagar-config` (the block), `brokkr man
-    /// elivagar` (the pipeline).
-    #[command(name = "tilegen", display_order = 3)]
-    Tilegen {
-        #[command(flatten)]
-        mode: ModeArgs,
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
-        /// PBF variant to use
-        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
-        variant: String,
-        /// Resume from checkpoint: ocean, sort or assemble
-        #[arg(long)]
-        skip_to: Option<String>,
-    },
-    /// PMTiles writer micro-benchmark
-    #[command(name = "pmtiles-writer", display_order = 3)]
-    PmtilesWriter {
-        #[command(flatten)]
-        mode: ModeArgs,
-        /// Number of synthetic tiles
-        #[arg(long, default_value = "500000")]
-        tiles: usize,
-    },
-    /// SortedNodeStore micro-benchmark
-    #[command(name = "node-store", display_order = 3)]
-    NodeStore {
-        #[command(flatten)]
-        mode: ModeArgs,
-        /// Nodes in millions
-        #[arg(long, default_value = "50")]
-        nodes: usize,
-    },
-    /// Planetiler comparison baseline
-    #[command(name = "planetiler", display_order = 3)]
-    ElivPlanetiler {
-        #[command(flatten)]
-        mode: ModeArgs,
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
-        /// PBF variant to use
-        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
-        variant: String,
-    },
-    /// Tilemaker comparison baseline
-    #[command(name = "tilemaker", display_order = 3)]
-    ElivTilemaker {
-        #[command(flatten)]
-        mode: ModeArgs,
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
-        /// PBF variant to use
-        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
-        variant: String,
-    },
-
     // ----- generic commands (display_order = 5) -----
     /// Generic hotpath for projects without dedicated modules
     #[command(name = "generic-hotpath", display_order = 5)]
     GenericHotpath {
         #[command(flatten)]
         mode: ModeArgs,
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
-        /// PBF variant to use
-        #[arg(long, default_value = DEFAULT_INDEXED_VARIANT)]
-        variant: String,
     },
 
-    // ----- suites (display_order = 6) -----
-    /// Run a full elivagar benchmark suite
-    #[command(name = "suite", display_order = 6)]
-    Suite {
-        #[command(flatten)]
-        mode: ModeArgs,
-        /// Suite name: elivagar
-        name: String,
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
-        /// PBF variant to use
-        #[arg(long, default_value = DEFAULT_INDEXED_VARIANT)]
-        variant: String,
-    },
     /// Build and run with passthrough args (deprecated - use `run` subcommands instead)
     #[command(name = "passthrough", display_order = 99, hide = true)]
     Passthrough {
@@ -1057,21 +965,16 @@ In depth: `brokkr man measure`.",
         #[arg(long, num_args = 0..=1, value_name = "PKG")]
         cargo: Option<Option<String>>,
 
-        /// Prune canonical per-commit archives in the durable output
-        /// store (`data/tilegen/<dataset>-<variant>-<commit>.pmtiles`), keeping
-        /// the newest --keep per (dataset, variant). Groups are built by
-        /// constructing each known (dataset, variant) prefix from config;
-        /// anything not matching (hand-named files, the toml-contract ocean
-        /// artifact, pre-rename archives) is preserved unconditionally.
-        #[arg(long)]
+        /// Retired with elivagar's commands: refused with a pointer to
+        /// elivagar-devkit, which prunes its archive store now.
+        #[arg(long, hide = true)]
         archives: bool,
 
-        /// Archives to keep per (dataset, variant) with --archives (default 2:
-        /// the current build plus one comparand, what the tier-3 workflow uses).
-        #[arg(long, default_value_t = 2)]
-        keep: usize,
+        /// Retired with --archives, refused the same way.
+        #[arg(long, hide = true)]
+        keep: Option<usize>,
 
-        /// Everything: --worktrees + --archives + --cargo (default package).
+        /// Everything: --worktrees + --cargo (default package).
         #[arg(long)]
         all: bool,
 
@@ -1287,210 +1190,6 @@ Examples:
         #[arg(short = 'f', long)]
         force: bool,
     },
-    /// Verify elivagar output.
-    #[command(display_order = 11)]
-    Verify {
-        /// Stream every check's full detail. Default is quiet on pass (one
-        /// result line per check) and loud on fail (the failing check's
-        /// detail is replayed). `-v` also shows build output.
-        #[arg(long, short = 'v')]
-        verbose: bool,
-
-        #[command(subcommand)]
-        verify: VerifyCommand,
-    },
-    /// Compare feature counts between two PMTiles archives
-    #[command(display_order = 30)]
-    CompareTiles {
-        /// First PMTiles file
-        file_a: String,
-        /// Second PMTiles file
-        file_b: String,
-        /// Sample size per zoom level
-        #[arg(long)]
-        sample: Option<usize>,
-    },
-    /// Download ocean shapefiles
-    #[command(display_order = 31)]
-    DownloadOcean,
-    /// Build the world-ocean pmtiles artifact from the tilegen block
-    #[command(
-        display_order = 31,
-        long_about = "\
-[elivagar] Build the world-ocean pmtiles artifact (one shot per shapefile \
-release), wrapping `elivagar ocean-build`.
-
-The invocation is derived entirely from [<host>.tilegen.default].ocean - the \
-same block tilegen reads its ocean inputs from. The shapefile entries become \
-the --ocean specs; the .pmtiles entry becomes the output path. There are no \
-override flags: to build a different artifact, edit the block.
-
-Rotating the artifact is an output-changing event - the next `pmtiles-corpus \
-check` refuses on the artifact key until the corpus is re-blessed.
-
-In depth: `brokkr man elivagar` (config: `brokkr man elivagar-config`)."
-    )]
-    OceanBuild {
-        /// Validate the derived invocation and input paths without building
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Download Natural Earth shapefiles for low-zoom layers
-    #[command(display_order = 32)]
-    DownloadNaturalEarth,
-    /// Inspect PMTiles header, tile stats, and metadata
-    #[command(name = "pmtiles-inspect", display_order = 33)]
-    PmtilesInspect {
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
-        /// PBF variant selecting which output to open (e.g. raw, indexed, altw)
-        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
-        variant: String,
-        /// Commit short hash selecting which tilegen output to open (default: current HEAD)
-        #[arg(long)]
-        commit: Option<String>,
-        /// Explicit PMTiles path, skips dataset/variant/commit resolution
-        #[arg(long)]
-        file: Option<String>,
-    },
-    /// Per-ring winding/area diagnosis for one tile
-    #[command(display_order = 34)]
-    Diag {
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
-        /// PBF variant selecting which output to open (e.g. raw, indexed, altw)
-        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
-        variant: String,
-        /// Commit short hash selecting which tilegen output to open (default: current HEAD)
-        #[arg(long)]
-        commit: Option<String>,
-        /// Explicit PMTiles path, skips dataset/variant/commit resolution
-        #[arg(long)]
-        file: Option<String>,
-        #[arg(short = 'z', long)]
-        z: u8,
-        #[arg(short = 'x', long)]
-        x: u32,
-        #[arg(short = 'y', long)]
-        y: u32,
-    },
-    /// Render one tile to SVG
-    #[command(display_order = 35)]
-    Svg {
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
-        /// PBF variant selecting which output to open (e.g. raw, indexed, altw)
-        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
-        variant: String,
-        /// Commit short hash selecting which tilegen output to open (default: current HEAD)
-        #[arg(long)]
-        commit: Option<String>,
-        /// Explicit PMTiles path, skips dataset/variant/commit resolution
-        #[arg(long)]
-        file: Option<String>,
-        #[arg(short = 'z', long)]
-        z: u8,
-        #[arg(short = 'x', long)]
-        x: u32,
-        #[arg(short = 'y', long)]
-        y: u32,
-        #[arg(short = 'W', long, default_value_t = 1)]
-        width: u32,
-        #[arg(short = 'H', long, default_value_t = 1)]
-        height: u32,
-        /// Comma-separated layer names to render (default: all)
-        #[arg(short = 'l', long)]
-        layers: Option<String>,
-        /// Output file path (default: elivagar's own default)
-        #[arg(short = 'o', long)]
-        output: Option<std::path::PathBuf>,
-    },
-    /// Diff two explicit tilegen archives (tier-3 attribution)
-    #[command(
-        display_order = 36,
-        long_about = "\
-[elivagar] Diff two explicit tilegen output archives.
-
-Both sides are explicit - there is no default baseline, ever. The CURRENT \
-side comes from --commit/--file; the COMPARAND from --against-commit/--against \
-(one is required, or clap refuses with a usage error).
-
-Comparability is YOUR responsibility. regress reads no provenance contract by \
-design - it is the attribution instrument, and cross-contract diffs (artifact-\
-active vs computed, an intended config change) are legitimate uses. Read the \
-provenance blocks via `brokkr pmtiles-inspect` first: comparing across \
-variants or configs reports a six-figure diff on two correct builds.
-
-In depth: `brokkr man elivagar`.",
-        group(
-            ArgGroup::new("comparand")
-                .args(&["against", "against_commit"])
-                .required(true)
-                .multiple(false)
-        ),
-    )]
-    Regress {
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
-        /// PBF variant of the CURRENT output (e.g. raw, indexed, altw)
-        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
-        variant: String,
-        /// Commit short hash selecting the CURRENT output (default: current HEAD)
-        #[arg(long)]
-        commit: Option<String>,
-        /// Explicit CURRENT PMTiles path, skips dataset/variant/commit resolution
-        #[arg(long)]
-        file: Option<String>,
-        /// PBF variant of the COMPARAND output (defaults to raw; set it
-        /// independently of --variant - a cross-variant diff is a legitimate use)
-        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
-        against_variant: String,
-        /// Commit short hash selecting the COMPARAND output from data/tilegen/
-        #[arg(long)]
-        against_commit: Option<String>,
-        /// Explicit COMPARAND PMTiles path
-        #[arg(long)]
-        against: Option<String>,
-        /// Geometry tolerance in the layer's extent units (default 0)
-        #[arg(long, default_value_t = 0)]
-        tol: i32,
-        /// tolerance_moved budget before exit 1 (default 0: any move fails)
-        #[arg(long, default_value_t = 0)]
-        max_moved: u64,
-        /// Per-class example cap
-        #[arg(long, default_value_t = crate::elivagar::constants::DEFAULT_MAX_EXAMPLES)]
-        max_examples: usize,
-        /// Dump side-by-side overlay pairs for differing tiles to DIR, in report
-        /// order, up to the overlay cap
-        #[arg(long)]
-        overlay: Option<std::path::PathBuf>,
-        /// Cap on the number of overlay pairs emitted
-        #[arg(long)]
-        overlay_max: Option<usize>,
-        /// Emit a machine-readable report to stdout
-        #[arg(long)]
-        json: bool,
-    },
-    /// The corpus gate: adjudicate an archive against the committed baseline (check/bless/render/...).
-    ///
-    /// In depth: `brokkr man elivagar`.
-    #[command(display_order = 37, subcommand_help_heading = "Corpus subcommands")]
-    PmtilesCorpus {
-        #[command(subcommand)]
-        cmd: PmtilesCorpusCommand,
-    },
-    /// Print PMTiles v3 file statistics
-    #[command(display_order = 19)]
-    PmtilesStats {
-        /// PMTiles file(s) to analyze
-        #[arg(required = true)]
-        files: Vec<String>,
-    },
-    // ----- visual testing commands (litehtml + sluggrs, display_order = 50) -----
     /// Run visual tests against reference artifacts.
     ///
     /// In depth: `brokkr man visual`.
@@ -2402,42 +2101,6 @@ impl ProgramArgs {
     }
 }
 
-#[derive(Subcommand)]
-pub(crate) enum VerifyCommand {
-    /// Verify PMTiles output integrity
-    ///
-    /// Addresses the durable output store through the same
-    /// `[--dataset D] [--variant V] [--commit H | --file P]` resolver as
-    /// `pmtiles-inspect`/`diag`/`svg`/`regress`. It reads the archive with the
-    /// current binary, so `--commit` picks which file to open, not which
-    /// toolchain to build. `--file` is the escape hatch for archives that are
-    /// not dataset output at all, such as the world artifact
-    /// `data/ocean-tiles.pmtiles`.
-    #[command(name = "pmtiles", display_order = 15)]
-    ElivVerify {
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = DEFAULT_DATASET)]
-        dataset: String,
-        /// PBF variant, selecting which archive to open (e.g. raw, indexed, altw)
-        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
-        variant: String,
-        /// Commit short hash selecting which archive to open (default: current HEAD)
-        #[arg(long)]
-        commit: Option<String>,
-        /// Explicit PMTiles path, skips dataset/variant/commit resolution
-        #[arg(long)]
-        file: Option<String>,
-        /// Print per-zoom ocean ring geometry statistics
-        #[arg(long)]
-        geometry_stats: bool,
-        /// Validate each distinct compressed payload once, keeping addressed-tile
-        /// accounting. The way to verify a large run-heavy archive (the world
-        /// artifact addresses ~23x more tiles than it stores payloads).
-        #[arg(long)]
-        unique_payloads: bool,
-    },
-}
-
 /// Arguments shared by the litehtml and sluggrs visual runners.
 #[derive(Args)]
 pub(crate) struct VisualArgs {
@@ -2458,116 +2121,4 @@ pub(crate) struct LitehtmlVisualArgs {
     /// Force-regenerate Chrome reference artifacts before comparing
     #[arg(long)]
     pub(crate) recapture: bool,
-}
-
-/// The archive selector shared by every `pmtiles-corpus` subcommand: the same
-/// `[--dataset D] [--commit H | --file P]` resolver `pmtiles-inspect`/`diag`/
-/// `svg` use. One resolver, zero divergence in default-commit semantics.
-#[derive(Args)]
-pub(crate) struct CorpusArchiveArgs {
-    /// Dataset name from brokkr.toml
-    #[arg(long, default_value = DEFAULT_DATASET)]
-    pub(crate) dataset: String,
-    /// PBF variant, selecting which archive to open (e.g. raw, indexed, altw).
-    /// Required unless --file is given: the corpus contract pins one variant
-    /// (bless accepts only a locations-generated archive), so a default of
-    /// `raw` could never bless and failed every check against a locations
-    /// corpus with a contract mismatch.
-    #[arg(long, required_unless_present = "file")]
-    pub(crate) variant: Option<String>,
-    /// Commit short hash selecting which archive to open (default: current HEAD)
-    #[arg(long)]
-    pub(crate) commit: Option<String>,
-    /// Explicit PMTiles path, skips dataset/variant/commit resolution
-    #[arg(long)]
-    pub(crate) file: Option<String>,
-}
-
-/// Subcommands of `brokkr pmtiles-corpus` - the native corpus gate
-/// (`src/elivagar/corpus/`). brokkr resolves the archive (and the corpus dir,
-/// where one applies), owns the value sets (`--mode`, `--op`) and the verdicts;
-/// the exit-code contract is in `docs/projects/elivagar.md`.
-///
-/// Named `pmtiles-corpus` (not `corpus`) because `corpus` is already piners'
-/// parity-corpus runner and brokkr's command names share one flat namespace -
-/// the same reason `inspect` became `pmtiles-inspect`.
-#[derive(Subcommand)]
-pub(crate) enum PmtilesCorpusCommand {
-    /// Check an archive against the committed baseline (exit 0 pass / 1 content mismatch / 2 archive refusal / 3 baseline trouble / 4 could not run)
-    Check {
-        #[command(flatten)]
-        archive: CorpusArchiveArgs,
-        /// Corpus directory (default: corpus/<dataset> under the repo root)
-        #[arg(long)]
-        corpus: Option<std::path::PathBuf>,
-    },
-    /// Re-derive the digest baseline from an archive (writes into the corpus dir)
-    Bless {
-        #[command(flatten)]
-        archive: CorpusArchiveArgs,
-        /// Corpus directory (default: corpus/<dataset> under the repo root)
-        #[arg(long)]
-        corpus: Option<std::path::PathBuf>,
-        /// Replace an existing baseline (bless refuses to overwrite otherwise)
-        #[arg(long)]
-        rotate: bool,
-        /// Digest mode for the baseline
-        #[arg(long, value_enum, default_value = "leaves")]
-        mode: crate::elivagar::corpus::DigestMode,
-    },
-    /// Render the SVG corpus manifest for an archive
-    #[command(name = "render-manifest")]
-    RenderManifest {
-        #[command(flatten)]
-        archive: CorpusArchiveArgs,
-        /// Corpus directory (default: corpus/<dataset> under the repo root)
-        #[arg(long)]
-        corpus: Option<std::path::PathBuf>,
-        /// Style TOML for the SVG renderer
-        #[arg(long)]
-        style: Option<std::path::PathBuf>,
-    },
-    /// Render a single tile from an archive to SVG
-    Render {
-        #[command(flatten)]
-        archive: CorpusArchiveArgs,
-        #[arg(short = 'z', long)]
-        z: u8,
-        #[arg(short = 'x', long)]
-        x: u32,
-        #[arg(short = 'y', long)]
-        y: u32,
-        /// Comma-separated layer names to render
-        #[arg(long)]
-        layers: Option<String>,
-        /// Style TOML for the SVG renderer
-        #[arg(long)]
-        style: Option<std::path::PathBuf>,
-        /// Output file path
-        #[arg(short = 'o', long)]
-        output: Option<std::path::PathBuf>,
-    },
-    /// Emit ocean ring geometry from an archive
-    Rings {
-        #[command(flatten)]
-        archive: CorpusArchiveArgs,
-        /// Output file path
-        #[arg(short = 'o', long)]
-        output: std::path::PathBuf,
-    },
-    /// Produce a mutated copy of an archive (calibration oracle)
-    Mutate {
-        #[command(flatten)]
-        archive: CorpusArchiveArgs,
-        /// Output path for the mutated archive. Default: a calibrand under
-        /// data/corpus-calibrands/ that a routine `brokkr clean` clears.
-        #[arg(short = 'o', long)]
-        output: Option<std::path::PathBuf>,
-        /// Mutation to apply
-        #[arg(long, value_enum)]
-        op: crate::elivagar::corpus::MutationOp,
-        /// Target tile z/x/y for ops that need one
-        #[arg(long)]
-        tile: Option<String>,
-    },
 }

@@ -381,7 +381,7 @@ pub enum DevError {
     /// A verification check found a mismatch or unexpected result.
     Verify(String),
     /// A subprocess completed and the process should exit with this code.
-    /// Used by passthrough commands (run, elivagar) to propagate exit codes
+    /// Used by passthrough commands (`run`) to propagate exit codes
     /// without calling `process::exit` in handlers.
     ExitCode(i32),
     /// A `[cargo_env]` command could not produce its variable for a cargo

@@ -148,8 +148,8 @@ impl MeasureMode {
 /// Unified request struct replacing `BenchRequest` / `HotpathRequest` /
 /// `ProfileRequest`.
 ///
-/// Carries everything needed to set up a measurement: project context, dataset
-/// selection, build options, and the measurement mode.
+/// Carries everything needed to set up a measurement: project context, build
+/// options, and the measurement mode.
 pub struct MeasureRequest<'a> {
     /// Parsed `brokkr.toml` configuration.
     pub dev_config: &'a config::DevConfig,
@@ -162,10 +162,6 @@ pub struct MeasureRequest<'a> {
     /// The code tree being built: the live checkout, or the `--commit`
     /// worktree cut from it.
     pub build_root: &'a BuildRoot,
-    /// Dataset name from `--dataset` (e.g. `"denmark"`).
-    pub dataset: &'a str,
-    /// PBF variant from `--variant` (e.g. `"indexed"`, `"raw"`).
-    pub variant: &'a str,
     /// Extra cargo features from CLI `--features` and host config.
     pub features: &'a [String],
     /// Allow benchmarking on a dirty git tree.
@@ -192,9 +188,6 @@ impl MeasureRequest<'_> {
     }
 }
 
-/// Shared execution of standalone command plans.
-pub(crate) mod runner;
-
 // ---------------------------------------------------------------------------
 // Configuration and result types
 // ---------------------------------------------------------------------------
@@ -210,22 +203,20 @@ pub struct BenchConfig {
     /// duplicate-free spelling so equivalent feature sets compare alike.
     pub cargo_features: Option<String>,
     /// The build identity of a row whose binary brokkr did not build with
-    /// cargo (planetiler's Java, tilemaker's CMake). `None` for every cargo
-    /// build: those rows take the profile the session's build actually used
-    /// ([`BenchHarness::with_build_identity`]).
+    /// cargo. `None` for every cargo build: those rows take the profile the
+    /// session's build actually used ([`BenchHarness::with_build_identity`]).
     pub external_build: Option<BuildKind>,
     pub runs: usize,
-    /// Literal subprocess invocation (pbfhogg/elivagar/...). The
-    /// invocation-taking external runners overwrite it with the rendering of
-    /// the invocation they execute; other paths take it from dispatch.
+    /// Literal subprocess invocation. The invocation-taking external runners
+    /// overwrite it with the rendering of the invocation they execute; other
+    /// paths take it from dispatch.
     pub cli_args: Option<String>,
     pub metadata: Vec<KvPair>,
     /// Measurement identity the brokkr argv cannot carry: a selection a
-    /// project command resolves from config into the subprocess argv (the
-    /// tilegen flags a dataset configures). Recorded with the
-    /// row's own invocation and folded into its stored `arm_key`, so rows
-    /// that measured different selections never pair. `None` leaves the key
-    /// exactly the argv's.
+    /// project command resolves from config into the subprocess argv.
+    /// Recorded with the row's own invocation and folded into its stored
+    /// `arm_key`, so rows that measured different selections never pair.
+    /// `None` leaves the key exactly the argv's.
     pub arm_qualifier: Option<String>,
 }
 
@@ -300,8 +291,7 @@ pub struct BenchHarness {
     store_results: bool,
     /// What the session built, when it built the measured binary: the row's
     /// `cargo_profile`, canonical `cargo_features` and `provenance.*` pairs
-    /// come from it. A cell, because a suite measuring several binaries
-    /// notes each build before the rows measuring it ([`Self::note_build`]).
+    /// come from it.
     build_identity: std::cell::RefCell<Option<BuildIdentity>>,
     /// Env var snapshot captured from the measurement request. Merged into
     /// every row's kv via `build_row` as `env.<NAME>` entries - lets
@@ -477,13 +467,6 @@ impl BenchHarness {
         self
     }
 
-    /// Record the build the rows that follow measure, for a suite that builds
-    /// several binaries in one session (the project's own, a baseline crate).
-    /// Rows recorded after it take its profile and provenance.
-    pub fn note_build(&self, identity: BuildIdentity) {
-        *self.build_identity.borrow_mut() = Some(identity);
-    }
-
     /// Attach captured env-var snapshot (see [`crate::config::captured_env_pairs`]).
     /// Merged into every row's kv via `build_row`.
     pub fn with_env_kv(mut self, env_kv: Vec<crate::db::KvPair>) -> Self {
@@ -508,17 +491,6 @@ impl BenchHarness {
     /// `child_pid` into the lockfile for `brokkr lock`.
     pub fn lock(&self) -> &LockGuard {
         &self.lock
-    }
-
-    /// Collect closure-provided timing using the shared measurement loop.
-    pub fn run_internal<F>(&self, config: &BenchConfig, f: F) -> Result<BenchResult, DevError>
-    where
-        F: Fn(usize) -> Result<BenchResult, DevError>,
-    {
-        let mut measurement = self.measure(config, None, WallSource::Closure, false, |i, _| {
-            f(i).map(Iteration::from_result)
-        })?;
-        self.record(config, &mut measurement, |_, _| Ok(()))
     }
 
     /// Collect captured profiling iterations, including their failure evidence.
@@ -606,8 +578,8 @@ impl BenchHarness {
         self.record(&config, &mut measurement, |_, _| Ok(()))
     }
 
-    /// [`measure_external`](Self::measure_external) over an invocation: each
-    /// iteration is its own launch, reserved and released around its child.
+    /// Measure an invocation: each iteration is its own launch, reserved and
+    /// released around its child.
     fn measure_invocation<F>(
         &self,
         config: &BenchConfig,
@@ -652,36 +624,6 @@ impl BenchHarness {
             || Ok(()),
         )
     }
-
-    /// Collect subprocess iterations without recording; postprocessing belongs in `record`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn measure_external<F>(
-        &self,
-        config: &BenchConfig,
-        program: &Path,
-        args: &[&str],
-        cwd: &Path,
-        exits: crate::output::child::Exits,
-        source: WallSource,
-        prepare: F,
-    ) -> Result<Measurement, DevError>
-    where
-        F: Fn() -> Result<(), DevError>,
-    {
-        self.measure(config, Some(program), source, true, |i, fifo| {
-            prepare()?;
-            self.capture(
-                program,
-                args,
-                cwd,
-                &[],
-                exits,
-                fifo.expect("external loop owns a FIFO"),
-                i,
-                None,
-            )
-        })
-    }
 }
 
 /// `config` with `cli_args` taken from the invocation that is about to run,
@@ -701,8 +643,8 @@ fn config_for(config: &BenchConfig, invocation: &Invocation<'_>) -> BenchConfig 
 }
 
 mod argv;
+pub(crate) use argv::Invocation;
 pub use argv::format_cli_args;
-pub(crate) use argv::{Executable, Invocation};
 pub(crate) mod capture;
 pub(crate) mod execution;
 pub(crate) mod kv;

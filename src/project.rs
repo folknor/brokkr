@@ -9,7 +9,6 @@ use crate::error::DevError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Project {
     Pbfhogg,
-    Elivagar,
     Nidhogg,
     Brokkr,
     Litehtml,
@@ -30,7 +29,6 @@ impl Project {
     /// display, help and project-wide checks.
     pub const ALL: &[(&'static str, Self)] = &[
         ("pbfhogg", Self::Pbfhogg),
-        ("elivagar", Self::Elivagar),
         ("nidhogg", Self::Nidhogg),
         ("brokkr", Self::Brokkr),
         ("litehtml-rs", Self::Litehtml),
@@ -67,8 +65,7 @@ impl Project {
         match self {
             Self::Pbfhogg => Some("pbfhogg-cli"),
             Self::Nidhogg => Some("nidhogg"),
-            Self::Elivagar
-            | Self::Brokkr
+            Self::Brokkr
             | Self::Litehtml
             | Self::Sluggrs
             | Self::Ratatoskr
@@ -261,7 +258,7 @@ impl Detection {
 ///
 /// `command` is rendered as `'brokkr {command}'`, so it must be what the user
 /// actually types: its first word a real subcommand name (one the command
-/// catalogue knows, `cli::CommandId::from_name`), optionally followed by a sub-subcommand (`"suite elivagar"`).
+/// catalogue knows, `cli::CommandId::from_name`), optionally followed by a sub-subcommand.
 /// A literal label that names no command is caught by
 /// `tests::require_labels_are_real_commands`.
 pub fn require(current: &Project, expected: &Project, command: &str) -> Result<(), DevError> {

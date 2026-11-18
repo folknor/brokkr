@@ -1,10 +1,51 @@
 //! Non-failing dataset inventory and content-pin status for environment reports.
 
-use super::resolve::FileEntry;
 use crate::config;
 use crate::preflight::{self, FileDigest, PathDigest};
 use std::collections::HashMap;
 use std::path::Path;
+
+/// The file and content pin every dataset entry kind carries.
+trait FileEntry {
+    fn file(&self) -> &str;
+    fn xxhash(&self) -> Option<&FileDigest>;
+}
+
+impl FileEntry for config::PbfEntry {
+    fn file(&self) -> &str {
+        &self.file
+    }
+    fn xxhash(&self) -> Option<&FileDigest> {
+        self.xxhash.as_ref()
+    }
+}
+
+impl FileEntry for config::OscEntry {
+    fn file(&self) -> &str {
+        &self.file
+    }
+    fn xxhash(&self) -> Option<&FileDigest> {
+        self.xxhash.as_ref()
+    }
+}
+
+impl FileEntry for config::PmtilesEntry {
+    fn file(&self) -> &str {
+        &self.file
+    }
+    fn xxhash(&self) -> Option<&FileDigest> {
+        self.xxhash.as_ref()
+    }
+}
+
+impl FileEntry for config::PolygonEntry {
+    fn file(&self) -> &str {
+        &self.file
+    }
+    fn xxhash(&self) -> Option<&FileDigest> {
+        self.xxhash.as_ref()
+    }
+}
 
 /// Whether a configured dataset path exists and passes its content pin.
 /// Computed digests retain file-versus-tree shape, and configured pins are

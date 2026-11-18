@@ -286,7 +286,7 @@ mod tests {
         assert_eq!(tail(&["brokkr", "crit", "--", "--sample-size", "10"]), 2);
         assert_eq!(tail(&["brokkr", "fmt", "--", "--check"]), 1);
         assert_eq!(tail(&["brokkr", "fmt", "a", "--b"]), 2);
-        assert_eq!(tail(&["brokkr", "tilegen", "--bench", "3"]), 0);
+        assert_eq!(tail(&["brokkr", "generic-hotpath", "--bench", "3"]), 0);
     }
 
     #[test]
@@ -464,12 +464,6 @@ mod tests {
             parsed.is_err(),
             "--profile + --no-default-features should conflict"
         );
-    }
-
-    #[test]
-    fn pmtiles_stats_requires_at_least_one_file() {
-        let parsed = parse(["brokkr", "pmtiles-stats"]);
-        assert!(parsed.is_err());
     }
 
     #[test]

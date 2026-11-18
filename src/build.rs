@@ -152,9 +152,9 @@ pub fn configured_profile(
 pub enum BuildKind {
     /// A Cargo build under the given profile.
     Cargo(RustProfile),
-    /// External Java/Maven build (Planetiler baseline).
+    /// External Java/Maven build: the retired Planetiler baseline's rows.
     Java,
-    /// External CMake/C++ build (Tilemaker baseline).
+    /// External CMake/C++ build: the retired Tilemaker baseline's rows.
     CMake,
 }
 
@@ -272,19 +272,6 @@ impl BuildConfig {
             bin: None,
             example: None,
             features: features.iter().map(|s| (*s).to_owned()).collect(),
-            default_features: true,
-            all_features: false,
-            profile: RustProfile::Release,
-        }
-    }
-
-    /// Release build with features from owned strings (e.g. host config features).
-    pub fn release_with_owned_features(package: Option<&str>, features: &[String]) -> Self {
-        Self {
-            package: package.map(std::borrow::ToOwned::to_owned),
-            bin: None,
-            example: None,
-            features: features.to_vec(),
             default_features: true,
             all_features: false,
             profile: RustProfile::Release,

@@ -139,11 +139,6 @@ pub(crate) fn state_stores(state_root: &Path) -> Vec<Store> {
             remedy: "bounded at 16 snapshots; brokkr clean",
         },
         Store {
-            name: "corpus-sort",
-            path: state.corpus_sort_dir(),
-            remedy: "a killed sort's spill goes when dispatch next takes a fresh hold",
-        },
-        Store {
             name: "litehtml-visual.db",
             path: state.litehtml_visual_db(),
             remedy: "no pruning: visual results and approvals",

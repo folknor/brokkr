@@ -38,19 +38,11 @@ pub(crate) fn remove_dir_all(path: &Path) -> io::Result<()> {
 }
 
 /// [`remove_dir_all`] without the backup walk: for a tree whose path comes
-/// from another project's configuration (elivagar's scratch, a measured
-/// run's scratch tree), which a script-bench iteration can sit under but no
+/// from a project's configuration (the ingest outputs the retired nidhogg
+/// commands left), which a script-bench iteration can sit under but no
 /// pbfhogg backup can, and which may be too large to walk for one.
 pub(crate) fn remove_reserved_tree(path: &Path) -> io::Result<()> {
     gated(&[path], None, || std::fs::remove_dir_all(path))
-}
-
-/// Refuse, as a removal of `path` would be refused, without changing
-/// anything: for a directory a child is about to empty itself (elivagar's
-/// `--tmp-dir`). Enough under the global lock, which admits no new
-/// reservation between this check and the child.
-pub(crate) fn check_unreserved(path: &Path) -> io::Result<()> {
-    gated(&[path], None, || Ok(()))
 }
 
 /// Run `op`, a mutation made some other way (several removals, a `git

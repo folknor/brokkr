@@ -102,7 +102,10 @@ fn candidate(entry: &[u8]) -> Result<Option<(&[u8], u64)>, DevError> {
             String::from_utf8_lossy(entry)
         ))
     };
-    let tab = entry.iter().position(|b| *b == b'\t').ok_or_else(malformed)?;
+    let tab = entry
+        .iter()
+        .position(|b| *b == b'\t')
+        .ok_or_else(malformed)?;
     let (meta, path) = (&entry[..tab], &entry[tab + 1..]);
     let meta = std::str::from_utf8(meta).map_err(|_| malformed())?;
     let mut fields = meta.split_ascii_whitespace();
@@ -141,7 +144,10 @@ fn read_pointer(file: &Path, rel: &Path) -> Result<Option<String>, DevError> {
         Err(e) => {
             return Err(DevError::Io(std::io::Error::new(
                 e.kind(),
-                format!("cannot read {} to look for an LFS pointer: {e}", file.display()),
+                format!(
+                    "cannot read {} to look for an LFS pointer: {e}",
+                    file.display()
+                ),
             )));
         }
     };
@@ -193,7 +199,11 @@ pub fn warning(commit: &str, pointers: &[Pointer]) -> Option<String> {
     if pointers.is_empty() {
         return None;
     }
-    let mut paths: Vec<&str> = pointers.iter().take(SHOWN).map(|p| p.path.as_str()).collect();
+    let mut paths: Vec<&str> = pointers
+        .iter()
+        .take(SHOWN)
+        .map(|p| p.path.as_str())
+        .collect();
     let rest = pointers.len().saturating_sub(SHOWN);
     let more = format!("{rest} more");
     if rest > 0 {
@@ -292,8 +302,14 @@ mod tests {
             candidate(blob).expect("record"),
             Some((&b"data/a b.csv"[..], 130))
         );
-        assert_eq!(candidate(b"120000 blob 0123abcd      9\tlink").expect("record"), None);
-        assert_eq!(candidate(b"160000 commit 0123abcd       -\tsub").expect("record"), None);
+        assert_eq!(
+            candidate(b"120000 blob 0123abcd      9\tlink").expect("record"),
+            None
+        );
+        assert_eq!(
+            candidate(b"160000 commit 0123abcd       -\tsub").expect("record"),
+            None
+        );
         assert!(candidate(b"garbage").is_err());
     }
 }

@@ -154,14 +154,13 @@ from brokkr rather than stderr.
 | Harness fn | stdout | stderr kv -> results.db | FIFO -> sidecar.db | Used by |
 |---|---|---|---|---|
 | `run_passthrough_timed` | inherited (shown) | no | **no** (no FIFO) | run mode (no `--bench`) |
-| `run_external_ok` | captured, dropped | **yes** (counters only) | yes | elivagar `tilegen` + `brokkr mogwai` |
-| `measure_external` | captured, dropped | **yes** | yes | elivagar `self` micro-bench; sluggrs `hotpath --bench` (via `run_external_with_kv`) |
-| `run_internal` (+ `run_captured`) | captured, dropped | no | **no** (no FIFO) | elivagar example benches |
+| `run_external_ok` | captured, dropped | **yes** (counters only) | yes | `brokkr mogwai` |
+| `run_external_with_kv` | captured, dropped | **yes** | yes | sluggrs `hotpath --bench` |
 | `capture_hotpath` (stored via `run_hotpath`) | captured | stderr counters + JSON profile | yes | `--hotpath` / `--alloc`, all projects |
 
 The two external paths differ in exactly one thing: **which clock the recorded
 `elapsed_ms` comes from.** `run_external_ok` measures the child from outside;
-`measure_external` believes the target's own `elapsed_ms=` and discards
+`run_external_with_kv` believes the target's own `elapsed_ms=` and discards
 the external wall. Both record microseconds in `elapsed_us` - the external
 path from its exact `Duration` - and `elapsed_ms` is that value rounded to
 nearest.
@@ -191,49 +190,18 @@ Two consequences worth internalizing:
   prints its own `[result]` line instead. To survive bench mode, data must
   go out as a FIFO counter or (on the kv path) an stderr `key=value` line.
 
-## Per-command table
-
-`sidecar` = FIFO markers and counters reach sidecar.db (`brokkr sidecar`).
-`kv` = stderr `key=value` reaches results.db (`brokkr results`): `counters`
-means scraped into `kv` alongside brokkr's own wall-clock, with no
-`elapsed_ms=` contract. Both columns describe **bench mode** (`--bench N`);
-run mode stores nothing for any command.
-
-### elivagar
-
-Elivagar splits by `BuildKind` (`src/elivagar/commands.rs`), so the answer
-varies per command.
-
-| Command | BuildKind | Bench path | sidecar | stderr kv |
-|---|---|---|---|---|
-| tilegen | MainBinary | run_external_ok | yes | counters |
-| pmtiles-writer | Example | run_internal / run_captured | no | no |
-| node-store | Example | run_internal / run_captured | no | no |
-| planetiler | NoBuild | external Java tool | no | no |
-| tilemaker | NoBuild | external C++ tool | no | no |
-
-`tilegen` records brokkr's own best-of-N
-external wall-clock `elapsed_ms`, its metrics to sidecar.db as FIFO counters,
-and non-timing stderr `key=value` lines scraped into results.db `kv` as
-counters. An stderr `elapsed_ms` or `total_ms` does not replace the wall or
-appear as a counter. Its runtime metrics moved from stderr `key=value`
-to FIFO counters on the elivagar side (54f9b07). The example micro-benches record only
-brokkr's wall-clock `elapsed_ms`; they don't scrape stderr into result KV, but
-replay their captured stdout and stderr to the terminal.
-The external baselines build no Rust binary at all.
-
 ## Quick decision guide
 
 - Want a metric in `brokkr results`? Print a non-timing `key=value` line to
   stderr, its key a field name (letter or `_`, then letters, digits, `_`,
   `.`, `-`) with nothing before it. On
-  the external wall-clock path (`run_external_ok`: elivagar `tilegen`, `brokkr mogwai`) it is scraped into `kv` as a counter
+  the external wall-clock path (`run_external_ok`: `brokkr mogwai`) it is scraped into `kv` as a counter
   and feeds `--compare`'s `counters:` line; `elapsed_ms` and `total_ms` are
   reserved and ignored there, and the wall stays brokkr's own. On the
-  self-reported paths (elivagar's `self`
-  micro-bench through `measure_external`) a mandatory
+  self-reported path (sluggrs `hotpath --bench` through
+  `run_external_with_kv`) a mandatory
   `elapsed_ms=`/`total_ms=` line additionally supplies the recorded timing.
 - Want a metric in `brokkr sidecar`? Emit an `@name=value` counter to
-  `BROKKR_MARKER_FIFO`. Works for elivagar
-  `tilegen` (any path that spawns the sidecar), in bench/hotpath/alloc modes.
+  `BROKKR_MARKER_FIFO`. Works on any path that spawns the sidecar, in
+  bench/hotpath/alloc modes.
 - Want it just on your terminal? Print to stdout and run without `--bench`.

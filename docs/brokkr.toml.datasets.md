@@ -26,11 +26,8 @@ paths still resolve against each including project's root.
   Two optional booleans assert properties of the file itself, both default
   `false`: `locations_on_ways` (node coordinates are embedded in ways) and
   `force_sorted` (nodes are monotonic, so the compact node store is safe).
-  Elivagar reads both from the PBF header and `brokkr tilegen` only forces
-  what the header fails to declare, so the normal case leaves them unset.
-  They live here rather than in a `[<host>.tilegen.<name>]` block because they
-  describe the input, not the pipeline - a block would otherwise have to know
-  which variant it was about to be run against.
+  brokkr reads neither; elivagar's own tools and script benches read them
+  from the composed config.
 - `pbf.<variant>.expect` - accepted for compatibility and unused. The keys
   `check-refs`, `check-refs-relations`, `check-ids`, `check-index`,
   `check-locations` and `check-locations-agreement` accept `"clean"` or
@@ -101,9 +98,5 @@ file = "polygons/copenhagen.geojson"
 
 ## Variant selection
 
-Elivagar's measured commands select `pbf.<name>` with `--variant <name>`,
-defaulting to `raw`. Script benches declare and bind their own params.
-
-No command selects a `pmtiles.<variant>` entry: elivagar's archive readers
-address the durable output store by `--dataset`/`--variant`/`--commit`/`--file`
-instead (see `docs/projects/elivagar.md`).
+No built-in command selects a dataset entry. Script benches declare and bind
+their own params, and read the entries from the resolved view.

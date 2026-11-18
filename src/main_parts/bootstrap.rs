@@ -14,14 +14,11 @@ use crate::{
 };
 use std::time::Instant;
 
-// Measurement entry point: threads the resolved config/project/dataset/variant
-// context through to the closure. The args are the context, not a smell.
-#[allow(clippy::too_many_arguments)]
+// Measurement entry point: threads the resolved config and project context
+// through to the closure.
 pub(super) fn run_measured<F>(
     mode: &cli::ModeArgs,
     detection: &project::Detection,
-    dataset: &str,
-    variant: &str,
     invocation: &crate::db::RunInvocation,
     f: F,
 ) -> Result<(), DevError>
@@ -67,8 +64,6 @@ where
                 project: project.clone(),
                 project_root: &detection.project_root,
                 build_root,
-                dataset,
-                variant,
                 features: &features,
                 force: mode.force,
                 mode: mm,

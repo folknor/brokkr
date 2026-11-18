@@ -36,9 +36,9 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 pub use document::{
     BoundParam, Build, CACHE_PROCEDURE, CacheFile, CacheMode, CachePreparation, CaptureOutcome,
     Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT, Evidence, Executable,
-    ExecutableIdentity, HotpathCapture, Iteration, LfsPointer, IterationOutcome, Loss, Measurement, ParamValue,
-    Record, ResolvedBuild, RunDocument, RunOutcome, STDERR_RUN_BYTES, STDERR_TAIL_BYTES, Sample,
-    SinkEnd, StderrCapture, StderrTail,
+    ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, LfsPointer, Loss, Measurement,
+    ParamValue, Record, ResolvedBuild, RunDocument, RunOutcome, STDERR_RUN_BYTES,
+    STDERR_TAIL_BYTES, Sample, SinkEnd, StderrCapture, StderrTail,
 };
 pub use error::StoreError;
 pub use list::{RunFilter, Selection, StoredRun};

@@ -3,32 +3,11 @@
 
 use std::path::Path;
 
-use crate::error::DevError;
-
-/// The executable produced for a measurement plan.
-#[derive(Clone, Copy)]
-pub(crate) struct Executable<'a> {
-    path: &'a Path,
-}
-
-impl<'a> Executable<'a> {
-    pub(crate) fn new(path: &'a Path) -> Self {
-        Self { path }
-    }
-}
-
-impl std::fmt::Debug for Executable<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Executable(..)")
-    }
-}
-
 /// A program together with the arguments resolved for it - the only thing
 /// the measured spawn paths execute.
 ///
-/// The program is borrowed from whatever resolved the arguments (the runner's
-/// built [`Executable`]), so an invocation
-/// cannot outlive the resolution it came from, and the program a row records
+/// The program is borrowed from whatever resolved the arguments, so an
+/// invocation cannot outlive the resolution it came from, and the program a row records
 /// is the program that ran. Nothing path-bearing is readable outside
 /// `crate::measure`: callers spawn through the harness.
 #[derive(Clone, PartialEq, Eq)]
@@ -40,11 +19,6 @@ pub(crate) struct Invocation<'a> {
 impl<'a> Invocation<'a> {
     pub(crate) fn new(program: &'a Path, args: Vec<String>) -> Self {
         Self { program, args }
-    }
-
-    /// The runner's built executable with a plan's argv.
-    pub(crate) fn built(executable: Executable<'a>, args: Vec<String>) -> Result<Self, DevError> {
-        Ok(Self::new(executable.path, args))
     }
 
     /// The `cli_args` column value for this invocation.

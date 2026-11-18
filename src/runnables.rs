@@ -663,10 +663,7 @@ pub fn cmd_install(
 /// `brokkr kill` signals brokkr's PID alone, so brokkr dies and the child is
 /// orphaned and keeps running. The passthrough runner installs a `SigtermGuard`,
 /// marks the child for the OOM killer ahead of brokkr, and publishes its PID
-/// into the lockfile so `kill --hard` and `brokkr lock` can see it. This is the
-/// same regression `run_passthrough_timed` was written to fix for elivagar's
-/// passthrough paths; `run`/`install` were spawning cargo directly and so never
-/// got the fix.
+/// into the lockfile so `kill --hard` and `brokkr lock` can see it.
 ///
 /// No `current_dir`: `build_root` is cwd by construction, which is where the
 /// caller's `project_root` argument comes from.

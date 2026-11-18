@@ -126,7 +126,6 @@ fn parse_dev_config(table: &toml::Table, sources: &ConfigSources) -> Result<DevC
     refuse_retired_sha256(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
-    validate_tilegen(&hosts)?;
 
     Ok(DevConfig {
         hosts,
@@ -1186,14 +1185,13 @@ pub(crate) fn is_host_key(key: &str, value: &toml::Value) -> bool {
 }
 
 /// Judge one host section as a config load judges `[host.<name>]`: its
-/// schema, then its datasets and tilegen tables. How a contract test's
-/// synthetic host is held to what a real one may declare.
+/// schema, then its datasets. How a contract test's synthetic host is held to
+/// what a real one may declare.
 pub(crate) fn check_host_section(name: &str, value: &toml::Value) -> Result<(), DevError> {
     let section = format!("host.{name}");
     let host = parse_host_config(&section, value)?;
     let hosts: HashMap<String, HostConfig> = std::iter::once((section, host)).collect();
-    validate_datasets(&hosts)?;
-    validate_tilegen(&hosts)
+    validate_datasets(&hosts)
 }
 
 fn parse_host_config(section: &str, value: &toml::Value) -> Result<HostConfig, DevError> {
@@ -2646,83 +2644,6 @@ fn validate_datasets(hosts: &HashMap<String, HostConfig>) -> Result<(), DevError
     Ok(())
 }
 
-/// Validate every `[<host>.tilegen.<name>]` block's ocean statement.
-///
-/// These rules are elivagar's, enforced here so a bad block fails at parse
-/// time - before a build, let alone a planet-scale run - and names the field.
-/// The partition rule is not arbitrary: `ocean::selected_pass_grid` implements
-/// one split, at z7/z8, and nowhere else, so a `z0-z5` request is rejected
-/// rather than accepted and quietly served at z7. The alternative is a false
-/// statement in the recorded invocation, which is the failure this whole
-/// config exists to prevent.
-fn validate_tilegen(hosts: &HashMap<String, HostConfig>) -> Result<(), DevError> {
-    for (host, hc) in hosts {
-        for (name, tg) in &hc.tilegen {
-            let at = format!("{host}.tilegen.{name}");
-            let specs = tg.ocean_specs();
-
-            let mut bands: BTreeSet<&'static str> = BTreeSet::new();
-            let mut artifacts = 0usize;
-            for spec in specs {
-                if spec.file().is_empty() {
-                    return Err(DevError::Config(format!("{at}.ocean: file name is empty")));
-                }
-                let band = match spec {
-                    OceanSpec::ShapefileAll(_) => "z0-z14",
-                    OceanSpec::ShapefileLow(_) => "z0-z7",
-                    OceanSpec::ShapefileHigh(_) => "z8-z14",
-                    OceanSpec::Artifact(_) => {
-                        artifacts += 1;
-                        continue;
-                    }
-                };
-                if !bands.insert(band) {
-                    return Err(DevError::Config(format!(
-                        "{at}.ocean: band {band} named twice"
-                    )));
-                }
-            }
-
-            if artifacts > 1 {
-                return Err(DevError::Config(format!(
-                    "{at}.ocean: {artifacts} .pmtiles artifacts named, expected at most one"
-                )));
-            }
-
-            // Absent/empty is a legal statement: it means no ocean.
-            if bands.is_empty() {
-                if artifacts > 0 {
-                    // The artifact is a cache over the shapefiles, not a
-                    // substitute. An extract computes its boundary band near
-                    // the bbox edge from the shapefiles and takes only the
-                    // interior from the artifact, and the artifact's key is
-                    // validated by re-hashing the shapefiles it claims to have
-                    // been built from - so both sides must be present for the
-                    // check to mean anything.
-                    return Err(DevError::Config(format!(
-                        "{at}.ocean: a .pmtiles artifact is a cache over the shapefiles, \
-                         not a substitute, and cannot stand alone; name the shapefiles \
-                         it was built from too"
-                    )));
-                }
-                continue;
-            }
-
-            let all: BTreeSet<&str> = ["z0-z14"].into_iter().collect();
-            let split: BTreeSet<&str> = ["z0-z7", "z8-z14"].into_iter().collect();
-            if bands != all && bands != split {
-                let got: Vec<&str> = bands.iter().copied().collect();
-                return Err(DevError::Config(format!(
-                    "{at}.ocean: shapefiles must partition z0-z14 exactly - either a \
-                     single z0-z14 or the z0-z7 + z8-z14 pair, got {}",
-                    got.join(" + ")
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Validate a snapshot key matches `[a-zA-Z0-9_-]+` and is not the reserved
 /// sentinel `base` (which the CLI uses to refer to the dataset's legacy
 /// top-level pbf/osc data).
@@ -2881,13 +2802,8 @@ pub fn resolve_paths(config: &DevConfig, hostname: &str, project_root: &Path) ->
         .and_then(|h| h.scratch.as_deref())
         .unwrap_or("data/scratch");
 
-    let output_rel = host
-        .and_then(|h| h.output.as_deref())
-        .unwrap_or("data/tilegen");
-
     let data_dir = resolve_relative(project_root, data_rel);
     let scratch_dir = resolve_relative(project_root, scratch_rel);
-    let output_dir = resolve_relative(project_root, output_rel);
 
     let drives = host.and_then(|h| h.drives.clone());
 
@@ -2899,7 +2815,6 @@ pub fn resolve_paths(config: &DevConfig, hostname: &str, project_root: &Path) ->
         hostname: hostname.to_owned(),
         data_dir,
         scratch_dir,
-        output_dir,
         drives,
         features,
         datasets,
