@@ -25,7 +25,7 @@ mod error;
 mod list;
 mod marks;
 mod read;
-mod schedule;
+pub(crate) mod schedule;
 mod schema;
 pub mod wire;
 mod write;
@@ -39,8 +39,9 @@ pub use document::{
     Cell, Child, ChildEnding, Clock, Conditions, Cursor, DOCUMENT_FORMAT, Device, DeviceCounters,
     DeviceLayer, Evidence, Executable, ExecutableIdentity, HostTrace, HotpathCapture, Iteration,
     IterationOutcome, LfsPointer, LockSource, Lockfile, Loss, Measurement, PairingClass,
-    ParamValue, PreviousCommand, Reading, Record, ResolvedBuild, RunDocument, RunOutcome,
-    STDERR_RUN_BYTES, STDERR_TAIL_BYTES, Sample, SinkEnd, StderrCapture, StderrTail,
+    ParamValue, Placement, PreviousCommand, Reading, Record, ResolvedBuild, RunDocument,
+    RunOutcome, Rustflags, STDERR_RUN_BYTES, STDERR_TAIL_BYTES, Sample, SinkEnd, StderrCapture,
+    StderrTail,
 };
 pub use error::StoreError;
 pub use list::{RunFilter, Selection, StoredRun};
@@ -193,6 +194,7 @@ const SHIPPED_STEPS: &[&str] = &[
     "e0ba0dde66f541a52d4d43f90c8e1b72",
     "f9d7fcd7d7602a41fdb62258218ba5f3",
     "b0acbce9c93771d0585279e262af7e74",
+    "4f9b7d11765333857749524fad239886",
 ];
 
 #[cfg(test)]

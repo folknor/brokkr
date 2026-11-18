@@ -46,7 +46,7 @@ pub(super) fn load_run(
                     r.artifact, c.text, r.iterations_requested, r.outcome, r.failure,
                     r.config_digest, r.pairing_key, r.best_iteration, r.measurement, r.alloc,
                     r.lfs_pointers, r.lockfile, r.previous_command, r.fstrim_timer_unix_ms,
-                    r.schedule
+                    r.schedule, r.rustflags
              FROM runs r JOIN configs c ON c.digest = r.config_digest
              WHERE r.uuid = ?1",
             [uuid],
@@ -85,7 +85,13 @@ pub(super) fn load_run(
     doc.build.lfs_pointers = cols.lfs_pointers.as_deref().map(json).transpose()?;
     doc.build.lockfile = cols.lockfile.as_deref().map(json).transpose()?;
     doc.conditions.previous_command = cols.previous_command.as_deref().map(json).transpose()?;
-    doc.schedule = cols.schedule.as_deref().map(json).transpose()?;
+    doc.build.rustflags = cols.rustflags.as_deref().map(json).transpose()?;
+    doc.schedule = cols
+        .schedule
+        .as_deref()
+        .map(super::schedule::from_stored)
+        .transpose()
+        .map_err(|why| unreadable(&format!("run schedule: {why}")))?;
     doc.params = load_params(conn, run_id)?;
     doc.iterations = load_iterations(conn, run_id, children)?;
     let (config_digest, pairing_key, best) = derived;
@@ -116,6 +122,7 @@ struct RunJson {
     lockfile: Option<String>,
     previous_command: Option<String>,
     schedule: Option<String>,
+    rustflags: Option<String>,
 }
 
 struct RunColumns {
@@ -162,6 +169,7 @@ fn run_columns(row: &Row<'_>) -> rusqlite::Result<Option<RunColumns>> {
             artifact: row.get(22)?,
             lfs_pointers: None,
             lockfile: None,
+            rustflags: None,
         },
         measurement: Measurement::Timing,
         params: BTreeMap::new(),
@@ -185,6 +193,7 @@ fn run_columns(row: &Row<'_>) -> rusqlite::Result<Option<RunColumns>> {
             lockfile: row.get(33)?,
             previous_command: row.get(34)?,
             schedule: row.get(36)?,
+            rustflags: row.get(37)?,
         },
     }))
 }

@@ -51,6 +51,11 @@ pub struct Bench {
     /// and refused in a timing run's resolved features. Empty means the bench
     /// cannot be alloc-profiled.
     pub alloc_features: Vec<String>,
+    /// `rustflags = [...]`: rustc flags added to the build at the live cargo
+    /// layer, literal tokens and param splices in order. `None` when the key
+    /// is absent: the build is the plain one, in cargo's own target dir. Set,
+    /// even to an empty list, the build is isolated by its resolved recipe.
+    pub rustflags: Option<Vec<FlagPart>>,
     /// The `[bench_params]` sets this bench pulled in, in the order given.
     pub uses: Vec<String>,
     /// The effective params: every used set's, then the bench's own, which
@@ -62,6 +67,30 @@ pub struct Bench {
     /// The devs' notes on the bench: description, version, date and
     /// changelog, every one valid when the config loaded.
     pub annotations: super::bench_annotations::Annotations,
+}
+
+/// One entry of a bench's `rustflags`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlagPart {
+    /// A token passed as written.
+    Literal(String),
+    /// `{ from_param = "NAME" }`: the array of strings at the key the scalar
+    /// `from` param NAME selected, spliced in place (empty adds nothing).
+    Splice(String),
+}
+
+/// Why a rustflags token cannot travel to rustc: cargo's encoded form
+/// separates tokens with 0x1f, and no environment value holds a NUL.
+pub fn flag_token_problem(token: &str) -> Option<&'static str> {
+    if token.is_empty() {
+        Some("is empty")
+    } else if token.contains('\0') {
+        Some("holds a NUL")
+    } else if token.contains('\u{1f}') {
+        Some("holds 0x1f, cargo's encoded-flags separator")
+    } else {
+        None
+    }
 }
 
 /// Where a bench's Lua lives.
@@ -371,6 +400,7 @@ struct RawBench {
     hotpath_features: Vec<String>,
     #[serde(default)]
     alloc_features: Vec<String>,
+    rustflags: Option<Vec<toml::Value>>,
     #[serde(default)]
     uses: Vec<String>,
     #[serde(default)]
@@ -776,6 +806,11 @@ fn parse_bench(
     }
     let params = effective_params(&raw.uses, raw.params, sets).map_err(err)?;
     check_references(&params).map_err(err)?;
+    let rustflags = raw
+        .rustflags
+        .map(|list| parse_rustflags(&list, &params))
+        .transpose()
+        .map_err(err)?;
     Ok(Bench {
         name: name.to_owned(),
         script,
@@ -786,11 +821,52 @@ fn parse_bench(
         default_features: raw.default_features.unwrap_or(true),
         hotpath_features: raw.hotpath_features,
         alloc_features: raw.alloc_features,
+        rustflags,
         uses: raw.uses,
         params,
         library: None,
         annotations,
     })
+}
+
+/// A bench's `rustflags`: each entry a token string or `{ from_param =
+/// "NAME" }` naming a scalar `from` param of the bench, whose selected entry
+/// is checked to be an array of strings when the bench binds.
+fn parse_rustflags(
+    list: &[toml::Value],
+    params: &BTreeMap<String, Param>,
+) -> Result<Vec<FlagPart>, String> {
+    list.iter()
+        .map(|item| match item {
+            toml::Value::String(token) => match flag_token_problem(token) {
+                Some(problem) => Err(format!("rustflags token {token:?} {problem}")),
+                None => Ok(FlagPart::Literal(token.clone())),
+            },
+            toml::Value::Table(table) => {
+                let name = match (table.len(), table.get("from_param")) {
+                    (1, Some(toml::Value::String(name))) => name,
+                    _ => {
+                        return Err(
+                            "a rustflags table is exactly { from_param = \"NAME\" }".to_owned()
+                        );
+                    }
+                };
+                let Some(param) = params.get(name) else {
+                    return Err(format!(
+                        "rustflags splices from_param {name:?}, which is not a param of the bench"
+                    ));
+                };
+                if !matches!(param.domain, Domain::From(_)) || param.many {
+                    return Err(format!(
+                        "rustflags splices from_param {name:?}: the source is a scalar `from` \
+                         param, whose selected entry is an array of flags"
+                    ));
+                }
+                Ok(FlagPart::Splice(name.clone()))
+            }
+            _ => Err("a rustflags entry is a token string or { from_param = \"NAME\" }".to_owned()),
+        })
+        .collect()
 }
 
 /// Parse the optional top-level `bench_lib = "dir"`: the directory a bench
@@ -1227,6 +1303,61 @@ mod tests {
              hotpath_features = [\"hotpath\"]\n",
         );
         assert!(err.contains("both features and hotpath_features"), "{err}");
+    }
+
+    #[test]
+    fn rustflags_take_literal_tokens_and_scalar_from_splices() {
+        let benches = single(
+            "rustflags",
+            "[bench.cat]\nscript = \"x = 1\"\n\
+             params.layout = { from = \"data.layouts\" }\n\
+             rustflags = [\"--cfg\", \"ab\", { from_param = \"layout\" }]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            benches["cat"].rustflags,
+            Some(vec![
+                FlagPart::Literal("--cfg".into()),
+                FlagPart::Literal("ab".into()),
+                FlagPart::Splice("layout".into()),
+            ])
+        );
+        let plain = single("no_rustflags", "[bench.cat]\nscript = \"x = 1\"\n").unwrap();
+        assert_eq!(plain["cat"].rustflags, None);
+        let empty = single(
+            "empty_rustflags",
+            "[bench.cat]\nscript = \"x = 1\"\nrustflags = []\n",
+        )
+        .unwrap();
+        assert_eq!(empty["cat"].rustflags, Some(Vec::new()));
+        for (name, extra, want) in [
+            ("blank", "rustflags = [\"\"]", "is empty"),
+            (
+                "unknown",
+                "rustflags = [{ from_param = \"x\" }]",
+                "not a param",
+            ),
+            (
+                "extra_key",
+                "rustflags = [{ from_param = \"x\", y = 1 }]",
+                "exactly",
+            ),
+            ("number", "rustflags = [1]", "token string"),
+            (
+                "free",
+                "params.x = { free = true }\nrustflags = [{ from_param = \"x\" }]",
+                "scalar `from`",
+            ),
+            (
+                "many",
+                "params.x = { from = \"data.l\", many = true }\n\
+                 rustflags = [{ from_param = \"x\" }]",
+                "scalar `from`",
+            ),
+        ] {
+            let err = err_of(name, &format!("[bench.cat]\nscript = \"x = 1\"\n{extra}\n"));
+            assert!(err.contains(want), "{name}: {err}");
+        }
     }
 
     #[test]

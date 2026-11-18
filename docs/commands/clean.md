@@ -115,7 +115,9 @@ Bare `brokkr clean`, in order:
   under the current cargo-resolved target root, where it wrote. A host
   `target` plays no part.
 - `<target>/rustflags-*` - the per-sweep isolated target dirs a
-  `rustflags`-carrying `[[check]]` entry builds into. Reproducible caches
+  `rustflags`-carrying `[[check]]` entry builds into, and the per-recipe
+  ones a script bench with `rustflags` builds the live tree into (a
+  `--commit` one's sit under its worktree target). Reproducible caches
   nothing else reaches. Taken from cargo's real resolved target dir, not a
   host `target` override, since that is where the check phase actually built
   them.

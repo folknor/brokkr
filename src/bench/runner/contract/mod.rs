@@ -275,6 +275,16 @@ impl Context {
             )));
         }
         let bound = arms.remove(0);
+        // A splice the arm cannot resolve refuses the run before validate(),
+        // as the real binder's check does.
+        if let Err(why) = bound.rustflags(bench.rustflags.as_deref()) {
+            return unconsumed(spec, 0, 0).map(|()| {
+                refused(
+                    "bind",
+                    DevError::Config(format!("bench {}: {why}", bench.name)),
+                )
+            });
+        }
         // A contradiction is the spec's whatever the script calls; only an
         // absent name waits for a call that needs it.
         let program = program(spec, bench);

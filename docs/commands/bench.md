@@ -273,7 +273,8 @@ would, up to the build, and stops: every arm bound (Binding params,
 `brokkr man bench-config`) and validated (Validate), the commit resolved,
 every bound input's shape checked and every pinned one hashed against its
 pin, then one line naming what each arm would build and one per arm naming
-its params, and `ok`. It opens no store, reserves no input, runs no
+its params (and, for a bench with `rustflags`, the tokens it resolved), and
+`ok`. It opens no store, reserves no input, runs no
 preflight (which may launch programs, so it is the run's to make, and a
 `preflight not run` line says one was skipped), builds and stores nothing,
 and takes no lock, so a queue of invocations can be checked while a bench
@@ -492,9 +493,13 @@ Before anything is built, everything is prepared once, as for arms: every
 bench's params bound and `validate()` run, the inputs of every arm reserved
 and hashed, the preflight run for each bench and each commit its cells
 build, `since()` answering for that commit (its answers kept for the
-commit's cells). Then each distinct build is made once, in competitor order:
-one per commit, target, profile, features and the bench's barred profiling
-features, so competitors that differ only in a param share one. Without
+commit's cells). Then each distinct build is made once, in the order the
+cells first need them (workload by workload, competitors in order): one per
+commit, target, profile, features, the bench's barred profiling features
+and its resolved `rustflags`, so competitors that differ only in a param
+share one, and a workload param spliced into `rustflags` gives each
+workload its own builds (`--commit A --commit B --layout all`: two builds
+per layout). Without
 `--commit` the live HEAD is read before each build and must still be the
 commit resolved for the invocation, else the rest is refused, not run and
 not stored; the check after the build (The build) applies too. Every cell
@@ -502,7 +507,8 @@ of a build runs its snapshot, so no cell follows a build and HEAD moving
 once the builds are made changes nothing measured.
 
 A build that fails is stored once, as a run of its own whose schedule marks
-it a build (What a run stores), attributed to the first cell it serves; its
+it a build (What a run stores), attributed to the first cell it serves in
+that order; its
 cells are blocked, never run and never stored, and the rest still run. A
 failed cell does not stop the rest either. The command fails once
 everything ran, naming the failed builds and cells. A stop or a run that
@@ -510,8 +516,9 @@ cannot be stored ends the invocation after the run in flight is stored,
 naming how many cells were left. The last line names the invocation's
 id, which `brokkr results --invocation ID` summarizes.
 
-`--dry-run` prints the plan, each competitor, each workload and each build,
-and stops as for arms (Dry run).
+`--dry-run` prints the plan, each competitor, each workload (with its
+builds when they differ by workload) and each build with its `rustflags`
+tokens, and stops as for arms (Dry run).
 
 ## The build
 
@@ -528,11 +535,23 @@ drops the package's defaults. A timing run (no `--hotpath` or `--alloc`)
 fails its arm when cargo resolved any of the bench's `hotpath_features` or
 `alloc_features`, as a default or through another feature does: that build
 is instrumented. A `--hotpath` run fails the same way on an
-`alloc_features` entry its `hotpath_features` does not share. The
+`alloc_features` entry its `hotpath_features` does not share. A bench's `rustflags` (`brokkr man bench-config`), resolved under the
+arm, are added at the rustflags layer cargo will actually read for the
+build root (appended to a set `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS`,
+else a `--config` entry at the live target or build table), so the
+project's own flags stay; when the config chain holds a target table
+brokkr cannot judge, the build fails rather than risk flags that never
+reach rustc. A bench that sets the key builds with `CARGO_TARGET_DIR` and
+`CARGO_BUILD_BUILD_DIR` both at `<base>/rustflags-<hash>`, `base` the
+worktree's target dir under `--commit` and cargo's target dir otherwise,
+the hash keyed by the resolved tokens, so each recipe, the empty one too,
+keeps its own cache and none disturbs the plain build. `--hotpath` and
+`--alloc` builds take the same recipe. The
 built executable is snapshotted into
 `.brokkr/artifacts/<xxh128>/<name>` as `brokkr build` does, and every child
 runs that snapshot. The run records what was asked for, the bin and the
-features cargo resolved for it, and the snapshot's digest. A `program` call
+features cargo resolved for it, the snapshot's digest, and for a bench
+with `rustflags` the resolved tokens and how they were injected. A `program` call
 (`binary_with()`) runs another executable in its place.
 
 Once the build and its snapshot have succeeded, and unless a stop is
@@ -1032,7 +1051,8 @@ have landed says so, naming the attempt whose outcome is unknown, and
 
 **Schedule.** A `--rounds` run (Rounds) also stores its schedule: the
 invocation's id, the whole plan (the axis, every competitor's and
-workload's label, the rounds, and which build each competitor runs), its own
+workload's label, the rounds, and which build each competitor runs in each
+workload), its own
 slot (workload, competitor, round and position in the round) and whether it
 records a cell or a build that failed or was interrupted. Every run of an
 invocation carries the same plan, so any one names every slot planned. A

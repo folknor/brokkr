@@ -74,7 +74,18 @@ iteration and a run whose iterations disagreed are all stored. It holds:
   (observed before the build), `digest` its xxh3-128 read once the build
   succeeded, absent with no file, a failed or unfinished build, or an
   `unmanaged` layout, which never carries one. The `runs` column is
-  `lockfile` (schema step 10), NULL when not recorded;
+  `lockfile` (schema step 10), NULL when not recorded; and `rustflags`, for
+  a bench with `rustflags` only: `additions`, the resolved tokens, and
+  `placement`, how they reached cargo (`"none"` for an empty recipe,
+  `{"env": {key, value}}` with the whole value cargo received, or
+  `{"config": {args}}`), absent when the build stopped before one was
+  chosen. Publication refuses a token that is empty or holds a NUL or 0x1f,
+  `none` beside tokens, an injection beside none, an injection that does
+  not carry the tokens (an env key other than `RUSTFLAGS` or
+  `CARGO_ENCODED_RUSTFLAGS`, or a value not ending with them; anything but
+  one `--config` entry at `build.rustflags` or `target."cfg(all())".rustflags`
+  whose array is exactly them), and an artifact without a placement. The `runs` column is `rustflags` (schema step 13), NULL for
+  every other run;
 - what was asked to be measured: `timing`, `hotpath` for `brokkr bench
   --hotpath`, or `alloc` for `brokkr bench --alloc`. A run stored before the
   field existed reads as `timing`. The `runs` table keeps `alloc` as
@@ -98,21 +109,28 @@ iteration and a run whose iterations disagreed are all stored. It holds:
   otherwise): `invocation`, the id its invocation's runs share (32 lowercase
   hex); `plan`, the same in every run of the invocation (`axis`, `{"param":
   {"name"}}`, `"build"` or `"bench"`; each competitor's and workload's label;
-  `rounds`; and `builds`, each competitor's build index, numbered from 0 in
-  the order competitors first need them); `slot`, `{workload, competitor,
+  `rounds`; and `builds`, one row per workload of each competitor's build
+  index there, numbered from 0 in the order cells first need them, workload
+  by workload, competitors in order); `slot`, `{workload, competitor,
   round, position}`, the position the competitor's own index in an even
   round and reversed in an odd one; and `phase`, `"measure"` for a cell or
   `{"build": {"build"}}` for a build that failed or was interrupted,
-  attributed to the first slot it serves (workload 0, round 0, the first
-  competitor of that build). Publication refuses a plan of fewer than two
+  attributed to the first slot it serves (round 0, the first cell of that
+  build in that order). Publication refuses a plan of fewer than two
   competitors, no workload, 0 or more than 10 000 rounds, more than 100 000
-  slots, builds not numbered so, a slot outside the plan or not at the
+  slots, a `builds` row count other than the workloads' or a row length
+  other than the competitors', builds not numbered so, a slot outside the plan or not at the
   position its round gives, and a build-phase run that ran an iteration or
   completed. The `runs` columns are `schedule` and `invocation`, the latter
   indexed and NULL exactly when `schedule` is (schema step 12). One
   invocation's runs agreeing on the plan, and holding each slot once, is the
   writer's to keep; the reader (`brokkr results --invocation`) refuses runs
-  that do not.
+  that do not. Before protocol 11 `builds` was one index per competitor; a
+  run stored so still reads, its list checked against the competitors and
+  the slot bound and taken as the row of every workload, the result then
+  validated as a published schedule is. That shape is
+  accepted only when the store decodes its own `schedule` column: the wire
+  and every new write carry the matrix.
 
 An iteration holds its outcome (`completed` with a verdict, where nil and
 `""` differ; `failed` with a reason; `interrupted`), its block wall from the

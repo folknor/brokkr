@@ -439,6 +439,111 @@ fn with_published_cargo<T>(
     result
 }
 
+/// How a script bench's `rustflags` reach one cargo build: injected at the
+/// live rustflags layer, never displacing the project's own flags, and built
+/// in a target dir of the recipe's own, intermediates included.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustflagsInjection {
+    pub placement: Injected,
+    /// `<base>/rustflags-<hash>`: `base` the worktree's isolated target for a
+    /// `--commit` build, else cargo's target directory.
+    pub target_dir: PathBuf,
+}
+
+/// What [`RustflagsInjection`] adds to the cargo invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Injected {
+    /// An empty recipe: nothing added.
+    None,
+    /// The live env source with the additions appended: the whole value.
+    Env { key: String, value: String },
+    /// `--config` arguments at the live config layer.
+    Config { args: Vec<String> },
+}
+
+impl RustflagsInjection {
+    /// Where `additions` go for a build rooted at `build_root`. Refused when
+    /// the live layer cannot be proven: the fallback could leave the flags
+    /// inert, and a run labelled with flags that never reached rustc is
+    /// worse than no run.
+    pub fn place(build_root: &Path, additions: &[String]) -> Result<Self, DevError> {
+        let placement = if additions.is_empty() {
+            Injected::None
+        } else {
+            let placed = crate::rustflags::place(
+                crate::rustflags::FlagKind::Rustc,
+                build_root,
+                None,
+                crate::rustflags::EffectiveEnv::new(&[]),
+                additions,
+            )?;
+            if !placed.certain {
+                return Err(DevError::Refused(
+                    "the bench's rustflags cannot be placed with certainty: the cargo config \
+                     chain holds a target rustflags table brokkr cannot judge (an unmodelled \
+                     cfg, configured triples that disagree, or an unreadable file), so the \
+                     flags might never reach rustc"
+                        .into(),
+                ));
+            }
+            match placed.env {
+                Some((key, value)) => Injected::Env { key, value },
+                None => Injected::Config { args: placed.args },
+            }
+        };
+        let base = match cargo_target_dir_override(build_root) {
+            Some(dir) => PathBuf::from(dir),
+            None => project_info(Some(build_root))?.target_dir,
+        };
+        Ok(Self {
+            placement,
+            target_dir: base.join(format!(
+                "{}{}",
+                crate::target_namespace::RUSTFLAGS_PREFIX,
+                recipe_key(additions)
+            )),
+        })
+    }
+}
+
+/// The target dir key of a bench's resolved `rustflags`: FNV-1a over a
+/// domain tag and each token length-prefixed, so no two token vectors share
+/// a key by concatenation, and a `[[check]]` sweep of the same flags (which
+/// exports them as `RUSTFLAGS`, a different build) never shares the dir.
+fn recipe_key(additions: &[String]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    eat(b"brokkr bench rustflags\0");
+    for token in additions {
+        eat(&(token.len() as u64).to_le_bytes());
+        eat(token.as_bytes());
+    }
+    format!("{hash:016x}")
+}
+
+/// [`cargo_build`] with a bench's `rustflags` injected and its target dir
+/// isolated.
+pub fn cargo_build_with_rustflags(
+    config: &BuildConfig,
+    project_root: &Path,
+    injection: &RustflagsInjection,
+) -> Result<BuiltArtifact, DevError> {
+    with_published_cargo(None, |publish| {
+        cargo_build_inner(
+            config,
+            project_root,
+            publish,
+            crate::shutdown::ChildIsolation::Inherit,
+            Some(injection),
+        )
+    })
+}
+
 /// Body of [`cargo_build_observed`], run once the hold is established.
 fn cargo_build_locked(
     config: &BuildConfig,
@@ -446,9 +551,23 @@ fn cargo_build_locked(
     on_spawn: &dyn Fn(u32),
     isolation: crate::shutdown::ChildIsolation<'_>,
 ) -> Result<BuiltArtifact, DevError> {
+    cargo_build_inner(config, project_root, on_spawn, isolation, None)
+}
+
+fn cargo_build_inner(
+    config: &BuildConfig,
+    project_root: &Path,
+    on_spawn: &dyn Fn(u32),
+    isolation: crate::shutdown::ChildIsolation<'_>,
+    injection: Option<&RustflagsInjection>,
+) -> Result<BuiltArtifact, DevError> {
     let profile = config.profile.clone();
     let on_spawn = Some(on_spawn);
-    let args = build_args(config)?;
+    let mut args = build_args(config)?;
+    if let Some(Injected::Config { args: extra }) = injection.map(|i| &i.placement) {
+        // `--config` belongs after the subcommand, as any cargo option.
+        args.splice(1..1, extra.iter().cloned());
+    }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     output::build_msg(&format!("cargo {}", arg_refs.join(" ")));
@@ -466,10 +585,31 @@ fn cargo_build_locked(
     // That dir sits under the live project's target, on its disk (`worktree`'s
     // module doc).
     let target_override = cargo_target_dir_override(project_root);
-    let env = target_dir_env(target_override.as_deref());
-    if let Some(dir) = &target_override {
-        output::detail_or_console(&format!("isolating worktree build target dir -> {dir}"));
+    let mut owned: Vec<(String, String)> = Vec::new();
+    match injection {
+        Some(injection) => {
+            // The recipe's own dir, intermediates too: an inherited absolute
+            // `build.build-dir` would otherwise share fingerprints across
+            // checkouts and recipes.
+            let dir = injection.target_dir.display().to_string();
+            output::detail_or_console(&format!("bench rustflags build target dir -> {dir}"));
+            owned.push(("CARGO_TARGET_DIR".into(), dir.clone()));
+            owned.push(("CARGO_BUILD_BUILD_DIR".into(), dir));
+            if let Injected::Env { key, value } = &injection.placement {
+                owned.push((key.clone(), value.clone()));
+            }
+        }
+        None => {
+            if let Some(dir) = &target_override {
+                output::detail_or_console(&format!("isolating worktree build target dir -> {dir}"));
+                owned.push(("CARGO_TARGET_DIR".into(), dir.clone()));
+            }
+        }
     }
+    let env: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
 
     let start = Instant::now();
     let captured = output::run_captured_observed(

@@ -57,6 +57,7 @@ static RUN: std::sync::LazyLock<store::RunDocument> =
             artifact: None,
             lfs_pointers: None,
             lockfile: None,
+            rustflags: None,
         },
         measurement: store::Measurement::Timing,
         params: BTreeMap::new(),

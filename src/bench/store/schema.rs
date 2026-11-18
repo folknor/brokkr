@@ -367,8 +367,16 @@ ALTER TABLE runs ADD COLUMN invocation TEXT
 CREATE INDEX runs_invocation ON runs(invocation) WHERE invocation IS NOT NULL;
 ";
 
+/// Version 13: a bench's `rustflags` recipe as its build resolved it, a JSON
+/// object `{additions, placement?}`; NULL for a bench without the key, which
+/// is every earlier run.
+const V13: &str = "
+ALTER TABLE runs ADD COLUMN rustflags TEXT
+    CHECK (rustflags IS NULL OR json_type(rustflags) = 'object');
+";
+
 /// The chain. Shipped steps are frozen; append only.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 

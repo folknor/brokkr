@@ -83,6 +83,37 @@ fn lfs_line(run: &StoredRun, side: &str) -> Option<String> {
 /// Both sides recorded a root `Cargo.lock` digest and the bytes differ. Says
 /// only that the file differs: a workspace package entry changes it as well
 /// as a dependency version does.
+/// A bench `rustflags` recipe or its placement that differs between the
+/// sides: a layout pin against no pin, say. Pairing stays on params, since a
+/// flags change can be the treatment itself; this names it. A side without
+/// a recipe is the plain build, which the line says, so it never reads as
+/// an empty recipe.
+fn rustflags_line(a: &StoredRun, b: &StoredRun) -> Option<String> {
+    let (x, y) = (
+        a.doc.build.rustflags.as_ref(),
+        b.doc.build.rustflags.as_ref(),
+    );
+    if x == y {
+        return None;
+    }
+    let shown = |flags: Option<&crate::bench::store::Rustflags>| match flags {
+        None => "none (plain build)".to_owned(),
+        Some(f) => format!(
+            "[{}] {}",
+            f.additions.join(" "),
+            f.placement.as_ref().map_or_else(
+                || "(not placed)".to_owned(),
+                crate::bench::store::Placement::describe
+            )
+        ),
+    };
+    Some(format!(
+        "  rustflags differ: A {} -> B {}",
+        shown(x),
+        shown(y)
+    ))
+}
+
 fn lockfile_line(a: &StoredRun, b: &StoredRun) -> Option<String> {
     let (x, y) = (
         a.doc.build.lockfile.as_ref()?,
@@ -732,6 +763,7 @@ pub(crate) fn format_compare(
                 lines.extend(lfs_line(x, "A"));
                 lines.extend(lfs_line(y, "B"));
                 lines.extend(lockfile_line(x, y));
+                lines.extend(rustflags_line(x, y));
                 lines.extend(executables_line(x, y));
                 lines.extend(preparations_line(x, y));
                 lines.extend(host_line(x, y));

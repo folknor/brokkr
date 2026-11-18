@@ -302,6 +302,13 @@ pub(super) fn document(uuid: &str) -> RunDocument {
                 source: super::store::LockSource::Seeded,
                 digest: Some("ffeeddccbbaa99887766554433221100".into()),
             }),
+            rustflags: Some(super::store::Rustflags {
+                additions: vec!["-Cllvm-args=-align-all-functions=6".into()],
+                placement: Some(super::store::Placement::Env {
+                    key: "RUSTFLAGS".into(),
+                    value: "-Ctarget-cpu=native -Cllvm-args=-align-all-functions=6".into(),
+                }),
+            }),
         },
         measurement: Measurement::Timing,
         params: BTreeMap::from([
@@ -343,7 +350,7 @@ fn schedule(invocation: &str, competitor: u32, round: u32) -> super::store::Sche
             competitors: vec!["a".to_owned(), "b".to_owned()],
             workloads: vec![String::new()],
             rounds: 2,
-            builds: vec![0, 0],
+            builds: vec![vec![0, 0]],
         },
         slot: super::store::Slot {
             workload: 0,
@@ -353,6 +360,89 @@ fn schedule(invocation: &str, competitor: u32, round: u32) -> super::store::Sche
         },
         phase: super::store::Phase::Measure,
     }
+}
+
+/// A `rustflags` record is held to what it claims: an injection that does
+/// not carry the additions, an empty recipe injected, or an artifact never
+/// placed is refused.
+#[test]
+fn a_rustflags_record_must_carry_its_additions() {
+    use super::store::Placement;
+    let base = document("0123456789abcdef0123456789abcdef");
+    let with = |placement: Option<Placement>, additions: &[&str]| {
+        let mut doc = base.clone();
+        doc.build.rustflags = Some(super::store::Rustflags {
+            additions: additions.iter().map(|a| (*a).to_owned()).collect(),
+            placement,
+        });
+        doc
+    };
+    refused(
+        &with(Some(Placement::Config { args: Vec::new() }), &["-Cx"]),
+        "does not carry",
+    );
+    refused(
+        &with(
+            Some(Placement::Env {
+                key: "PATH".into(),
+                value: "-Cx".into(),
+            }),
+            &["-Cx"],
+        ),
+        "does not carry",
+    );
+    refused(
+        &with(
+            Some(Placement::Config {
+                args: vec!["--config".into(), "build.rustflags=[\"-Cy\"]".into()],
+            }),
+            &["-Cx"],
+        ),
+        "does not carry",
+    );
+    refused(&with(Some(Placement::None), &["-Cx"]), "nothing injected");
+    refused(&with(None, &["-Cx"]), "never placed");
+    refused(&with(Some(Placement::None), &[""]), "rustflags token");
+}
+
+/// A plan stored before builds were per cell, one build per competitor,
+/// reads back as that row in every workload; a list that does not match the
+/// competitors is unreadable rather than guessed at.
+#[test]
+fn a_legacy_per_competitor_plan_reads_as_the_matrix() {
+    let mut legacy = schedule("fedcba9876543210fedcba9876543210", 0, 0);
+    legacy.plan.workloads = vec!["w=a".into(), "w=b".into()];
+    legacy.plan.builds = vec![vec![0, 1], vec![0, 1]];
+    let mut text = serde_json::to_value(&legacy).unwrap();
+    text["plan"]["builds"] = serde_json::json!([0, 1]);
+    let read = super::store::schedule::from_stored(&text.to_string()).unwrap();
+    assert_eq!(read, legacy);
+    text["plan"]["builds"] = serde_json::json!([0]);
+    assert!(
+        super::store::schedule::from_stored(&text.to_string())
+            .unwrap_err()
+            .contains("1 builds named for 2 competitors")
+    );
+    // The wire takes only the matrix.
+    text["plan"]["builds"] = serde_json::json!([0, 1]);
+    assert!(serde_json::from_value::<super::store::Schedule>(text).is_err());
+}
+
+/// Builds that differ by workload: a failed build is attributed to the first
+/// cell it serves, which may lie past workload 0.
+#[test]
+fn a_per_cell_plan_attributes_a_build_to_its_first_cell() {
+    let mut s = schedule("fedcba9876543210fedcba9876543210", 0, 0);
+    s.plan.workloads = vec!["layout=a".into(), "layout=b".into()];
+    s.plan.builds = vec![vec![0, 1], vec![2, 3]];
+    s.phase = super::store::Phase::Build { build: 2 };
+    assert!(s.validate().is_err());
+    s.slot.workload = 1;
+    s.validate().unwrap();
+    s.plan.builds = vec![vec![0, 2], vec![1, 3]];
+    assert!(s.validate().unwrap_err().contains("is named before"));
+    s.plan.builds = vec![vec![0, 1]];
+    assert!(s.validate().unwrap_err().contains("workloads"));
 }
 
 #[test]
@@ -933,6 +1023,7 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
     // A version one store held no stderr, no LFS pointers and no lockfile.
     doc.build.lfs_pointers = None;
     doc.build.lockfile = None;
+    doc.build.rustflags = None;
     doc.conditions.previous_command = None;
     doc.conditions.fstrim_timer_unix_ms = None;
     for iteration in &mut doc.iterations {
@@ -949,7 +1040,8 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         store
             .conn()
             .execute_batch(
-                "DROP INDEX runs_invocation;
+                "ALTER TABLE runs DROP COLUMN rustflags;
+                 DROP INDEX runs_invocation;
                  ALTER TABLE runs DROP COLUMN invocation;
                  ALTER TABLE runs DROP COLUMN schedule;
                  DROP TABLE host_readings;
@@ -977,7 +1069,7 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     assert!(store.marks(&doc.project).unwrap().is_empty());
     assert_eq!(store.load(&doc.uuid).unwrap(), Some(doc));
 }

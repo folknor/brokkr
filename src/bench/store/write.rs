@@ -74,6 +74,11 @@ fn insert_run(tx: &Connection, doc: &RunDocument, config_digest: &str) -> Result
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
+    let rustflags = build
+        .rustflags
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     let previous_command = doc
         .conditions
         .previous_command
@@ -93,10 +98,10 @@ fn insert_run(tx: &Connection, doc: &RunDocument, config_digest: &str) -> Result
             captured_env, target, profile, features, default_features, resolved_bin,
             resolved_features, artifact, config_digest, iterations_requested, outcome,
             failure, best_iteration, pairing_key, measurement, alloc, lfs_pointers,
-            lockfile, previous_command, fstrim_timer_unix_ms, schedule, invocation
+            lockfile, previous_command, fstrim_timer_unix_ms, schedule, invocation, rustflags
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                    ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31,
-                   ?32, ?33, ?34, ?35, ?36, ?37)",
+                   ?32, ?33, ?34, ?35, ?36, ?37, ?38)",
         params![
             doc.uuid,
             doc.format,
@@ -135,6 +140,7 @@ fn insert_run(tx: &Connection, doc: &RunDocument, config_digest: &str) -> Result
             doc.conditions.fstrim_timer_unix_ms,
             schedule,
             invocation,
+            rustflags,
         ],
     )?;
     Ok(tx.last_insert_rowid())

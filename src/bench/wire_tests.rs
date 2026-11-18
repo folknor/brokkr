@@ -242,6 +242,7 @@ fn frozen_document() -> RunDocument {
                 source: super::store::LockSource::Seeded,
                 digest: Some("ffeeddccbbaa99887766554433221100".into()),
             }),
+            rustflags: Some(frozen_rustflags()),
         },
         measurement: Measurement::Hotpath,
         params: BTreeMap::from([(
@@ -280,7 +281,7 @@ fn frozen_document() -> RunDocument {
                 competitors: vec!["pbfhogg".into(), "osmium".into()],
                 workloads: vec!["row=cat".into(), "row=sort".into()],
                 rounds: 4,
-                builds: vec![0, 0],
+                builds: vec![vec![0, 0], vec![1, 1]],
             },
             slot: super::store::Slot {
                 workload: 1,
@@ -289,6 +290,19 @@ fn frozen_document() -> RunDocument {
                 position: 1,
             },
             phase: super::store::Phase::Measure,
+        }),
+    }
+}
+
+/// The protocol's `rustflags` fixture, frozen with it.
+fn frozen_rustflags() -> super::store::Rustflags {
+    super::store::Rustflags {
+        additions: vec!["-Cllvm-args=-align-loops=64".into()],
+        placement: Some(super::store::Placement::Config {
+            args: vec![
+                "--config".into(),
+                "build.rustflags=[\"-Cllvm-args=-align-loops=64\"]".into(),
+            ],
         }),
     }
 }

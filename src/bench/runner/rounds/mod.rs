@@ -48,6 +48,8 @@ struct BuildKey {
     default_features: bool,
     hotpath_features: Vec<String>,
     alloc_features: Vec<String>,
+    /// The bench's `rustflags` as this cell's arm resolves them.
+    rustflags: Option<Vec<String>>,
 }
 
 /// A build made once, which every cell of it runs.
@@ -236,22 +238,28 @@ fn plan_invocation<'a>(
         (None, true) => plan::by_build(&entries[0], &commit_labels)?,
         (None, false) => plan::by_bench(&entries)?,
     };
-    // One build per distinct tree and cargo request, in the order the
-    // competitors first need them.
+    // One build per distinct tree and cargo request, in the order the cells
+    // first need them, workload by workload.
     let mut builds: Vec<BuildKey> = Vec::new();
-    let mut build_of: Vec<u32> = Vec::with_capacity(grid.competitors.len());
-    for recipe in &grid.recipes[0] {
-        let bench = entries[recipe.bench].bench;
-        let key = BuildKey {
-            commit: recipe.commit,
-            target: bench.target.clone(),
-            profile: super::profile_of(detection, bench).to_string(),
-            features: super::build_features(&detection.config, bench, measurement),
-            default_features: bench.default_features,
-            hotpath_features: bench.hotpath_features.clone(),
-            alloc_features: bench.alloc_features.clone(),
-        };
-        build_of.push(u32::try_from(plan::intern(&mut builds, key)).unwrap_or(u32::MAX));
+    let mut build_of: Vec<Vec<u32>> = Vec::with_capacity(grid.recipes.len());
+    for row in &grid.recipes {
+        let mut indices = Vec::with_capacity(row.len());
+        for recipe in row {
+            let entry = &entries[recipe.bench];
+            let bench = entry.bench;
+            let key = BuildKey {
+                commit: recipe.commit,
+                target: bench.target.clone(),
+                profile: super::profile_of(detection, bench).to_string(),
+                features: super::build_features(&detection.config, bench, measurement),
+                default_features: bench.default_features,
+                hotpath_features: bench.hotpath_features.clone(),
+                alloc_features: bench.alloc_features.clone(),
+                rustflags: super::arm_rustflags(bench, &entry.arms[recipe.arm])?,
+            };
+            indices.push(u32::try_from(plan::intern(&mut builds, key)).unwrap_or(u32::MAX));
+        }
+        build_of.push(indices);
     }
     let plan = store::Plan {
         axis: grid.axis.clone(),
@@ -318,26 +326,39 @@ fn dry_run(planned: &mut Planned<'_>, detection: &Detection) -> Result<(), DevEr
         ),
         output::count(planned.builds.len(), "build")
     ));
+    let uniform = plan.builds.windows(2).all(|pair| pair[0] == pair[1]);
     for (c, competitor) in grid.competitors.iter().enumerate() {
+        let build = if uniform {
+            format!(", build {}", plan.builds[0][c] + 1)
+        } else {
+            String::new()
+        };
         output::dry_run_msg(&format!(
-            "competitor {}/{}: {competitor}, build {}",
+            "competitor {}/{}: {competitor}{build}",
             c + 1,
             grid.competitors.len(),
-            plan.builds[c] + 1
         ));
     }
     for (w, workload) in grid.workloads.iter().enumerate() {
-        if !workload.is_empty() {
+        let builds = if uniform {
+            String::new()
+        } else {
+            format!(", {}", builds_line(&plan.builds[w]))
+        };
+        if !workload.is_empty() || !builds.is_empty() {
             output::dry_run_msg(&format!(
-                "workload {}/{}: {workload}",
+                "workload {}/{}: {workload}{builds}",
                 w + 1,
                 grid.workloads.len()
             ));
         }
     }
     for (index, build) in planned.builds.iter().enumerate() {
+        let flags = build.rustflags.as_ref().map_or_else(String::new, |flags| {
+            format!(", rustflags [{}]", flags.join(" "))
+        });
         output::dry_run_msg(&format!(
-            "build {}/{}: {} ({}, features [{}]) at {}{}",
+            "build {}/{}: {} ({}, features [{}]{flags}) at {}{}",
             index + 1,
             planned.builds.len(),
             build.target.as_deref().unwrap_or("[bin] default"),
@@ -349,6 +370,12 @@ fn dry_run(planned: &mut Planned<'_>, detection: &Detection) -> Result<(), DevEr
     }
     output::dry_run_msg("ok");
     Ok(())
+}
+
+/// One workload's builds, competitor by competitor: `builds 1, 2`.
+fn builds_line(row: &[u32]) -> String {
+    let numbers: Vec<String> = row.iter().map(|b| (b + 1).to_string()).collect();
+    format!("builds {}", numbers.join(", "))
 }
 
 /// Each bench's preflight for each commit its cells run, its modules joined
@@ -531,13 +558,11 @@ fn build_all(
     let planned = run.planned;
     let mut made = Vec::with_capacity(planned.builds.len());
     for (index, build) in planned.builds.iter().enumerate() {
-        let competitor = planned
+        let (workload, competitor) = planned
             .plan
-            .builds
-            .iter()
-            .position(|b| *b as usize == index)
-            .unwrap_or(0);
-        let recipe = planned.grid.recipes[0][competitor];
+            .first_cell_of(u32::try_from(index).unwrap_or(u32::MAX))
+            .map_or((0, 0), |(w, c)| (w as usize, c as usize));
+        let recipe = planned.grid.recipes[workload][competitor];
         let commit = &planned.commits[build.commit];
         // A live build is of HEAD as resolved for the invocation: once a
         // preflight or an earlier build may have moved it, it is read again
@@ -546,12 +571,18 @@ fn build_all(
             not_run(planned.names, &["every cell".to_owned()]);
             return Err(error);
         }
+        let workload_label = &planned.grid.workloads[workload];
         output::bench_msg(&format!(
-            "build {}/{}: {} for {}",
+            "build {}/{}: {} for {}{}",
             index + 1,
             planned.builds.len(),
             run.bench_name(&recipe),
-            planned.grid.competitors[competitor]
+            planned.grid.competitors[competitor],
+            if workload_label.is_empty() {
+                String::new()
+            } else {
+                format!(" [{workload_label}]")
+            }
         ));
         let attempt = run.attempt(&recipe);
         let uuid = crate::db::generate_uuid()?;
@@ -567,7 +598,7 @@ fn build_all(
         }
         // Stored once, as the build it was: every slot of it is blocked.
         document.schedule = Some(run.schedule(
-            run.slot(0, competitor, 0),
+            run.slot(workload, competitor, 0),
             store::Phase::Build {
                 build: u32::try_from(index).unwrap_or(u32::MAX),
             },
@@ -638,7 +669,7 @@ fn run_cells(
                 let c = store::position(position, count, round) as usize;
                 let recipe = row[c];
                 done += 1;
-                let Some(built) = made[planned.plan.builds[c] as usize].as_ref() else {
+                let Some(built) = made[planned.plan.builds[w][c] as usize].as_ref() else {
                     continue;
                 };
                 let label = cell_label(grid, w, c, round, rounds);

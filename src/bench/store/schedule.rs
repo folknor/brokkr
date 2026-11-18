@@ -49,9 +49,85 @@ pub struct Plan {
     /// empty when nothing but the competitors fans.
     pub workloads: Vec<String>,
     pub rounds: u32,
-    /// The build each competitor runs, by index into the invocation's
-    /// builds: competitors sharing one build share its index.
-    pub builds: Vec<u32>,
+    /// The build each cell runs, by workload then competitor, as an index
+    /// into the invocation's builds: cells sharing one build share its index.
+    /// Every round of a cell runs the same build. A workload may run another
+    /// build than the next when the bench's `rustflags` splice a workload
+    /// param.
+    pub builds: Vec<Vec<u32>>,
+}
+
+impl Plan {
+    /// The build cell (`workload`, `competitor`) runs; `None` outside the
+    /// plan.
+    pub fn build_of(&self, workload: u32, competitor: u32) -> Option<u32> {
+        self.builds
+            .get(usize::try_from(workload).ok()?)?
+            .get(usize::try_from(competitor).ok()?)
+            .copied()
+    }
+
+    /// The first cell, in round-0 order (workload-major, competitor order),
+    /// that runs `build`: where its failure is attributed.
+    pub fn first_cell_of(&self, build: u32) -> Option<(u32, u32)> {
+        self.builds.iter().enumerate().find_map(|(w, row)| {
+            row.iter().position(|b| *b == build).map(|c| {
+                (
+                    u32::try_from(w).unwrap_or(u32::MAX),
+                    u32::try_from(c).unwrap_or(u32::MAX),
+                )
+            })
+        })
+    }
+}
+
+/// Decode a schedule as the store holds it. A run stored before a plan's
+/// builds were per cell holds one build per competitor; that list is checked
+/// against the plan's competitors and slot bound and read as the same row in
+/// every workload. Only stored history takes that shape: the wire and every
+/// new write carry the matrix, and nothing else decodes the legacy one.
+pub(crate) fn from_stored(text: &str) -> Result<Schedule, String> {
+    let mut value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    if let Some(plan) = value
+        .get_mut("plan")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        let flat: Option<Vec<u64>> = plan
+            .get("builds")
+            .and_then(serde_json::Value::as_array)
+            .filter(|items| items.iter().all(serde_json::Value::is_u64))
+            .filter(|items| !items.is_empty())
+            .map(|items| items.iter().filter_map(serde_json::Value::as_u64).collect());
+        if let Some(flat) = flat {
+            let competitors = plan
+                .get("competitors")
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len);
+            let workloads = plan
+                .get("workloads")
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len);
+            if flat.len() != competitors {
+                return Err(format!(
+                    "{} builds named for {competitors} competitors",
+                    flat.len()
+                ));
+            }
+            if (workloads as u64).saturating_mul(competitors as u64) > MAX_SLOTS {
+                return Err(format!("a plan holds at most {MAX_SLOTS} slots"));
+            }
+            let row = serde_json::Value::from(flat);
+            plan.insert(
+                "builds".into(),
+                serde_json::Value::Array(vec![row; workloads]),
+            );
+        }
+    }
+    let schedule: Schedule = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    // Held to what publication held it to, rounds and the slot bound
+    // included, whichever shape it was stored in.
+    schedule.validate()?;
+    Ok(schedule)
 }
 
 /// What the competitors differ in. Externally tagged, as the document's
@@ -141,20 +217,32 @@ impl Schedule {
                  multiplied)"
             ));
         }
-        if plan.builds.len() != plan.competitors.len() {
+        if plan.builds.len() != plan.workloads.len() {
+            return Err(format!(
+                "builds named for {} workloads of {}",
+                plan.builds.len(),
+                plan.workloads.len()
+            ));
+        }
+        if let Some(row) = plan
+            .builds
+            .iter()
+            .find(|row| row.len() != plan.competitors.len())
+        {
             return Err(format!(
                 "{} builds named for {} competitors",
-                plan.builds.len(),
+                row.len(),
                 plan.competitors.len()
             ));
         }
-        // Numbered from 0 in the order the competitors first need them.
+        // Numbered from 0 in the order the cells first need them, workload
+        // by workload, competitors in order.
         let mut next = 0u32;
-        for &build in &plan.builds {
+        for &build in plan.builds.iter().flatten() {
             if build > next {
                 return Err(format!(
                     "build {build} is named before build {next}: builds are numbered in the \
-                     order competitors first need them"
+                     order cells first need them"
                 ));
             }
             if build == next {
@@ -179,8 +267,8 @@ impl Schedule {
             ));
         }
         if let Phase::Build { build } = self.phase {
-            let first = plan.builds.iter().position(|b| *b == build);
-            if first != Some(slot.competitor as usize) || slot.workload != 0 || slot.round != 0 {
+            let first = plan.first_cell_of(build);
+            if first != Some((slot.workload, slot.competitor)) || slot.round != 0 {
                 return Err(format!(
                     "a build-phase run for build {build} is not attributed to the first slot \
                      it serves"

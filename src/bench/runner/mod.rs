@@ -574,8 +574,32 @@ fn validate(
     }
     let config = std::sync::Arc::new(view.lua());
     let labels = params::arm_labels(arms);
+    // Every arm's flags resolve before anything runs, each refusal named.
+    let refusals: Vec<String> = arms
+        .iter()
+        .zip(&labels)
+        .filter_map(|(bound, label)| {
+            bound
+                .rustflags(bench.rustflags.as_deref())
+                .err()
+                .map(|why| format!("{}: {why}", shown(name, label)))
+        })
+        .collect();
+    match refusals.len() {
+        0 => {}
+        1 => return Err(DevError::Config(refusals.concat())),
+        _ => return Err(DevError::Preflight(refusals)),
+    }
     let modules = validate_arms(name, frozen, arms, &labels, &config)?;
     Ok((config, labels, modules))
+}
+
+/// The bench's `rustflags` under one arm, which [`validate()`] already
+/// resolved for every arm.
+fn arm_rustflags(bench: &Bench, bound: &params::Bound) -> Result<Option<Vec<String>>, DevError> {
+    bound
+        .rustflags(bench.rustflags.as_deref())
+        .map_err(DevError::Config)
 }
 
 /// Run the script's `validate()`, when it declares one, for every arm in a
@@ -749,8 +773,11 @@ fn dry_run(
             None | Some("") => String::new(),
             Some(label) => format!(" ({label})"),
         };
+        let flags = arm_rustflags(bench, arm)?.map_or_else(String::new, |flags| {
+            format!(", rustflags [{}]", flags.join(" "))
+        });
         output::dry_run_msg(&format!(
-            "arm {}/{}{label}: {}",
+            "arm {}/{}{label}: {}{flags}",
             index + 1,
             arms.len(),
             if shown.is_empty() {
@@ -1249,6 +1276,16 @@ impl Attempt<'_> {
                 artifact: None,
                 lfs_pointers: None,
                 lockfile: None,
+                // Resolved for every arm before anything ran (`validate`).
+                rustflags: self
+                    .bound
+                    .rustflags(self.bench.rustflags.as_deref())
+                    .ok()
+                    .flatten()
+                    .map(|additions| store::Rustflags {
+                        additions,
+                        placement: None,
+                    }),
             },
             measurement: self.measurement,
             params: self.bound.document(),
@@ -1385,7 +1422,24 @@ impl Attempt<'_> {
             all_features: false,
             profile: profile.clone(),
         };
-        let built = crate::build::cargo_build(&build, build_root)?;
+        let built = match document.build.rustflags.as_mut() {
+            None => crate::build::cargo_build(&build, build_root)?,
+            Some(recipe) => {
+                let injection =
+                    crate::build::RustflagsInjection::place(build_root, &recipe.additions)?;
+                recipe.placement = Some(match &injection.placement {
+                    crate::build::Injected::None => store::Placement::None,
+                    crate::build::Injected::Env { key, value } => store::Placement::Env {
+                        key: key.clone(),
+                        value: value.clone(),
+                    },
+                    crate::build::Injected::Config { args } => {
+                        store::Placement::Config { args: args.clone() }
+                    }
+                });
+                crate::build::cargo_build_with_rustflags(&build, build_root, &injection)?
+            }
+        };
         // The bytes cargo built against, read once it succeeded: a seed may
         // have been amended to fit the manifests.
         if let Some(lock) = &mut document.build.lockfile {

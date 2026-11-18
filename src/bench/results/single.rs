@@ -213,6 +213,20 @@ fn context(out: &mut String, run: &StoredRun) {
         .expect("write to String is infallible");
     }
     field(out, "build", &build);
+    if let Some(flags) = &b.rustflags {
+        field(
+            out,
+            "rustflags",
+            &format!(
+                "[{}], {}",
+                flags.additions.join(" "),
+                flags.placement.as_ref().map_or_else(
+                    || "not placed (the build stopped first)".to_owned(),
+                    crate::bench::store::Placement::describe
+                )
+            ),
+        );
+    }
     field(out, "config", &format!("xxh3-128 {}", run.config_digest));
     field(
         out,

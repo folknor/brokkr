@@ -155,13 +155,16 @@ impl<'r> Cells<'r> {
                 crate::db::short_uuid(&stop.doc.uuid)
             ));
         }
-        // A build that failed ran no cell of it.
-        if let Some(run) = cells.measured.values().find(|run| {
-            run.doc.schedule.as_ref().is_some_and(|s| {
-                cells
-                    .failed_builds
-                    .contains_key(&plan.builds[s.slot.competitor as usize])
-            })
+        cells.check_builds()?;
+        Ok(cells)
+    }
+
+    /// A build that failed ran no cell of it, and every cell of one build
+    /// runs the one snapshot it made, so their build records agree.
+    fn check_builds(&self) -> Result<(), String> {
+        if let Some(run) = self.measured.values().find(|run| {
+            self.build_of_run(run)
+                .is_some_and(|build| self.failed_builds.contains_key(&build))
         }) {
             return Err(format!(
                 "run {} measured a slot whose build is stored as failed, so the runs are not one \
@@ -169,7 +172,121 @@ impl<'r> Cells<'r> {
                 crate::db::short_uuid(&run.doc.uuid)
             ));
         }
-        Ok(cells)
+        let mut by_build: BTreeMap<u32, &StoredRun> = BTreeMap::new();
+        for run in self.measured.values() {
+            let Some(build) = self.build_of_run(run) else {
+                return Err(format!(
+                    "run {} sits outside its plan's builds, so the runs are not one \
+                     invocation's",
+                    crate::db::short_uuid(&run.doc.uuid)
+                ));
+            };
+            if let Some(first) = by_build.get(&build) {
+                if first.doc.build != run.doc.build {
+                    return Err(format!(
+                        "runs {} and {} both ran build {} but record different builds, so the \
+                         runs are not one invocation's",
+                        crate::db::short_uuid(&first.doc.uuid),
+                        crate::db::short_uuid(&run.doc.uuid),
+                        build + 1
+                    ));
+                }
+            } else {
+                by_build.insert(build, run);
+            }
+        }
+        Ok(())
+    }
+
+    /// The build a stored run's slot runs.
+    fn build_of_run(&self, run: &StoredRun) -> Option<u32> {
+        let slot = run.doc.schedule.as_ref()?.slot;
+        self.plan.build_of(slot.workload, slot.competitor)
+    }
+
+    /// Each build's stored record, in build order: its failed build-phase
+    /// run, else its first measured cell. A build with neither is absent.
+    fn build_records(&self) -> BTreeMap<u32, &'r StoredRun> {
+        let mut out = self.failed_builds.clone();
+        for run in self.measured.values() {
+            if let Some(build) = self.build_of_run(run) {
+                out.entry(build).or_insert(*run);
+            }
+        }
+        out
+    }
+
+    /// Each build's `rustflags` recipe, then the lockfile lines.
+    fn build_lines(&self, lines: &mut Vec<String>) {
+        let records = self.build_records();
+        let planned: std::collections::BTreeSet<u32> =
+            self.plan.builds.iter().flatten().copied().collect();
+        for build in planned {
+            match records.get(&build) {
+                Some(run) => {
+                    if let Some(flags) = &run.doc.build.rustflags {
+                        lines.push(format!(
+                            "  build {}: rustflags [{}]",
+                            build + 1,
+                            flags.additions.join(" ")
+                        ));
+                    }
+                }
+                None => lines.push(format!(
+                    "  build {}: no stored run records it (none of its cells ran), so its \
+                     rustflags and Cargo.lock are unknown",
+                    build + 1
+                )),
+            }
+        }
+        self.lockfile_lines(lines);
+    }
+
+    /// Builds of one checkout whose root `Cargo.lock` digest differs from
+    /// the first build of that checkout that recorded one, or that recorded
+    /// none: what a layout or commit comparison needs before it credits a
+    /// difference to what it varied.
+    fn lockfile_lines(&self, lines: &mut Vec<String>) {
+        let records = self.build_records();
+        // The tree built: a `--commit` worktree is recorded under the live
+        // checkout, so the commit tells the worktrees apart.
+        let mut reference: BTreeMap<(&str, &str), (u32, &str)> = BTreeMap::new();
+        let mut differ = Vec::new();
+        let mut unknown = Vec::new();
+        for (build, run) in &records {
+            let digest = run
+                .doc
+                .build
+                .lockfile
+                .as_ref()
+                .and_then(|l| l.digest.as_deref());
+            let Some(digest) = digest else {
+                unknown.push((build + 1).to_string());
+                continue;
+            };
+            let tree = (run.doc.checkout.as_str(), run.doc.commit.as_str());
+            match reference.get(&tree) {
+                None => {
+                    reference.insert(tree, (*build, digest));
+                }
+                Some((first, known)) if *known != digest => {
+                    differ.push(format!("build {} against build {}", build + 1, first + 1));
+                }
+                Some(_) => {}
+            }
+        }
+        if !differ.is_empty() {
+            lines.push(format!(
+                "  root Cargo.lock differs between builds: {}",
+                differ.join(", ")
+            ));
+        }
+        if !unknown.is_empty() && records.len() > 1 {
+            lines.push(format!(
+                "  root Cargo.lock not recorded for build {}",
+                unknown.join(", ")
+            ));
+        }
     }
 
     fn held(&self, workload: u32, round: u32, competitor: usize) -> Held<'r> {
@@ -177,8 +294,9 @@ impl<'r> Cells<'r> {
         if let Some(run) = self.measured.get(&(workload, round, c)) {
             return Held::Run(run);
         }
-        let build = self.plan.builds[competitor];
-        if self.failed_builds.contains_key(&build) {
+        if let Some(build) = self.plan.build_of(workload, c)
+            && self.failed_builds.contains_key(&build)
+        {
             return Held::Blocked { build };
         }
         let count = u32::try_from(self.plan.competitors.len()).unwrap_or(u32::MAX);
@@ -215,6 +333,7 @@ impl<'r> Cells<'r> {
                 crate::output::count(plan.workloads.len(), "workload")
             ),
         ];
+        let uniform = plan.builds.windows(2).all(|pair| pair[0] == pair[1]);
         for (c, competitor) in plan.competitors.iter().enumerate() {
             let commit = runs
                 .iter()
@@ -225,12 +344,16 @@ impl<'r> Cells<'r> {
                         .is_some_and(|s| s.slot.competitor as usize == c)
                 })
                 .map_or_else(|| "?".to_owned(), |r| short_commit(r));
+            let build = match (uniform, plan.builds.first().and_then(|row| row.get(c))) {
+                (true, Some(b)) => format!("build {} ", b + 1),
+                _ => String::new(),
+            };
             lines.push(format!(
-                "  competitor {}: {competitor}, build {} at {commit}",
-                c + 1,
-                plan.builds[c] + 1
+                "  competitor {}: {competitor}, {build}at {commit}",
+                c + 1
             ));
         }
+        self.build_lines(&mut lines);
         for (build, run) in &self.failed_builds {
             let why = match &run.doc.outcome {
                 store::RunOutcome::Failed { reason } => {
@@ -264,8 +387,16 @@ impl<'r> Cells<'r> {
         }
         for (w, workload) in plan.workloads.iter().enumerate() {
             let w = u32::try_from(w).unwrap_or(u32::MAX);
-            if plan.workloads.len() > 1 {
-                lines.push(format!("workload {}: {workload}", w + 1));
+            let builds = if uniform {
+                String::new()
+            } else {
+                let row = plan.builds.get(w as usize).map_or_else(Vec::new, |row| {
+                    row.iter().map(|b| (b + 1).to_string()).collect()
+                });
+                format!(", builds {}", row.join(", "))
+            };
+            if plan.workloads.len() > 1 || !builds.is_empty() {
+                lines.push(format!("workload {}: {workload}{builds}", w + 1));
             }
             self.workload(w, &mut lines);
         }

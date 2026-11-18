@@ -119,6 +119,89 @@ pub struct Build {
     /// field).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lockfile: Option<Lockfile>,
+    /// The bench's `rustflags` recipe as this build resolved it, and how it
+    /// reached cargo. Absent for a bench without the key and for a document
+    /// from before the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rustflags: Option<Rustflags>,
+}
+
+/// What a bench's `rustflags` added to a build ([`Build::rustflags`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rustflags {
+    /// The resolved tokens brokkr asked cargo to add, in order.
+    pub additions: Vec<String>,
+    /// How they were injected. Absent when the build stopped before an
+    /// injection was chosen, including a placement brokkr could not prove
+    /// live, which fails the build rather than risk inert flags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<Placement>,
+}
+
+/// How a build's [`Rustflags::additions`] reached cargo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum Placement {
+    /// An empty recipe: nothing injected, cargo's own flags as they are.
+    None,
+    /// Appended to the live environment source: the variable and the whole
+    /// value cargo received, inherited flags included.
+    Env { key: String, value: String },
+    /// Cargo's `--config` arguments at the live config layer.
+    Config { args: Vec<String> },
+}
+
+impl Placement {
+    /// Whether this injection hands `additions` to cargo: an env source cargo
+    /// reads whose value ends with them, or one `--config` entry at a
+    /// rustflags table whose array is exactly them.
+    pub fn carries(&self, additions: &[String]) -> bool {
+        match self {
+            Self::None => additions.is_empty(),
+            Self::Env { key, value } => {
+                let tokens: Vec<&str> = match key.as_str() {
+                    "CARGO_ENCODED_RUSTFLAGS" => {
+                        value.split('\u{1f}').filter(|t| !t.is_empty()).collect()
+                    }
+                    "RUSTFLAGS" => value.split_whitespace().collect(),
+                    _ => return false,
+                };
+                tokens.len() >= additions.len()
+                    && tokens[tokens.len() - additions.len()..]
+                        .iter()
+                        .zip(additions)
+                        .all(|(t, a)| t == a)
+            }
+            Self::Config { args } => {
+                let [flag, entry] = args.as_slice() else {
+                    return false;
+                };
+                let Some((key, list)) = entry.split_once('=') else {
+                    return false;
+                };
+                if flag != "--config"
+                    || !matches!(key, "build.rustflags" | "target.\"cfg(all())\".rustflags")
+                {
+                    return false;
+                }
+                toml::from_str::<toml::Table>(&format!("v = {list}"))
+                    .ok()
+                    .and_then(|t| t.get("v").cloned())
+                    .and_then(|v| v.try_into::<Vec<String>>().ok())
+                    .is_some_and(|tokens| tokens == additions)
+            }
+        }
+    }
+
+    /// One line for a reader.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::None => "nothing injected".to_owned(),
+            Self::Env { key, value } => format!("{key}={value:?}"),
+            Self::Config { args } => args.join(" "),
+        }
+    }
 }
 
 /// The root `Cargo.lock` a build resolved against ([`Build::lockfile`]).
@@ -1000,6 +1083,36 @@ impl RunDocument {
                 return Err(refuse(format!(
                     "lockfile digest {digest:?} is not 32 lowercase hex digits"
                 )));
+            }
+        }
+        if let Some(flags) = &self.build.rustflags {
+            // The rule `rustflags` tokens load under: none empty, none
+            // holding a NUL or cargo's 0x1f separator.
+            if let Some(token) = flags
+                .additions
+                .iter()
+                .find(|t| t.is_empty() || t.contains(['\0', '\u{1f}']))
+            {
+                return Err(refuse(format!(
+                    "rustflags token {token:?} is empty or holds a NUL or 0x1f"
+                )));
+            }
+            match (&flags.placement, flags.additions.is_empty()) {
+                (Some(Placement::None), false) => {
+                    return Err(refuse("rustflags additions placed as nothing injected"));
+                }
+                (Some(Placement::Env { .. } | Placement::Config { .. }), true) => {
+                    return Err(refuse("an empty rustflags recipe with an injection"));
+                }
+                (Some(placement), false) if !placement.carries(&flags.additions) => {
+                    return Err(refuse(
+                        "a rustflags placement that does not carry its additions",
+                    ));
+                }
+                _ => {}
+            }
+            if self.build.artifact.is_some() && flags.placement.is_none() {
+                return Err(refuse("a built artifact whose rustflags were never placed"));
             }
         }
         Ok(())

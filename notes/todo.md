@@ -340,6 +340,8 @@ does not separate them. Pinning `CARGO_BUILD_BUILD_DIR` beside the target
 for an isolated build root would, once someone confirms cargo's fingerprints
 there reproduce the stale-binary case. The runner tests' fixture sets its own
 `build.build-dir` and refuses an inherited `CARGO_BUILD_BUILD_DIR` instead.
+A script bench with `rustflags` (brokkr#40) already pins both dirs to its
+per-recipe `rustflags-<hash>`; a plain worktree build still does not.
 
 ### A worktree checkout key names the path as spelled (2026-11-02)
 

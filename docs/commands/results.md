@@ -467,7 +467,11 @@ host, conditions, a `history` field (the last brokkr command in the user's
 history before the run and how long before it ended, and how long before
 `fstrim.timer` last fired), captured env, the build asked for and as resolved (with
 the root `Cargo.lock`'s source and its digest after the build, `brokkr man
-run`, `--commit`), the config digest, brokkr's argv, a `sidecar` field naming the `brokkr sidecar`
+run`, `--commit`), a `rustflags` field for a bench with `rustflags`
+(`brokkr man bench`, The build: the resolved tokens and how they were
+injected, the env variable and the whole value cargo received or the
+`--config` arguments, or that the build stopped before they were placed),
+the config digest, brokkr's argv, a `sidecar` field naming the `brokkr sidecar`
 invocation that reads a child's samples, markers and counters (`brokkr man
 measure`, Script-bench children) when some iteration launched one, then
 each iteration with its outcome, its host lines (the sampled device, the
@@ -549,6 +553,11 @@ under the pair rather than splitting it:
   `fresh`). It says the file differs, not that a dependency version did: a
   workspace package's own entry changes it too. Silent when either side
   recorded no digest (an unmanaged layout, no file, an older run).
+- `rustflags differ:` the sides' `rustflags` recipes or their injection
+  differ, each side's tokens and injection shown, a side without one shown
+  as the plain build: a layout pin against no pin, or an inherited
+  `RUSTFLAGS` that changed under the same tokens. Pairing ignores it, since
+  the flags may be what is compared.
 - `executables differ or were not read:` each external program a
   `program` call ran (`brokkr man bench`, `binary_with()`) whose observed
   digests differ between the sides, by path, that one side never ran, or
@@ -603,12 +612,20 @@ runs carry: every run of it is read, hidden or not, at one revision, and no
 other filter applies (each conflicts with it), since a cell filtered away
 would read as missing. A prefix naming several invocations lists them, and
 one naming none says so. results.db is not opened. Runs that disagree on the
-plan, two runs for one slot, a cell of a build stored as failed, a cell
-after the stop a run records, or two runs recording a stop are refused as
-not one invocation's. The summary names the benches, start and host, the
-axis, rounds and workloads, each competitor with its build and commit, each
-build that failed or was interrupted, how many runs a mark hides, and
-whether a cell ran a dirty tree. Then per workload: each competitor's median
+plan, two runs for one slot, a cell of a build stored as failed, cells of
+one build recording different builds, a cell after the stop a run records,
+or two runs recording a stop are refused as not one invocation's. A plan
+stored before builds were per cell, one build per competitor, reads as that
+build in every workload. The summary names the benches, start and host, the
+axis, rounds and workloads, each competitor with its commit and, when every
+workload runs the same builds, its build, each build's `rustflags` tokens
+as its failed build run or first cell recorded them (a build no stored run
+records, none of its cells having run, named as unknown), builds of one
+tree (checkout and commit) whose root `Cargo.lock` digest differs from the
+first build of that tree to record one (and, with several builds, those
+that recorded none), each build that failed or was interrupted, how many runs a
+mark hides, and whether a cell ran a dirty tree. Then per workload, headed
+with its builds when they differ by workload: each competitor's median
 result over its cells with a result (an even count's middle two averaged,
 rounded down) against the rounds planned; each later competitor against the
 first, over the rounds where both hold a result, how often it was faster,

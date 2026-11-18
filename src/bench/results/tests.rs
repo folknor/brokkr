@@ -123,6 +123,7 @@ pub(crate) fn run(
             artifact: Some("00112233445566778899aabbccddeeff".into()),
             lfs_pointers: None,
             lockfile: None,
+            rustflags: None,
         },
         measurement: Measurement::Timing,
         params: BTreeMap::from([("dataset".into(), param(false, &[("denmark", None)]))]),
@@ -765,7 +766,7 @@ fn an_invocation_summary_pairs_rounds_and_names_what_is_missing() {
         competitors: vec!["pbfhogg".into(), "osmium".into()],
         workloads: vec![String::new()],
         rounds: 3,
-        builds: vec![0, 0],
+        builds: vec![vec![0, 0]],
     };
     let cell = |tail: u8, invocation: &str, competitor: u32, round: u32, wall: i64| {
         let mut doc = run(tail, "vs", 'a', 1_000 + i64::from(tail), wall);

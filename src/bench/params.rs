@@ -349,6 +349,11 @@ struct BoundValue {
     key: String,
     /// What the script receives, before any handle replaces a file's path.
     entry: lua::Value,
+    /// The entry as the TOML holds it, when it is an array of strings and
+    /// nothing else: what a `rustflags` splice may take. Read from the TOML,
+    /// not `entry`, whose conversion turns datetimes and wide integers into
+    /// text.
+    flags: Option<Vec<String>>,
     /// The entry, when it is a file entry: the run's input.
     file: Option<FileNode>,
     /// The file's digest, once preflight computed it.
@@ -731,6 +736,7 @@ fn resolve(
             keys.into_iter()
                 .map(|key| BoundValue {
                     entry: lua::Value::Text(key.clone()),
+                    flags: None,
                     key,
                     file: None,
                     digest: None,
@@ -765,6 +771,12 @@ fn resolve(
         };
         values.push(BoundValue {
             entry: view::value(entry),
+            flags: entry.as_array().and_then(|items| {
+                items
+                    .iter()
+                    .map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            }),
             key,
             file,
             digest: None,
@@ -1050,6 +1062,57 @@ impl Bound {
                 )
             })
             .collect()
+    }
+
+    /// The bench's `rustflags` resolved under this arm: literal tokens as
+    /// written, each splice replaced by the array of strings its param's
+    /// selected entry holds. `Ok(None)` for a bench without the key.
+    pub(crate) fn rustflags(
+        &self,
+        parts: Option<&[crate::config::bench::FlagPart]>,
+    ) -> Result<Option<Vec<String>>, String> {
+        use crate::config::bench::{FlagPart, flag_token_problem};
+        let Some(parts) = parts else {
+            return Ok(None);
+        };
+        let mut out = Vec::new();
+        for part in parts {
+            match part {
+                FlagPart::Literal(token) => out.push(token.clone()),
+                FlagPart::Splice(name) => {
+                    let binding = self.params.get(name).ok_or_else(|| {
+                        format!("rustflags splices --{name}, which this arm leaves unbound")
+                    })?;
+                    let [value] = binding.values.as_slice() else {
+                        return Err(format!(
+                            "rustflags splices --{name}, which binds {} values here",
+                            binding.values.len()
+                        ));
+                    };
+                    let shown = binding
+                        .from
+                        .as_deref()
+                        .map_or_else(|| name.clone(), view::shown);
+                    let Some(items) = &value.flags else {
+                        return Err(format!(
+                            "rustflags splices --{name}: {shown}.{} is not an array of strings",
+                            value.key
+                        ));
+                    };
+                    for token in items {
+                        if let Some(problem) = flag_token_problem(token) {
+                            return Err(format!(
+                                "rustflags splices --{name}: token {token:?} in {shown}.{} \
+                                 {problem}",
+                                value.key
+                            ));
+                        }
+                        out.push(token.clone());
+                    }
+                }
+            }
+        }
+        Ok(Some(out))
     }
 
     /// `bench(params, keys)`'s arguments: each file entry's path replaced by

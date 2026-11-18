@@ -341,6 +341,7 @@ mod tests {
             default_features: true,
             hotpath_features: Vec::new(),
             alloc_features: Vec::new(),
+            rustflags: None,
             uses: Vec::new(),
             params: BTreeMap::new(),
             library: None,

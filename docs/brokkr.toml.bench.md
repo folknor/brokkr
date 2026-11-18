@@ -135,6 +135,34 @@ params.jobs = { free = true, help = "worker threads" }
   `hotpath_features`; absent or empty, the bench cannot be alloc-profiled.
   Held to the same rules, and a timing run that resolves one fails its arm
   too.
+- `rustflags` - rustc flags added to the bench's build, in order: each
+  entry a token string, or `{ from_param = "NAME" }`, which splices in the
+  array of strings at the key the scalar `from` param NAME selected (an
+  empty array adds nothing). A blank token, one holding a NUL or 0x1f
+  (cargo's encoded-flags separator), a splice naming no param of the bench,
+  or one naming a param without `from` or a `many` one is refused at load;
+  a spliced param left unbound or whose selected entry is not an array of
+  strings is refused when the bench binds, every arm judged, before
+  anything is built. The flags join the project's own at cargo's live
+  rustflags layer, never displacing them, and a bench that sets the key at
+  all, even to `[]`, builds in a target dir of its resolved recipe's own
+  (`brokkr man bench`, The build). Absent, the build is the plain one. A
+  fixed list pins a build setting (a code alignment, say); a splice lets a
+  param fan out over flag sets:
+
+  ```toml
+  [data.layouts]
+  none = []
+  f6l64 = ["-Cllvm-args=-align-all-functions=6", "-Cllvm-args=-align-loops=64"]
+
+  [bench.ab]
+  script_file = "bench/ab.lua"
+  params.layout = { from = "data.layouts", default = "none" }
+  rustflags = ["--cfg", "ab_ensemble", { from_param = "layout" }]
+  ```
+
+  `brokkr bench ab --layout all` then runs one arm per layout, each its own
+  build.
 - `iterations` - the default for `brokkr bench --iterations`, a positive
   integer up to 4294967295; absent is 3. Use 1 when the child samples
   internally and records its own summary. The command line overrides it,

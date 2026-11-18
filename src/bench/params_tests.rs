@@ -911,6 +911,53 @@ v = 2
     assert!(err.contains("--expr x --expr  "), "{err}");
 }
 
+/// A splice is replaced by the array its param selected, an empty one
+/// adding nothing; an entry that is not an array of strings is refused
+/// naming where it lies.
+#[test]
+fn rustflags_splice_the_selected_array() {
+    let f = fixture(
+        "rustflags_splice",
+        r#"
+[data.layouts]
+none = []
+f6 = ["-Cllvm-args=-align-all-functions=6", "-Cllvm-args=-align-loops=64"]
+odd = "not a list"
+mixed = ["-Cx", 1]
+wide = [9007199254740993]
+
+[bench.b]
+script = "x = 1"
+params.layout = { from = "data.layouts" }
+rustflags = ["--cfg", "ab", { from_param = "layout" }]
+"#,
+    );
+    let parts = f.bench.rustflags.clone();
+    let flags = |words: &[&str]| one(&f, words).rustflags(parts.as_deref());
+    assert_eq!(
+        flags(&["--layout", "f6"]).unwrap().unwrap(),
+        [
+            "--cfg",
+            "ab",
+            "-Cllvm-args=-align-all-functions=6",
+            "-Cllvm-args=-align-loops=64"
+        ]
+    );
+    assert_eq!(
+        flags(&["--layout", "none"]).unwrap().unwrap(),
+        ["--cfg", "ab"]
+    );
+    let odd = flags(&["--layout", "odd"]).unwrap_err();
+    assert!(odd.contains("data.layouts.odd is not an array"), "{odd}");
+    for layout in ["mixed", "wide"] {
+        let err = flags(&["--layout", layout]).unwrap_err();
+        assert!(err.contains("not an array of strings"), "{layout}: {err}");
+    }
+    let unbound = flags(&[]).unwrap_err();
+    assert!(unbound.contains("leaves unbound"), "{unbound}");
+    assert_eq!(one(&f, &[]).rustflags(None).unwrap(), None);
+}
+
 #[test]
 fn typed_params_are_judged_at_bind_and_delivered_as_given() {
     let f = fixture(
