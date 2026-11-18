@@ -62,7 +62,13 @@ iteration and a run whose iterations disagreed are all stored. It holds:
   only as far as the build got; and, for a `--commit` run, `lfs_pointers`:
   every tracked file of the worktree left as a Git LFS pointer when it was
   admitted, by path and oid. Absent means not recorded (a live-tree run, or
-  a document from before the field), empty means scanned and none;
+  a document from before the field), empty means scanned and none; and
+  `lockfile`: the build root's `Cargo.lock` as `{source, digest}`, `source`
+  one of `live`, `tracked`, `seeded`, `retained`, `fresh` or `unmanaged`
+  (observed before the build), `digest` its xxh3-128 read once the build
+  succeeded, absent with no file, a failed or unfinished build, or an
+  `unmanaged` layout, which never carries one. The `runs` column is
+  `lockfile` (schema step 10), NULL when not recorded;
 - what was asked to be measured: `timing`, `hotpath` for `brokkr bench
   --hotpath`, or `alloc` for `brokkr bench --alloc`. A run stored before the
   field existed reads as `timing`. The `runs` table keeps `alloc` as

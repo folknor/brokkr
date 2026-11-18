@@ -315,8 +315,15 @@ ALTER TABLE runs ADD COLUMN lfs_pointers TEXT
     CHECK (lfs_pointers IS NULL OR json_type(lfs_pointers) = 'array');
 ";
 
+/// Version 10: the build root's `Cargo.lock`, a JSON object `{source,
+/// digest?}`; NULL when not recorded, which is every earlier run.
+const V10: &str = "
+ALTER TABLE runs ADD COLUMN lockfile TEXT
+    CHECK (lockfile IS NULL OR json_type(lockfile) = 'object');
+";
+
 /// The chain. Shipped steps are frozen; append only.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 

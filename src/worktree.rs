@@ -159,6 +159,9 @@ pub struct Worktree {
     /// Tracked files left as Git LFS pointers, observed at admission
     /// ([`crate::worktree_lfs`]); empty when there are none.
     pub lfs_pointers: Vec<crate::worktree_lfs::Pointer>,
+    /// Where the checkout's root `Cargo.lock` came from, settled at admission
+    /// ([`crate::worktree_lock::seed`]).
+    pub lockfile: crate::worktree_lock::Source,
 }
 
 impl Worktree {
@@ -225,12 +228,14 @@ impl Worktree {
             // Idempotent: repairs a slot whose furnishing was interrupted.
             furnish(git_root, &slot, &checkout)?;
             let lfs_pointers = admit(&checkout, &short)?;
+            let lockfile = seed_lock(git_root, &slot, &checkout)?;
             return Ok(Self {
                 path: checkout,
                 commit: short,
                 subject,
                 record_name,
                 lfs_pointers,
+                lockfile,
             });
         }
 
@@ -283,6 +288,7 @@ impl Worktree {
         )?;
         furnish(git_root, &slot, &checkout)?;
         let lfs_pointers = admit(&checkout, &short)?;
+        let lockfile = seed_lock(git_root, &slot, &checkout)?;
         std::fs::remove_file(slot.join(CUTTING_MARK))?;
 
         Ok(Self {
@@ -291,8 +297,22 @@ impl Worktree {
             subject,
             record_name,
             lfs_pointers,
+            lockfile,
         })
     }
+}
+
+/// Settle an admitted checkout's root lock and narrate where it came from.
+/// After [`admit`], so a seeded file never decides the pristine check, and
+/// before any cargo call in the checkout.
+fn seed_lock(
+    git_root: &Path,
+    slot: &Path,
+    checkout: &Path,
+) -> Result<crate::worktree_lock::Source, DevError> {
+    let source = crate::worktree_lock::seed(git_root, slot, checkout)?;
+    output::detail_or_console(crate::worktree_lock::describe(source));
+    Ok(source)
 }
 
 /// The checks every admission of a checkout passes, cut or reused: it is

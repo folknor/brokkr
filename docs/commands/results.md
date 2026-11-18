@@ -463,8 +463,9 @@ digest), the outcome, the result's wall with every iteration's in execution
 order (each the measured call's wall when the run marked one, said so, with
 the block's wall beside it in the iteration lines and the child flagged
 `(measured)`) and its verdict (nil, or the string quoted, so `""` stays visible),
-host, conditions, captured env, the build asked for and as resolved, the
-config digest, brokkr's argv, a `sidecar` field naming the `brokkr sidecar`
+host, conditions, captured env, the build asked for and as resolved (with
+the root `Cargo.lock`'s source and its digest after the build, `brokkr man
+run`, `--commit`), the config digest, brokkr's argv, a `sidecar` field naming the `brokkr sidecar`
 invocation that reads a child's samples, markers and counters (`brokkr man
 measure`, Script-bench children) when some iteration launched one, then
 each iteration with its outcome and each child with its start offset, wall,
@@ -532,6 +533,12 @@ under the pair rather than splitting it:
   files left as Git LFS pointers, the first by path and how many more, so
   its numbers may be of a build or script that read pointer text. Silent
   for a run with none and for one that recorded nothing.
+- `root Cargo.lock differs:` both sides recorded the digest of the build
+  root's `Cargo.lock` after the build and the bytes differ, with each side's
+  source (`live`, `tracked`, `seeded` from the live tree, `retained`,
+  `fresh`). It says the file differs, not that a dependency version did: a
+  workspace package's own entry changes it too. Silent when either side
+  recorded no digest (an unmanaged layout, no file, an older run).
 - `executables differ or were not read:` each external program a
   `program` call ran (`brokkr man bench`, `binary_with()`) whose observed
   digests differ between the sides, by path, that one side never ran, or

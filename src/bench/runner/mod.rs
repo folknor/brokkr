@@ -1071,6 +1071,10 @@ impl Attempt<'_> {
                         })
                         .collect()
                 });
+                document.build.lockfile = Some(store::Lockfile {
+                    source: lock_source(build_root.lock_source()),
+                    digest: None,
+                });
                 self.execute(build_root.as_path(), commit, &mut document, &mut modules);
                 Ok(())
             },
@@ -1138,6 +1142,7 @@ impl Attempt<'_> {
                 resolved: None,
                 artifact: None,
                 lfs_pointers: None,
+                lockfile: None,
             },
             measurement: self.measurement,
             params: self.bound.document(),
@@ -1279,6 +1284,14 @@ impl Attempt<'_> {
             profile: profile.clone(),
         };
         let built = crate::build::cargo_build(&build, build_root)?;
+        // The bytes cargo built against, read once it succeeded: a seed may
+        // have been amended to fit the manifests.
+        if let Some(lock) = &mut document.build.lockfile {
+            lock.digest = crate::worktree_lock::digest(
+                build_root,
+                lock.source != store::LockSource::Unmanaged,
+            );
+        }
         document.build.resolved = Some(store::ResolvedBuild {
             bin: built.target.clone(),
             features: built.unit_features.clone(),
@@ -1449,6 +1462,19 @@ fn config_env(config: &crate::config::DevConfig) -> BTreeMap<String, String> {
 }
 
 /// An error's text for a document's failure reason, never empty.
+/// The stored form of a build root's lock source.
+fn lock_source(source: crate::worktree_lock::Source) -> store::LockSource {
+    use crate::worktree_lock::Source;
+    match source {
+        Source::Live => store::LockSource::Live,
+        Source::Tracked => store::LockSource::Tracked,
+        Source::Seeded => store::LockSource::Seeded,
+        Source::Retained => store::LockSource::Retained,
+        Source::Fresh => store::LockSource::Fresh,
+        Source::Unmanaged => store::LockSource::Unmanaged,
+    }
+}
+
 fn reason_of(error: &DevError) -> String {
     let shown = error.to_string();
     if shown.trim().is_empty() {

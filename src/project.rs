@@ -151,6 +151,15 @@ impl BuildRoot {
             Checkout::Live(_) => None,
         }
     }
+    /// Where this checkout's root `Cargo.lock` came from: settled at
+    /// admission for a `--commit` worktree, read from the layout for the live
+    /// checkout.
+    pub(crate) fn lock_source(&self) -> crate::worktree_lock::Source {
+        match &self.checkout {
+            Checkout::Worktree(wt) => wt.lockfile,
+            Checkout::Live(path) => crate::worktree_lock::live(path),
+        }
+    }
     pub(crate) fn at_commit(
         &self,
         commit: &str,

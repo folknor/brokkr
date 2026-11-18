@@ -102,11 +102,19 @@ tree it warns that it has no effect (every measured command, ratatoskr's
 whose other arm is a dirty working tree shows which arm filed a row.
 
 To A/B an uncommitted variant and keep every cell, commit it locally first
-and drop the commit afterwards: with the baseline as `--commit <parent>` and
-the variant as the now clean tree (or both arms as `--commit`), every cell
-stores a row carrying its argv, captured env and provenance, with its sidecar
-profile under the row's id, `brokkr results` lists them, and `brokkr results
---compare` pairs the arms. The rows keep the hash after the commit is gone. A
+and drop the commit afterwards: with both arms as `--commit` (the baseline
+`--commit <parent>`, the variant `--commit HEAD`), every cell stores a row
+carrying its argv, captured env and provenance, with its sidecar profile
+under the row's id, `brokkr results` lists them, and `brokkr results
+--compare` pairs the arms. The rows keep the hash after the commit is gone.
+Both arms as `--commit` is the matched shape: the two builds share the
+checkout layout, the target-dir isolation policy (each commit its own
+isolated dir) and the config ancestry above the build root, which a
+live-tree arm does not (`brokkr man run`, `--commit`). A root `Cargo.lock`
+the commits do not track is seeded into each worktree from the live tree's
+as read at that arm's admission, and cargo may amend each copy to fit its
+manifests. A variant built in the live tree still stores, but its build
+differs from the baseline's in more than the commit. A
 dirty-tree cell that `--force` permits keeps its sidecar profile but has no
 results row: its id is named only on that run's `[sidecar]` line (below), and
 the `dirty` alias reaches only the latest such session.

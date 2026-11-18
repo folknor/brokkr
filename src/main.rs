@@ -101,6 +101,7 @@ mod visual_approve_cmd;
 mod wc;
 mod worktree;
 mod worktree_lfs;
+mod worktree_lock;
 mod worktree_record;
 
 fn main() {

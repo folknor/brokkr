@@ -197,6 +197,15 @@ fn context(out: &mut String, run: &StoredRun) {
     if let Some(artifact) = &b.artifact {
         write!(build, "; artifact {artifact}").expect("write to String is infallible");
     }
+    if let Some(lock) = &b.lockfile {
+        write!(
+            build,
+            "; root Cargo.lock {} {}",
+            lock.source.as_str(),
+            lock.digest.as_deref().unwrap_or("(not read)")
+        )
+        .expect("write to String is infallible");
+    }
     field(out, "build", &build);
     field(out, "config", &format!("xxh3-128 {}", run.config_digest));
     field(

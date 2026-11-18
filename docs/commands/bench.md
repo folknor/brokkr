@@ -37,7 +37,10 @@ collide with a param. brokkr's options:
   HEAD's scripts serve every commit, and branch on `since()` (below). A Git
   LFS object the server can no longer serve is left as its pointer file
   rather than failing the worktree; every such file is warned about and
-  stored in the run's `build.lfs_pointers`.
+  stored in the run's `build.lfs_pointers`. A root `Cargo.lock` the commit
+  does not track is seeded from the live tree's (`brokkr man run`,
+  `--commit`); every run that reaches its build, `--commit` or not, stores where its lock came from
+  and its digest after the build in `build.lockfile`.
 - `--iterations N` - how many iterations, overriding the bench table's
   `iterations` setting (default 3 when absent). Any positive u32 count is
   accepted, including one larger than the bench default. The result is the

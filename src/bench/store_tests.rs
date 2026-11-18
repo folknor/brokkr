@@ -229,6 +229,10 @@ pub(super) fn document(uuid: &str) -> RunDocument {
                 path: "data/feed.csv".into(),
                 oid: format!("sha256:{}", "ab".repeat(32)),
             }]),
+            lockfile: Some(super::store::Lockfile {
+                source: super::store::LockSource::Seeded,
+                digest: Some("ffeeddccbbaa99887766554433221100".into()),
+            }),
         },
         measurement: Measurement::Timing,
         params: BTreeMap::from([
@@ -792,8 +796,9 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
     let dir = crate::test_scratch::scratch("bench_store", "upgrade");
     let path = dir.join("bench.db");
     let mut doc = document("0000000000000000000000000000000f");
-    // A version one store held no stderr and no LFS pointers.
+    // A version one store held no stderr, no LFS pointers and no lockfile.
     doc.build.lfs_pointers = None;
+    doc.build.lockfile = None;
     for child in doc.iterations.iter_mut().flat_map(|i| &mut i.children) {
         child.stderr = None;
     }
@@ -808,6 +813,7 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
                 "DROP TABLE child_cache_path;
                  DROP TABLE child_cache_file;
                  DROP TABLE child_cache;
+                 ALTER TABLE runs DROP COLUMN lockfile;
                  ALTER TABLE runs DROP COLUMN lfs_pointers;
                  ALTER TABLE children DROP COLUMN measured;
                  DROP TABLE child_stderr;
@@ -825,7 +831,7 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     assert!(store.marks(&doc.project).unwrap().is_empty());
     assert_eq!(store.load(&doc.uuid).unwrap(), Some(doc));
 }

@@ -90,6 +90,57 @@ pub struct Build {
     /// worktree was scanned and held none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lfs_pointers: Option<Vec<LfsPointer>>,
+    /// The build root's `Cargo.lock`: where it came from and its bytes after
+    /// the build. Absent when not recorded (a document from before the
+    /// field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lockfile: Option<Lockfile>,
+}
+
+/// The root `Cargo.lock` a build resolved against ([`Build::lockfile`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lockfile {
+    /// Where the file came from, observed before the build.
+    pub source: LockSource,
+    /// The file's xxh3-128 digest, read once the build succeeded. Absent
+    /// when there was no file, when the build did not finish, or for an
+    /// [`LockSource::Unmanaged`] layout, whose root file cargo may not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
+
+/// Where a build root's `Cargo.lock` came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LockSource {
+    /// The live tree's own.
+    Live,
+    /// The `--commit` worktree's commit tracks it.
+    Tracked,
+    /// Copied from the live tree's at worktree admission.
+    Seeded,
+    /// Untracked and not seeded (the live tree has none): the one the slot
+    /// already held.
+    Retained,
+    /// Untracked, not seeded, and absent: cargo resolved afresh.
+    Fresh,
+    /// Not the conventional root-lock layout on one side: not managed, not
+    /// digested.
+    Unmanaged,
+}
+
+impl LockSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Tracked => "tracked",
+            Self::Seeded => "seeded",
+            Self::Retained => "retained",
+            Self::Fresh => "fresh",
+            Self::Unmanaged => "unmanaged",
+        }
+    }
 }
 
 /// One file left as a Git LFS pointer ([`Build::lfs_pointers`]).
@@ -712,6 +763,18 @@ impl RunDocument {
             if !is_lower_hex(artifact, &[32]) {
                 return Err(refuse(format!(
                     "artifact digest {artifact:?} is not 32 lowercase hex digits"
+                )));
+            }
+        }
+        if let Some(lock) = &self.build.lockfile
+            && let Some(digest) = &lock.digest
+        {
+            if lock.source == LockSource::Unmanaged {
+                return Err(refuse("an unmanaged lockfile with a digest"));
+            }
+            if !is_lower_hex(digest, &[32]) {
+                return Err(refuse(format!(
+                    "lockfile digest {digest:?} is not 32 lowercase hex digits"
                 )));
             }
         }

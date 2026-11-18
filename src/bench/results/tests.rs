@@ -119,6 +119,7 @@ pub(crate) fn run(
             }),
             artifact: Some("00112233445566778899aabbccddeeff".into()),
             lfs_pointers: None,
+            lockfile: None,
         },
         measurement: Measurement::Timing,
         params: BTreeMap::from([("dataset".into(), param(false, &[("denmark", None)]))]),
@@ -434,7 +435,15 @@ fn compare_pairs_the_latest_result_per_key_and_names_what_the_key_leaves_out() {
     let a_old = run(1, "cat", 'a', 1_000, 1_000);
     let mut a_new = run(2, "cat", 'a', 2_000, 1_000);
     a_new.iterations[0] = iteration(1_000, None, &serde_json::json!({"nodes": 10}));
+    a_new.build.lockfile = Some(crate::bench::store::Lockfile {
+        source: crate::bench::store::LockSource::Seeded,
+        digest: Some("11111111aaaaaaaaaaaaaaaaaaaaaaaa".into()),
+    });
     let mut b = run(3, "cat", 'b', 3_000, 900);
+    b.build.lockfile = Some(crate::bench::store::Lockfile {
+        source: crate::bench::store::LockSource::Live,
+        digest: Some("22222222aaaaaaaaaaaaaaaaaaaaaaaa".into()),
+    });
     b.config = "[datasets.denmark]\nbbox = \"1,2,3,5\"\n".into();
     b.hostname = "other".into();
     b.iterations[0] = iteration(900, Some(""), &serde_json::json!({"nodes": 9}));
@@ -465,6 +474,10 @@ fn compare_pairs_the_latest_result_per_key_and_names_what_the_key_leaves_out() {
         "{out}"
     );
     assert!(out.contains("host: host bygg vs other"), "{out}");
+    assert!(
+        out.contains("root Cargo.lock differs: A 11111111 (seeded) -> B 22222222 (live)"),
+        "{out}"
+    );
     assert!(out.contains("verdict: nil -> \"\""), "{out}");
     assert!(out.contains("record: nodes 10 -> 9"), "{out}");
     assert!(

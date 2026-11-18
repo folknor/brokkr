@@ -80,6 +80,26 @@ fn lfs_line(run: &StoredRun, side: &str) -> Option<String> {
     ))
 }
 
+/// Both sides recorded a root `Cargo.lock` digest and the bytes differ. Says
+/// only that the file differs: a workspace package entry changes it as well
+/// as a dependency version does.
+fn lockfile_line(a: &StoredRun, b: &StoredRun) -> Option<String> {
+    let (x, y) = (
+        a.doc.build.lockfile.as_ref()?,
+        b.doc.build.lockfile.as_ref()?,
+    );
+    let (dx, dy) = (x.digest.as_deref()?, y.digest.as_deref()?);
+    (dx != dy).then(|| {
+        format!(
+            "  root Cargo.lock differs: A {} ({}) -> B {} ({})",
+            &dx[..dx.len().min(8)],
+            x.source.as_str(),
+            &dy[..dy.len().min(8)],
+            y.source.as_str()
+        )
+    })
+}
+
 fn build_line(a: &Build, b: &Build) -> Option<String> {
     let mut parts = Vec::new();
     if a.target != b.target {
@@ -703,6 +723,7 @@ pub(crate) fn format_compare(
                 lines.extend(build_line(&x.doc.build, &y.doc.build));
                 lines.extend(lfs_line(x, "A"));
                 lines.extend(lfs_line(y, "B"));
+                lines.extend(lockfile_line(x, y));
                 lines.extend(executables_line(x, y));
                 lines.extend(preparations_line(x, y));
                 lines.extend(host_line(x, y));

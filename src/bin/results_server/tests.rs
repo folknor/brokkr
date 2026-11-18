@@ -60,6 +60,7 @@ fn document(uuid: &str, project: &str) -> RunDocument {
             resolved: None,
             artifact: None,
             lfs_pointers: None,
+            lockfile: None,
         },
         measurement: Measurement::Timing,
         params: BTreeMap::new(),

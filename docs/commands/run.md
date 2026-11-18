@@ -128,7 +128,7 @@ grant, which is why worktrees are no longer cut as siblings of the checkout.
 The design is in `src/worktree.rs`.
 
 That split is the point. The build happens in the worktree, so the commit's
-own manifests, lockfile and `.cargo` config decide what is compiled. The
+own manifests, tracked lockfile and `.cargo` config decide what is compiled. The
 program runs in the live tree, so relative paths in its arguments, and any
 cache or data it reads relative to its working directory, resolve against the
 same directory as for the plain `run` it is being compared against. That does
@@ -136,6 +136,23 @@ not guarantee identical inputs: a default can change between the two builds,
 and a path the build embeds (one rooted on `CARGO_MANIFEST_DIR`) points into
 the worktree. A program that asks git about its working directory sees the
 live checkout, not `REF`.
+
+**An untracked lockfile is seeded from the live tree's.** When the commit
+does not track its root `Cargo.lock` (a project that gitignores it), every
+admission of the worktree, cut or reuse, copies the live tree's `Cargo.lock`
+over the checkout's, read at that moment. Without it the worktree would build
+against whatever cargo resolved the day the slot was cut, so a `--commit` arm
+would differ from the live one in dependency versions as well as code. Cargo
+may still amend each copy to fit the commit's manifests; the seed equalizes
+the starting bytes, not the resolution, and a seeded build that fails is
+reported as it is, never retried unseeded. A lockfile the commit tracks is
+never touched. With no live lock, the worktree keeps the one it holds or
+cargo resolves afresh. Only the conventional layout is managed: each side's
+root `Cargo.toml` is its own workspace root (a `[workspace]` table, or a
+`[package]` naming no other workspace, with no directory above it declaring
+one), and a `resolver.lockfile-path`
+override is not detected. The run log says which case applied, and a script
+bench stores it with the file's digest after the build (`brokkr man results`).
 
 Without it the A/B gets hand-rolled - a second `CARGO_TARGET_DIR`, a tarball of
 the old source - and those leftovers pile up in the tree, unknown to `clean`.

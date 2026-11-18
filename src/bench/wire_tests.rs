@@ -229,6 +229,7 @@ fn frozen_document() -> RunDocument {
             }),
             artifact: Some("00112233445566778899aabbccddeeff".into()),
             lfs_pointers: None,
+            lockfile: None,
         },
         measurement: Measurement::Hotpath,
         params: BTreeMap::from([(

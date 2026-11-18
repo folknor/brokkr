@@ -69,16 +69,22 @@ fn insert_run(tx: &Connection, doc: &RunDocument, config_digest: &str) -> Result
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
+    let lockfile = build
+        .lockfile
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     tx.execute(
         "INSERT INTO runs (
             uuid, format, project, bench, checkout, hostname, git_commit, dirty, subject,
             started_unix_ms, brokkr_version, argv, kernel, cpu_governor, avail_memory_mb,
             captured_env, target, profile, features, default_features, resolved_bin,
             resolved_features, artifact, config_digest, iterations_requested, outcome,
-            failure, best_iteration, pairing_key, measurement, alloc, lfs_pointers
+            failure, best_iteration, pairing_key, measurement, alloc, lfs_pointers,
+            lockfile
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                    ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31,
-                   ?32)",
+                   ?32, ?33)",
         params![
             doc.uuid,
             doc.format,
@@ -112,6 +118,7 @@ fn insert_run(tx: &Connection, doc: &RunDocument, config_digest: &str) -> Result
             doc.measurement.columns().0,
             doc.measurement.columns().1,
             lfs_pointers,
+            lockfile,
         ],
     )?;
     Ok(tx.last_insert_rowid())
