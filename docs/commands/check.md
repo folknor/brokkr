@@ -687,8 +687,11 @@ per entry; the count keeps
 the line falsifiable (a stage that quietly stopped running its checks shows a
 shrinking number) while a passing gate's name carries nothing to act on. A
 partly-failing stage prints `script-check: M of N ok` above the failure block.
+The exception is an entry that declares a `note` prefix: when it passes, its
+lines carrying that prefix print as `script-check: NAME: LINE`, so a script can
+say it skipped an optional part without failing.
 
-The keys (`match`, `stream`, `stage`, `diagnostics`, `when`) and what each failure view
+The keys (`match`, `stream`, `stage`, `diagnostics`, `when`, `note`) and what each failure view
 prints are in `brokkr man conventions script_check`. For `cargo doc` specifically,
 prefer the native [`rustdoc` phase](#rustdoc-phase) over a script check: it
 reads cargo's JSON, so each diagnostic is one line with its lint code.

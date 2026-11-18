@@ -8,8 +8,9 @@ mod verdict;
 pub(crate) use activation::decide_active_sweeps;
 use activation::{build_clippy_sweep, effective_profile_name};
 use conventions::{
-    LazyTree, report_script_stage, run_bench, run_dependency_rules, run_gremlins, run_header,
-    run_manifest, run_publish_cycle, run_script_checks, run_textlint, scope_order,
+    LazyTree, print_script_notes, report_script_stage, run_bench, run_dependency_rules,
+    run_gremlins, run_header, run_manifest, run_publish_cycle, run_script_checks, run_textlint,
+    scope_order,
 };
 /// What the `bench` phase checks: every `[bench.*]` by name, as config
 /// loading leaves them, the `bench_scripts` registry when set, and the

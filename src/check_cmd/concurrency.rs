@@ -215,6 +215,11 @@ impl BackgroundScripts {
         let verdict = if interrupted {
             Err(DevError::Interrupted)
         } else {
+            // Notes from every completed pass first, whatever the stage's
+            // verdict turns out to be.
+            for (check, outcome) in checks.iter().zip(&outcomes) {
+                print_script_notes(check, outcome);
+            }
             // Every entry that ran is reported, failures with their output,
             // whatever happened to the others.
             let failures: Vec<(&ScriptCheck, crate::script_check::Outcome)> =

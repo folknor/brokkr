@@ -735,6 +735,12 @@ pub struct ScriptCheck {
     /// --script NAME` runs it whatever this says.
     #[serde(default = "Cadence::always")]
     pub when: Cadence,
+    /// A line prefix marking the script's pass-time disclosures. When set, a
+    /// passing entry's output lines that begin with it (after leading
+    /// whitespace) are echoed under the script-check stage. Absent by default:
+    /// a pass prints nothing of its own. Never changes the verdict.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// One `[[textlint]]` rule: forbid a regex `pattern` on lines of files matching

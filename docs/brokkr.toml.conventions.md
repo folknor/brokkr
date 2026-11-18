@@ -437,10 +437,11 @@ stream  = "stdout"      # stdout | stderr | both          (default: stdout)
 stage   = "pre-clippy"  # pre-clippy | pre-test | post-test | background (default: pre-clippy)
 diagnostics = "opaque"  # opaque | rustc                  (default: opaque)
 when    = "always"      # off | gate | always             (default: always)
+note    = "notice:"     # line prefix echoed on a pass   (default: none)
 ```
 
 - `name` - label shown when the entry **fails** (`beta: stdout did not match
-  "ok"`). A passing stage reports once - `script-check (N checks)` on the
+  "ok"`), or ahead of a passing entry's `note` lines. A passing stage reports once - `script-check (N checks)` on the
   conventions line for `pre-clippy`, its own `script-check: ok (N checks)`
   line for a later stage - rather than a line per entry: a passing gate's name carries
   nothing to act on, while the count still says which corpus passed. A stage
@@ -462,6 +463,7 @@ when    = "always"      # off | gate | always             (default: always)
 - `stage` - where in the check pipeline the entry runs (below).
 - `diagnostics` - the output shape a **failure** is rendered against (below).
 - `when` - which runs the entry is part of (below).
+- `note` - a line prefix for the script's pass-time disclosures (below).
 
 The command's exit code is ignored - only the output match decides. See
 `src/script_check.rs` and `docs/commands/check.md`.
@@ -506,6 +508,26 @@ exempt: that file reaches every project, gate or not, and trees with no
 `brokkr.toml`, and a project cannot edit it. Such an entry runs under a
 complete claim, like a project's own, and is logged as not run on every other
 run, including every run in a project with no complete profile.
+
+### `note`
+
+A passing entry prints nothing of its own, so a script that passes while
+skipping an optional part (a cross-check whose tool is not installed) looks the
+same as one that ran it. `note` gives the script a way to say so: when the entry
+**passes**, each captured line that starts with the prefix, after leading
+whitespace, is printed as `script-check: NAME: LINE`, stdout's lines before
+stderr's whatever `stream` says. It never changes the verdict, and the stage's
+count line is unchanged. A failing entry prints its whole output anyway.
+
+At most five note lines are shown per entry, then `and N more note line(s)`.
+Each shown line has terminal escapes and control characters stripped,
+recognized credential forms and the current home path redacted, and is clipped
+to 240 characters. When a stream overran the 1 MiB capture limit, a line says
+the output past it was not scanned. Notes print as each entry finishes, so
+under `pre-clippy` they come before the conventions line; a `background`
+stage prints its notes when it is joined, and not at all if the run was
+interrupted. A blank or multi-line prefix is a load error. The absence of a
+note is the script's silence, not proof the optional part ran.
 
 ### `diagnostics`
 

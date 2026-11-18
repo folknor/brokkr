@@ -919,6 +919,14 @@ fn parse_script_checks(
                 check.name
             )));
         }
+        if let Some(note) = &check.note
+            && (note.trim().is_empty() || note.contains(['\n', '\r']))
+        {
+            return Err(DevError::Config(format!(
+                "[[script_check]] {:?} has a blank or multi-line `note` prefix",
+                check.name
+            )));
+        }
     }
     Ok(checks)
 }

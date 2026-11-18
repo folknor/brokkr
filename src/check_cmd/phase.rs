@@ -1910,6 +1910,7 @@ mod complete_rejection_tests {
             stage: Stage::PreClippy,
             diagnostics: Diagnostics::Opaque,
             when,
+            note: None,
         };
         let all = [entry("a", Cadence::Always), entry("g", Cadence::Gate), entry("o", Cadence::Off)];
         let owed = |certifies| -> Vec<String> {

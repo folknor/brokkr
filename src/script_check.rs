@@ -40,6 +40,9 @@ pub struct Outcome {
     /// Whether the output matched the `expect` sentinel. Always false for a
     /// run killed on its deadline, whatever it printed before the kill.
     pub passed: bool,
+    /// The entry's pass-time disclosures, ready to print: empty unless the
+    /// entry declares a `note` prefix and passed. See [`collect_notes`].
+    pub notes: Vec<String>,
     /// `Some(deadline)` when the command was killed for running past it.
     pub timed_out: Option<Duration>,
     /// The retained stdout prefix (shown on failure).
@@ -117,8 +120,19 @@ pub fn run_one(check: &ScriptCheck, cwd: &Path, deadline: Duration) -> Result<Ou
             &captured.stdout,
             &captured.stderr,
         );
+    let notes = match (&check.note, passed) {
+        (Some(prefix), true) => collect_notes(
+            prefix,
+            [
+                (&captured.stdout[..], stdout_truncated),
+                (&captured.stderr[..], stderr_truncated),
+            ],
+        ),
+        _ => Vec::new(),
+    };
     Ok(Outcome {
         passed,
+        notes,
         timed_out,
         stdout: captured.stdout,
         stderr: captured.stderr,
@@ -159,6 +173,89 @@ pub fn evaluate(
     }
 }
 
+/// At most this many note lines are shown per entry; the rest are counted.
+const NOTE_LINES: usize = 5;
+/// A shown note line is clipped to this many characters, ellipsis included.
+const NOTE_WIDTH: usize = 240;
+
+/// The display lines for a passing entry's notes: every complete retained line
+/// of stdout, then stderr, whose leading-whitespace-trimmed text starts with
+/// `prefix`. Matching uses the original text; each shown line is then stripped
+/// of terminal escapes and control characters, passed through the credential
+/// and home-path redactor, and clipped. Past [`NOTE_LINES`] matches the rest are
+/// counted, not shown. A stream cut at the capture limit drops its unterminated
+/// final fragment, and earns a line saying output went unscanned whether or not
+/// any retained line matched, so a note beyond the limit is not silently lost.
+pub(crate) fn collect_notes(prefix: &str, streams: [(&[u8], bool); 2]) -> Vec<String> {
+    let mut matched: Vec<String> = Vec::new();
+    let mut unscanned = false;
+    for (bytes, truncated) in streams {
+        let bytes = if truncated {
+            unscanned = true;
+            match bytes.iter().rposition(|&b| b == b'\n') {
+                Some(end) => &bytes[..end],
+                None => &[][..],
+            }
+        } else {
+            bytes
+        };
+        let text = String::from_utf8_lossy(bytes);
+        matched.extend(
+            text.lines()
+                .map(str::trim_start)
+                .filter(|line| line.starts_with(prefix))
+                .map(str::to_owned),
+        );
+    }
+    let extra = matched.len().saturating_sub(NOTE_LINES);
+    let mut shown: Vec<String> = matched
+        .iter()
+        .take(NOTE_LINES)
+        .map(|line| render_note(line))
+        .collect();
+    if extra > 0 {
+        shown.push(format!("and {extra} more note line(s)"));
+    }
+    if unscanned {
+        shown.push("output past the capture limit was not scanned for notes".into());
+    }
+    shown
+}
+
+/// One note line made safe to print: escapes stripped before redaction (an
+/// escape inside a header name would hide it from the redactor), then clipped.
+fn render_note(line: &str) -> String {
+    let mut plain = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // A CSI sequence runs to its final byte in `@`..=`~`; any other
+            // escape takes the one character after it.
+            if chars.next_if_eq(&'[').is_some() {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+        } else if c == '\t' {
+            plain.push(' ');
+        } else if !c.is_control() {
+            plain.push(c);
+        }
+    }
+    let redacted = crate::history::redact_secret_text(&plain);
+    let redacted = redacted.trim_end();
+    if redacted.chars().count() <= NOTE_WIDTH {
+        return redacted.to_owned();
+    }
+    let mut clipped: String = redacted.chars().take(NOTE_WIDTH - 3).collect();
+    clipped.push_str("...");
+    clipped
+}
+
 /// The last line of `text` that is not blank (after trimming), or `None` when
 /// every line is blank. Lets `last-line` tolerate a trailing newline and any
 /// blank progress lines above the final verdict.
@@ -168,7 +265,7 @@ fn last_non_empty_line(text: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{evaluate, run_one};
+    use super::{collect_notes, evaluate, run_one};
     use crate::config::{Diagnostics, MatchMode, ScriptCheck, Stage, Stream};
     use crate::rustc_text::{Level, rustc_blocks};
 
@@ -188,6 +285,7 @@ mod tests {
             stage: Stage::PreClippy,
             diagnostics: Diagnostics::Opaque,
             when: crate::config::Cadence::Always,
+            note: None,
         };
         let started = std::time::Instant::now();
         let deadline = std::time::Duration::from_millis(300);
@@ -348,6 +446,85 @@ errors are bad prose
             b"progress on stdout\n",
             b"done\n",
         ));
+    }
+
+    #[test]
+    fn notes_are_prefixed_lines_stdout_then_stderr() {
+        let notes = collect_notes(
+            "note:",
+            [
+                (b"  note: cross-check did not run\nprogress\nok\n", false),
+                (b"note: from stderr", false),
+            ],
+        );
+        assert_eq!(
+            notes,
+            vec!["note: cross-check did not run", "note: from stderr"]
+        );
+    }
+
+    #[test]
+    fn notes_past_the_quota_are_counted_and_lines_are_cleaned() {
+        let out = "n: a\nn: b\nn: c\nn: d\nn: e\nn: f\nn: g\n";
+        let notes = collect_notes("n:", [(out.as_bytes(), false), (b"", false)]);
+        assert_eq!(notes.len(), 6);
+        assert_eq!(notes[5], "and 2 more note line(s)");
+
+        let long = format!("n: \u{1b}[31mred\u{1b}[0m\u{7}{}", "x".repeat(500));
+        let notes = collect_notes("n:", [(long.as_bytes(), false), (b"", false)]);
+        assert!(notes[0].starts_with("n: red"));
+        assert_eq!(notes[0].chars().count(), 240);
+        assert!(notes[0].ends_with("..."));
+    }
+
+    #[test]
+    fn a_truncated_stream_drops_its_fragment_and_says_so() {
+        let notes = collect_notes("n:", [(b"n: whole\nn: cut", true), (b"", false)]);
+        assert_eq!(
+            notes,
+            vec![
+                "n: whole",
+                "output past the capture limit was not scanned for notes"
+            ]
+        );
+        // The capture loss is disclosed even with no retained match.
+        let notes = collect_notes("n:", [(b"nothing", true), (b"", false)]);
+        assert_eq!(notes.len(), 1);
+    }
+
+    #[test]
+    fn a_failing_or_unopted_entry_has_no_notes() {
+        let mut check = crate::config::ScriptCheck {
+            name: "n".into(),
+            command: "echo 'n: hi'; echo DONE".into(),
+            expect: "DONE".into(),
+            match_mode: MatchMode::LastLine,
+            stream: Stream::Stdout,
+            stage: Stage::PreClippy,
+            diagnostics: Diagnostics::Opaque,
+            when: crate::config::Cadence::Always,
+            note: None,
+        };
+        let deadline = std::time::Duration::from_secs(10);
+        let here = std::path::Path::new(".");
+        assert!(
+            run_one(&check, here, deadline)
+                .expect("spawned")
+                .notes
+                .is_empty()
+        );
+        check.note = Some("n:".into());
+        assert_eq!(
+            run_one(&check, here, deadline).expect("spawned").notes,
+            vec!["n: hi"]
+        );
+        check.expect = "NOPE".into();
+        assert!(
+            run_one(&check, here, deadline)
+                .expect("spawned")
+                .notes
+                .is_empty()
+        );
     }
 
     #[test]

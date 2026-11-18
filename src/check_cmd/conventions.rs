@@ -559,11 +559,23 @@ pub(super) fn run_script_checks(
             .saturating_sub(SCRIPT_CHECK_MARGIN)
             .max(std::time::Duration::from_secs(1));
         let outcome = crate::script_check::run_one(check, project_root, deadline)?;
+        // Printed as each entry finishes, so a later entry's spawn error or
+        // the phase watchdog cannot swallow a disclosure already earned.
+        print_script_notes(check, &outcome);
         if !outcome.passed {
             failures.push((check, outcome));
         }
     }
     report_script_stage(total, &failures, "check")
+}
+
+/// Print a passing entry's `note` lines, one `script-check: NAME: LINE` each.
+/// A no-op for an entry without notes. Notes are the script's own disclosure;
+/// they never change the verdict, and their absence certifies nothing.
+pub(super) fn print_script_notes(check: &ScriptCheck, outcome: &crate::script_check::Outcome) {
+    for line in &outcome.notes {
+        output::run_msg(&format!("script-check: {}: {line}", check.name));
+    }
 }
 
 /// Report one script-check stage from its failures: the stage's one green
@@ -881,12 +893,14 @@ mod script_failure_render_tests {
             stage: Stage::PreTest,
             diagnostics,
             when: crate::config::Cadence::Always,
+            note: None,
         }
     }
 
     fn outcome(stdout: &str, stderr: &str) -> Outcome {
         Outcome {
             passed: false,
+            notes: Vec::new(),
             timed_out: None,
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
