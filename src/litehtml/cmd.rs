@@ -538,23 +538,52 @@ fn approval_comparison(
              fixture now renders at {width}px - {rerun}"
         )));
     }
-    let Some(scored) = result.reference_id.as_deref() else {
-        return Err(DevError::Verify(format!(
+    match reference_mismatch(result, current) {
+        None => Ok(()),
+        Some(ReferenceMismatch::Unrecorded) => Err(DevError::Verify(format!(
             "latest result for fixture '{fixture_id}' does not record which Chrome reference it \
              was scored against - {rerun}"
-        )));
-    };
-    match current {
-        Inspection::Usable { reference_id } if reference_id == scored => Ok(()),
-        Inspection::Usable { .. } | Inspection::Unidentified => Err(DevError::Verify(format!(
+        ))),
+        Some(ReferenceMismatch::Replaced) => Err(DevError::Verify(format!(
             "the Chrome reference for fixture '{fixture_id}' was replaced after its latest \
              result was scored - {rerun}"
         ))),
-        Inspection::Unusable(reason) => Err(DevError::Verify(format!(
+        Some(ReferenceMismatch::Unusable(reason)) => Err(DevError::Verify(format!(
             "the Chrome reference for fixture '{fixture_id}' is not usable ({reason}) - restore \
              it and approve again, or run `brokkr visual {fixture_id} --recapture` and approve \
              that"
         ))),
+    }
+}
+
+/// Why a scored result does not describe the comparison against the
+/// published reference. `approve` refuses on it and `visual-status` shows the
+/// row as STALE, so the two cannot disagree about which result is current.
+#[derive(Debug, PartialEq, Eq)]
+enum ReferenceMismatch {
+    /// The row predates results recording their reference. A rerun records
+    /// one, adopting an unidentified reference first.
+    Unrecorded,
+    /// The published reference is not the one the row was scored against,
+    /// as after a `--recapture` whose run was cut before it scored.
+    Replaced,
+    /// No usable reference is published; the reason says why.
+    Unusable(String),
+}
+
+fn reference_mismatch(
+    result: &super::db::ResultRow,
+    current: &Inspection,
+) -> Option<ReferenceMismatch> {
+    if let Inspection::Unusable(reason) = current {
+        return Some(ReferenceMismatch::Unusable(reason.clone()));
+    }
+    let Some(scored) = result.reference_id.as_deref() else {
+        return Some(ReferenceMismatch::Unrecorded);
+    };
+    match current {
+        Inspection::Usable { reference_id } if reference_id == scored => None,
+        _ => Some(ReferenceMismatch::Replaced),
     }
 }
 
@@ -917,6 +946,7 @@ pub(crate) fn status(
 ) -> Result<(), DevError> {
     let db = open_db_read_only(project_root)?;
     let approvals = db.all_approvals()?;
+    let fixtures_root = project_root.join("fixtures");
 
     output::litehtml_msg(&format!(
         "  {:<25} {:<11} {:<11} {:<9} {}",
@@ -926,7 +956,7 @@ pub(crate) fn status(
 
     for fixture in &litehtml_config.fixtures {
         let width = fixture.resolved_viewport_width(litehtml_config);
-        print_fixture_status(fixture, width, &approvals, &db)?;
+        print_fixture_status(fixture, width, &approvals, &db, &fixtures_root)?;
     }
 
     Ok(())
@@ -935,12 +965,15 @@ pub(crate) fn status(
 /// A delta needs the approval, the latest result and the configuration to
 /// agree on the width; anything measured at another width is shown with its
 /// width and never compared, since a config edit alone does not make an old
-/// result describe the current comparison.
+/// result describe the current comparison. Likewise a scored result is STALE
+/// unless it was scored against the Chrome reference published now, by the
+/// same rule `approve` refuses on.
 fn print_fixture_status(
     fixture: &LitehtmlFixture,
     width: u32,
     approvals: &[super::db::Approval],
     db: &MechanicalDb,
+    fixtures_root: &Path,
 ) -> Result<(), DevError> {
     let approval = approvals.iter().find(|a| a.subject_id == fixture.id);
     let latest = db.latest_result_for_fixture(&fixture.id)?;
@@ -959,15 +992,43 @@ fn print_fixture_status(
     };
     let applicable_approval = approval.filter(|_| approved_width == Some(width));
 
-    let columns = match latest_width {
-        Some(measured) if measured != width => crate::visual::status::StatusColumns {
-            pixel: "\u{2014}".into(),
-            delta: "\u{2014}".into(),
-            status: "STALE".into(),
-            annotation: format!(
-                " (last run at {measured}px, fixture renders at {width}px - rerun)"
-            ),
-        },
+    let stale = |annotation: String| crate::visual::status::StatusColumns {
+        pixel: "\u{2014}".into(),
+        delta: "\u{2014}".into(),
+        status: "STALE".into(),
+        annotation,
+    };
+    // A scored row at this width is current only against the reference it was
+    // scored against, by the rule `approve` applies.
+    let reference_stale = match (latest.as_ref(), latest_width) {
+        (Some(row), Some(measured)) if measured == width => {
+            let id = &fixture.id;
+            match reference::inspect(&fixtures_root.join(id), width) {
+                Err(e) => Some(format!(
+                    " (could not read the published reference: {e} - resolve it, then rerun)"
+                )),
+                Ok(current) => reference_mismatch(row, &current).map(|mismatch| match mismatch {
+                    ReferenceMismatch::Unrecorded => {
+                        " (last run records no reference id - rerun)".to_owned()
+                    }
+                    ReferenceMismatch::Replaced => {
+                        " (reference replaced since the last run - rerun)".to_owned()
+                    }
+                    ReferenceMismatch::Unusable(reason) => format!(
+                        " (reference not usable: {reason} - restore it, or rerun with \
+                         --recapture)"
+                    ),
+                }),
+            }
+        }
+        _ => None,
+    };
+
+    let columns = match (latest_width, reference_stale) {
+        (Some(measured), _) if measured != width => stale(format!(
+            " (last run at {measured}px, fixture renders at {width}px - rerun)"
+        )),
+        (_, Some(annotation)) => stale(annotation),
         _ => compare::status_columns(
             latest.as_ref().map(|row| row.status),
             latest.as_ref().and_then(|row| row.pixel_diff_pct),
@@ -1511,6 +1572,42 @@ mod tests {
         legacy.reference_id = None;
         let error = approval_comparison("f", &legacy, 800, &current).unwrap_err();
         assert!(error.to_string().contains("does not record"), "{error}");
+    }
+
+    #[test]
+    fn a_result_is_current_only_against_the_reference_it_was_scored_against() {
+        let scored = result(compare::Status::Pass, Some(1.5), Some(98.0));
+        let usable = |id: &str| Inspection::Usable {
+            reference_id: id.into(),
+        };
+        assert_eq!(reference_mismatch(&scored, &usable("reference")), None);
+        // An interrupted --recapture published a new reference without
+        // scoring against it: the old pass is no longer the comparison.
+        assert_eq!(
+            reference_mismatch(&scored, &usable("other")),
+            Some(ReferenceMismatch::Replaced)
+        );
+        assert_eq!(
+            reference_mismatch(&scored, &Inspection::Unidentified),
+            Some(ReferenceMismatch::Replaced)
+        );
+        assert_eq!(
+            reference_mismatch(&scored, &Inspection::Unusable("gone".into())),
+            Some(ReferenceMismatch::Unusable("gone".into()))
+        );
+
+        let mut legacy = result(compare::Status::Pass, Some(1.5), Some(98.0));
+        legacy.reference_id = None;
+        assert_eq!(
+            reference_mismatch(&legacy, &Inspection::Unidentified),
+            Some(ReferenceMismatch::Unrecorded)
+        );
+        // An unusable reference names the recovery that works with an
+        // approval present, whatever the row recorded.
+        assert_eq!(
+            reference_mismatch(&legacy, &Inspection::Unusable("gone".into())),
+            Some(ReferenceMismatch::Unusable("gone".into()))
+        );
     }
 
     #[test]

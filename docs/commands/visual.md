@@ -114,8 +114,11 @@ its project-specific config block.
   run, delta, improvements. Litehtml shows a delta only when the approval,
   the last run and the fixture's current width agree; an approval measured at
   another width shows that width, and a scored last run at another width
-  shows as `STALE` with its width. An `ERROR` last run records no width and
-  is shown as it is.
+  shows as `STALE` with its width. A scored last run at the current width is
+  likewise `STALE` whenever `approve` would refuse it for its reference: it
+  records none, the reference was replaced since, the reference is not usable,
+  or the published reference cannot be read. An `ERROR` last run records no
+  width and is shown as it is.
 
 ## Chrome reference (litehtml only)
 
@@ -168,7 +171,13 @@ reference it was scored against has been replaced.
 
 An explicit `--recapture` at the same width keeps the approval: it is the
 documented, deliberate swap of the ground truth, and the approval then
-ratchets scores against the new reference.
+ratchets scores against the new reference. That is what lets a Chrome bump be
+judged against the prior baseline: a score that moved reads as a `REGRESSION`
+or an improvement, and approving the new run re-baselines. Keying approvals by
+reference instead would leave every recaptured fixture unapproved, hiding
+exactly that movement. References are local files brokkr publishes, so the
+only path that replaces one under an approval is that explicit flag; a hand
+edit of the files is not detected.
 
 ## Element comparison (litehtml only)
 
