@@ -276,6 +276,94 @@ mod tests {
         assert_eq!(tail(&["brokkr", "fmt", "--", "--check"]), 1);
         assert_eq!(tail(&["brokkr", "fmt", "a", "--b"]), 2);
         assert_eq!(tail(&["brokkr", "env"]), 0);
+        // A `--` before the optional name leaves it empty; a later `--` is
+        // the child's.
+        assert_eq!(tail(&["brokkr", "mogwai", "--", "gen", "--type", "s"]), 3);
+        assert_eq!(tail(&["brokkr", "run", "-F", "a", "--", "--", "-h"]), 2);
+    }
+
+    /// The name a `--` precedes is the child's, not brokkr's: `run -- ARGS`
+    /// and `mogwai -- ARGS` are the bare forms, a named form keeps its name,
+    /// and an optional-value flag before the `--` is left valueless.
+    #[test]
+    fn a_separator_before_the_name_leaves_it_empty() {
+        fn mogwai(argv: &'static [&'static str]) -> (Option<String>, Vec<String>) {
+            match parse(argv.iter().copied()).expect("parse").command {
+                Command::Mogwai(m) => (m.target, m.args),
+                _ => unreachable!("parsed as mogwai"),
+            }
+        }
+        fn run(argv: &'static [&'static str]) -> (Option<String>, Vec<String>) {
+            match parse(argv.iter().copied()).expect("parse").command {
+                Command::Run(r) => (r.name, r.args),
+                _ => unreachable!("parsed as run"),
+            }
+        }
+        let owned = |v: &[&str]| v.iter().map(|&a| a.to_owned()).collect::<Vec<_>>();
+
+        assert_eq!(
+            mogwai(&["brokkr", "mogwai", "--", "gen", "--type", "summary"]),
+            (None, owned(&["gen", "--type", "summary"]))
+        );
+        assert_eq!(
+            mogwai(&["brokkr", "mogwai", "--bench", "--", "gen"]),
+            (None, owned(&["gen"]))
+        );
+        assert_eq!(
+            mogwai(&["brokkr", "mogwai", "--bench=3", "--", "gen"]),
+            (None, owned(&["gen"]))
+        );
+        assert_eq!(
+            mogwai(&["brokkr", "mogwai", "-v", "--", "--help"]),
+            (None, owned(&["--help"]))
+        );
+        assert_eq!(
+            mogwai(&["brokkr", "mogwai", "stage", "quick", "-v"]),
+            (Some("stage".into()), owned(&["quick", "-v"]))
+        );
+        assert_eq!(
+            mogwai(&["brokkr", "mogwai", "stage", "--", "quick", "--", "x"]),
+            (Some("stage".into()), owned(&["quick", "--", "x"]))
+        );
+        assert_eq!(
+            mogwai(&["brokkr", "mogwai", "run", "--", "--threads", "1"]),
+            (Some("run".into()), owned(&["--threads", "1"]))
+        );
+
+        assert_eq!(
+            run(&["brokkr", "run", "--release", "--", "--variations", "64"]),
+            (None, owned(&["--variations", "64"]))
+        );
+        assert_eq!(
+            run(&["brokkr", "run", "--features", "a,b", "--", "--help"]),
+            (None, owned(&["--help"]))
+        );
+        assert_eq!(
+            run(&[
+                "brokkr", "run", "--commit", "a5cc1f8", "--", "--preset", "mtf"
+            ]),
+            (None, owned(&["--preset", "mtf"]))
+        );
+        assert_eq!(
+            run(&["brokkr", "run", "-F", "a", "--", "--", "--help"]),
+            (None, owned(&["--", "--help"]))
+        );
+        assert_eq!(
+            run(&[
+                "brokkr",
+                "run",
+                "--release",
+                "bench",
+                "--",
+                "--threads",
+                "1"
+            ]),
+            (Some("bench".into()), owned(&["--threads", "1"]))
+        );
+        assert_eq!(
+            run(&["brokkr", "run", "--features", "a", "bench", "--", "-h"]),
+            (Some("bench".into()), owned(&["-h"]))
+        );
     }
 
     #[test]

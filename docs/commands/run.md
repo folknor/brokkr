@@ -216,26 +216,13 @@ that could not have been anything else.
 `brokkr run NAME -- ARGS...` forwards everything after `--` to the program,
 after cargo's own `--`.
 
-The bare form with arguments - `brokkr run -- --variations 64` - needs a
-pre-pass. As far as clap is concerned that `--` sits in the `NAME` position and
-the first real argument would be swallowed as a target name. `bare_run_sentinel`
-in `src/runnables.rs` rewrites argv before parsing. It acts only when `run` is
-the subcommand itself - the first argument, since brokkr has no top-level
-options that take a value - so a `run` that is some other command's value
-(`brokkr mogwai run -- ...`, `history --command run`) is never touched. It
-walks past `run`'s leading flags, and if the next token is `--`, replaces it
-with a sentinel that
-`cmd_run` reads back as "no name". The sentinel contains a NUL byte, so no
-target name can collide with it. `brokkr run NAME -- ARGS` is left untouched,
-as is every other command's argv.
-
-Walking past the leading flags means the pre-pass has to know which of them
-take a **separate value** (`--features` / `-F`, `--profile`, `--commit`, the
-`--with` family), so
-`brokkr run --features a,b -- --help` skips the `a,b` and still finds the
-`--`. The set is read from `run`'s clap definition rather than kept by hand,
-so a value-taking flag added to `run` is covered without anyone remembering
-to list it.
+The bare form with arguments - `brokkr run -- --variations 64` - forwards
+everything after the `--` too: a `--` reached before any `NAME` leaves `NAME`
+empty (clap's `value_terminator` on it), so `cmd_run` falls back to `[bin]
+default` or the sole runnable. Only the first `--` is brokkr's; any later one
+is the program's, so `brokkr run -- -- --help` forwards `-- --help`. Flags
+before the `--`, with their values, parse as usual (`brokkr run --features a,b
+-- --help`). `brokkr mogwai -- ARGS` takes the same shape.
 
 ## `brokkr build`
 

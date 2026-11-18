@@ -916,6 +916,10 @@ pub(crate) struct FmtCmd {
 #[derive(Args)]
 pub(crate) struct RunCmd {
     /// Bin or example target name (bare form: `[bin] default`)
+    // `value_terminator`: a `--` reached while NAME is still unfilled ends
+    // NAME empty and starts ARGS, so `run -- ARGS` is the bare form and every
+    // later `--` is forwarded literally.
+    #[arg(value_terminator = "--")]
     pub(crate) name: Option<String>,
 
     #[command(flatten)]
@@ -1685,6 +1689,9 @@ pub(crate) struct MogwaiCmd {
     pub(crate) mode: ModeArgs,
 
     /// Harness target from `[mogwai.targets.*]`; omit for the CLI (bare lists both)
+    // `value_terminator`: as `RunCmd::name`, a `--` before any TARGET leaves
+    // it empty, so `mogwai -- ARGS` reaches the CLI surface.
+    #[arg(value_terminator = "--")]
     pub(crate) target: Option<String>,
 
     /// Arguments forwarded to the binary or harness (after `--`)

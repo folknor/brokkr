@@ -46,7 +46,7 @@
 use crate::db::RunInvocation;
 
 /// This process's invocation, as the results row records it: the exact argv
-/// (not the copy `bare_run_sentinel` rewrites for clap) and how many of its
+/// and how many of its
 /// trailing tokens are positional values.
 pub(crate) fn capture(argv: Vec<String>, positional_tail: usize) -> RunInvocation {
     let arm_key = arm_key(&argv, positional_tail);

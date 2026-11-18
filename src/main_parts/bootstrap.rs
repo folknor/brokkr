@@ -96,11 +96,9 @@ where
 ///
 /// Also captures the invocation a results row records, here because only the
 /// parse knows which trailing tokens are positional values rather than
-/// brokkr's options (`run_invocation::positional_tail`). The recorded argv is
-/// the one brokkr was given, not the copy `bare_run_sentinel` rewrites.
+/// brokkr's options (`run_invocation::positional_tail`).
 fn parse_cli(project: Option<&Project>) -> (Cli, cli::CommandId, crate::db::RunInvocation) {
     let raw_argv: Vec<String> = std::env::args().collect();
-    let argv = crate::runnables::bare_run_sentinel(raw_argv.clone());
 
     let mut cmd = <Cli as clap::CommandFactory>::command();
     let names: Vec<String> = cmd
@@ -127,7 +125,7 @@ fn parse_cli(project: Option<&Project>) -> (Cli, cli::CommandId, crate::db::RunI
         });
     }
 
-    let matches = match cmd.try_get_matches_from_mut(argv) {
+    let matches = match cmd.try_get_matches_from_mut(raw_argv.clone()) {
         Ok(matches) => matches,
         Err(e) => e.exit(),
     };

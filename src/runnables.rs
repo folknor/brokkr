@@ -15,71 +15,9 @@ use crate::config::BinConfig;
 use crate::error::DevError;
 use crate::output;
 
-/// Stand-in for an absent `brokkr run` target name.
-///
-/// `brokkr run --release -- ARGS` puts `--` in the name position as far as
-/// clap is concerned, so the first raw argument would be swallowed as a
-/// target name. `bare_run_sentinel` rewrites that `--` into this token
-/// before parsing; `cmd_run` reads it back as `None` and falls through to
-/// `[bin] default` / the sole runnable. It contains a NUL, so no real
-/// target name can collide with it.
-pub const NO_NAME: &str = "\u{0}brokkr-bare-run";
-
 /// The environment variable `run --with` and `serve --with` hand the program
 /// the `--with` target's executable path in.
 pub(crate) const WITH_EXE_ENV: &str = "BROKKR_WITH_EXE";
-
-/// Flags of `brokkr run` that take a separate value argument. Derived from
-/// clap so adding an option cannot silently desynchronise the argv pre-pass.
-fn run_value_flags() -> &'static [String] {
-    static FLAGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    FLAGS.get_or_init(|| {
-        use clap::CommandFactory;
-
-        let mut cli = crate::cli::Cli::command();
-        let Some(run) = cli.find_subcommand_mut("run") else {
-            return Vec::new();
-        };
-        run.get_arguments()
-            .filter(|arg| arg.get_action().takes_values())
-            .flat_map(|arg| {
-                arg.get_long()
-                    .map(|name| format!("--{name}"))
-                    .into_iter()
-                    .chain(arg.get_short().map(|name| format!("-{name}")))
-            })
-            .collect()
-    })
-}
-
-/// Rewrite `run [flags] -- ARGS...` so the `--` no longer lands in the
-/// name position. Returns the argv unchanged in every other shape,
-/// including `run NAME -- ARGS...`.
-///
-/// Anchored on the subcommand position, `argv[1]`: `Cli` has no top-level
-/// options that take a value (only clap's `--help`/`--version`, which end
-/// parsing), so the subcommand is always the first argument. Matching the
-/// first `run` anywhere would rewrite a `run` that is some other command's
-/// value - a mogwai target named `run`, `history --command run` - whenever a
-/// `--` followed it.
-pub fn bare_run_sentinel(args: Vec<String>) -> Vec<String> {
-    let run_at = 1;
-    if args.get(run_at).is_none_or(|a| a != "run") {
-        return args;
-    }
-    let value_flags = run_value_flags();
-    let mut i = run_at + 1;
-    while args.get(i).is_some_and(|a| a.starts_with('-') && a != "--") {
-        // `--features=a` carries its value inline; `--features a` does not.
-        let takes_value = value_flags.contains(&args[i]);
-        i += if takes_value { 2 } else { 1 };
-    }
-    let mut args = args;
-    if args.get(i).is_some_and(|a| a == "--") {
-        args[i] = NO_NAME.to_owned();
-    }
-    args
-}
 
 /// `run`'s cargo feature selection, forwarded verbatim.
 ///
@@ -202,7 +140,6 @@ fn resolve_target<'a>(
         ));
     }
 
-    let name = name.filter(|n| *n != NO_NAME);
     let default = cfg.and_then(|c| c.default.as_deref());
     let wanted = name.or(default);
     let target = match wanted {
@@ -686,10 +623,6 @@ fn run_cargo_with_env(
 mod tests {
     use super::*;
 
-    fn rewrite(args: &[&str]) -> Vec<String> {
-        bare_run_sentinel(args.iter().map(|s| (*s).to_owned()).collect())
-    }
-
     #[test]
     #[allow(clippy::unwrap_used)]
     fn a_snapshot_is_keyed_by_content_and_survives_a_rebuild() {
@@ -738,105 +671,5 @@ mod tests {
             0,
             "a failed snapshot leaves no staging copy"
         );
-    }
-
-    #[test]
-    fn bare_run_with_separator_yields_sentinel() {
-        assert_eq!(
-            rewrite(&["brokkr", "run", "--release", "--", "--variations", "64"]),
-            vec!["brokkr", "run", "--release", NO_NAME, "--variations", "64"]
-        );
-    }
-
-    #[test]
-    fn named_run_is_untouched() {
-        let argv = [
-            "brokkr",
-            "run",
-            "--release",
-            "bench",
-            "--",
-            "--threads",
-            "1",
-        ];
-        assert_eq!(rewrite(&argv), argv.to_vec());
-    }
-
-    #[test]
-    fn value_flag_does_not_end_the_scan() {
-        assert_eq!(
-            rewrite(&["brokkr", "run", "--features", "a,b", "--", "--help"]),
-            vec!["brokkr", "run", "--features", "a,b", NO_NAME, "--help"]
-        );
-    }
-
-    #[test]
-    fn inline_value_flag_does_not_end_the_scan() {
-        assert_eq!(
-            rewrite(&["brokkr", "run", "--features=a", "--", "--help"]),
-            vec!["brokkr", "run", "--features=a", NO_NAME, "--help"]
-        );
-    }
-
-    #[test]
-    fn commit_value_does_not_end_the_scan() {
-        assert_eq!(
-            rewrite(&[
-                "brokkr", "run", "--commit", "a5cc1f8", "--", "--preset", "mtf"
-            ]),
-            vec![
-                "brokkr", "run", "--commit", "a5cc1f8", NO_NAME, "--preset", "mtf"
-            ]
-        );
-    }
-
-    #[test]
-    fn with_values_do_not_end_the_scan() {
-        assert_eq!(
-            rewrite(&[
-                "brokkr",
-                "run",
-                "--with",
-                "pbfhogg",
-                "--with-commit",
-                "a5cc1f8",
-                "--with-features",
-                "zlib",
-                "--",
-                "--help"
-            ]),
-            vec![
-                "brokkr",
-                "run",
-                "--with",
-                "pbfhogg",
-                "--with-commit",
-                "a5cc1f8",
-                "--with-features",
-                "zlib",
-                NO_NAME,
-                "--help"
-            ]
-        );
-    }
-
-    #[test]
-    fn named_run_after_features_is_untouched() {
-        let argv = ["brokkr", "run", "--features", "a", "bench", "--", "-h"];
-        assert_eq!(rewrite(&argv), argv.to_vec());
-    }
-
-    #[test]
-    fn other_commands_are_untouched() {
-        let argv = ["brokkr", "check", "--", "x"];
-        assert_eq!(rewrite(&argv), argv.to_vec());
-    }
-
-    #[test]
-    fn run_as_another_commands_value_is_untouched() {
-        let argv = ["brokkr", "mogwai", "run", "--", "--threads", "1"];
-        assert_eq!(rewrite(&argv), argv.to_vec());
-        let argv = ["brokkr", "history", "--command", "run", "--", "x"];
-        assert_eq!(rewrite(&argv), argv.to_vec());
     }
 }
