@@ -206,66 +206,11 @@ impl MeasurementSession {
         Ok(self)
     }
 
-    /// Create a session with a built executable using the dirty-tree policy for this request.
-    pub(crate) fn build_for_request(
-        req: &crate::measure::MeasureRequest<'_>,
-        package: Option<&str>,
-        features: &[&str],
-        default_features: bool,
-    ) -> Result<Self, DevError> {
-        Self::build(
-            req.dev_config,
-            req.project.clone(),
-            req.project_root,
-            req.build_root,
-            package,
-            features,
-            default_features,
-            DirtyPolicy::for_request(req).allowed(),
-            req.stop_marker.map(str::to_owned),
-        )
-        .and_then(|ctx| ctx.with_request(req))
-    }
-
-    /// Create a new session with a built executable.
-    ///
-    /// Builds use the selected checkout while data
-    /// paths and the results DB use `project_root` (main tree). Git info is
-    /// collected from the build root so the commit hash matches the built code.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn build(
-        dev_config: &config::DevConfig,
-        project: Project,
-        project_root: &ProjectRoot,
-        build_root: &BuildRoot,
-        package: Option<&str>,
-        features: &[&str],
-        default_features: bool,
-        force: bool,
-        stop_marker: Option<String>,
-    ) -> Result<Self, DevError> {
-        let build_config = if features.is_empty() && default_features {
-            build::BuildConfig::release(package)
-        } else if default_features {
-            build::BuildConfig::release_with_features(package, features)
-        } else {
-            build::BuildConfig::release_no_defaults(package, features)
-        };
-        Self::with_build_config(
-            dev_config,
-            project,
-            project_root,
-            build_root,
-            &build_config,
-            force,
-            stop_marker,
-        )
-    }
-
-    /// As [`MeasurementSession::build`], but the caller supplies the `BuildConfig`
-    /// directly instead of having it derived as a release build of the
-    /// project's own crate. Same lock -> `cargo_build` -> `BenchHarness`
-    /// lifecycle; the only difference is *what* gets built.
+    /// Create a session with a built executable: lock, then `cargo_build` of
+    /// the caller's `BuildConfig`, then `BenchHarness`. Builds use the
+    /// selected checkout while the results DB uses `project_root` (main
+    /// tree); git info comes from the build root so the commit hash matches
+    /// the built code.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_build_config(
         dev_config: &config::DevConfig,

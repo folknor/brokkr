@@ -504,7 +504,7 @@ With 55+ top-level commands, `--help` is a wall of text. `display_order` groups 
 ### `BenchConfig::external_build` and `arm_qualifier` have no producer left
 
 With elivagar's typed commands gone, every `BenchConfig` sets both to `None`
-(generic-hotpath, mogwai, sluggrs hotpath, ratatoskr sync). They and the
+(mogwai, sluggrs hotpath, ratatoskr sync). They and the
 recording path's handling of them could go; the stored `cargo_profile`
 values `java`/`cmake` and qualified arm keys must keep reading either way.
 

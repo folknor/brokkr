@@ -33,9 +33,10 @@ All flags go after the command name.
 
 ## Measurable commands per project
 
-The typed measurable commands are `generic-hotpath`, mogwai's `mogwai`,
-sluggrs' `hotpath` and ratatoskr's `sync --bench`. pbfhogg, elivagar and
-nidhogg use script benches (`brokkr bench NAME`). Piners' `corpus` is **not**
+The typed measurable commands are mogwai's `mogwai`,
+sluggrs' `hotpath` and ratatoskr's `sync --bench`. Every other project
+measures through script benches (`brokkr bench NAME`), which any project can
+declare. Piners' `corpus` is **not**
 measurable: it takes no measurement flag, and its timing is the parity run
 row's `wall_ms` (why: `docs/commands/corpus.md`).
 

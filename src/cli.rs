@@ -89,8 +89,7 @@ mod visibility_tests {
     /// The measured-run query commands follow the rows. Litehtml records no
     /// measured runs (its visual results live in their own store), so it is
     /// the one project where they have nothing to show; everywhere else - including an
-    /// `Other(_)` tree, which reaches `BenchHarness` via `generic-hotpath` -
-    /// they must stay.
+    /// `Other(_)` tree, which stores script-bench runs - they must stay.
     #[test]
     fn measured_queries_follow_the_rows() {
         // `results` and `sidecar` also read script-bench runs, which every

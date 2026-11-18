@@ -28,7 +28,6 @@ mod env;
 mod error;
 mod fmt_cmd;
 mod fs_probe;
-mod generic_hotpath_cmd;
 mod git;
 mod globs;
 mod gremlins;

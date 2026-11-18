@@ -286,7 +286,7 @@ mod tests {
         assert_eq!(tail(&["brokkr", "crit", "--", "--sample-size", "10"]), 2);
         assert_eq!(tail(&["brokkr", "fmt", "--", "--check"]), 1);
         assert_eq!(tail(&["brokkr", "fmt", "a", "--b"]), 2);
-        assert_eq!(tail(&["brokkr", "generic-hotpath", "--bench", "3"]), 0);
+        assert_eq!(tail(&["brokkr", "env"]), 0);
     }
 
     #[test]

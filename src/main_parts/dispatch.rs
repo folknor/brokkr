@@ -12,7 +12,6 @@ use crate::config::project_config::ProjectConfig;
 use crate::context::with_worktree;
 use crate::env::cmd_env;
 use crate::error::DevError;
-use crate::generic_hotpath_cmd::cmd_hotpath_generic;
 use crate::lock_cmd::{cmd_kill, cmd_lock};
 use crate::passthrough_cmd::{RunOptions, cmd_run};
 use crate::project::Project;
@@ -449,20 +448,6 @@ fn run_project(
             })
         }
 
-        // ----- generic commands -----
-        Command::GenericHotpath { mode } => run_measured(&mode, detection, invocation, |req| {
-            if req.dry_run {
-                return Err(DevError::Usage(
-                    "--dry-run is not yet supported for generic-hotpath".into(),
-                ));
-            }
-            if req.mode.profiled().is_none() {
-                return Err(DevError::Usage(
-                    "generic-hotpath only supports --hotpath or --alloc modes".into(),
-                ));
-            }
-            cmd_hotpath_generic(req)
-        }),
         Command::Passthrough {
             features,
             time,

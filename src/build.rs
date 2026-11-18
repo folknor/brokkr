@@ -278,18 +278,6 @@ impl BuildConfig {
         }
     }
 
-    pub fn release_no_defaults(package: Option<&str>, features: &[&str]) -> Self {
-        Self {
-            package: package.map(std::borrow::ToOwned::to_owned),
-            bin: None,
-            example: None,
-            features: features.iter().map(|s| (*s).to_owned()).collect(),
-            default_features: false,
-            all_features: false,
-            profile: RustProfile::Release,
-        }
-    }
-
     /// Build config for an external harness crate described by a `[*.harness]`
     /// block (`package` + optional `binary`/`features`), under an
     /// already-resolved profile. Shared by every harness build

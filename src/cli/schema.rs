@@ -607,14 +607,6 @@ In depth: `brokkr man clippy`."
     /// Show environment information
     #[command(display_order = 1)]
     Env,
-    // ----- generic commands (display_order = 5) -----
-    /// Generic hotpath for projects without dedicated modules
-    #[command(name = "generic-hotpath", display_order = 5)]
-    GenericHotpath {
-        #[command(flatten)]
-        mode: ModeArgs,
-    },
-
     /// Build and run with passthrough args (deprecated - use `run` subcommands instead)
     #[command(name = "passthrough", display_order = 99, hide = true)]
     Passthrough {

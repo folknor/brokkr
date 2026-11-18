@@ -89,7 +89,6 @@ Crit => ("crit", Visibility::Any, Optional, None, true, crate::measure::MeasureM
 Bench => ("bench", Visibility::Any, Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::SCRIPT_BENCH), &["cargo"], Direct),
 Deps => ("deps", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Env => ("env", Visibility::Any, Required, None, false, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-GenericHotpath => ("generic-hotpath", Visibility::Any, Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
 Passthrough => ("passthrough", Visibility::Any, Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Results => ("results", Visibility::Any, Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Sidecar => ("sidecar", Visibility::Any, Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
@@ -197,7 +196,6 @@ impl CommandSpec {
             WorktreePolicy::None => Ok(false),
             WorktreePolicy::Mode => {
                 let mode = match command {
-                    super::Command::GenericHotpath { mode, .. }
                     | super::Command::Hotpath { mode, .. }
                     | super::Command::Mogwai { mode, .. } => Some(mode),
                     _ => None,
