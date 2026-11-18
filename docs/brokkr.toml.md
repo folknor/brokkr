@@ -235,9 +235,8 @@ valid host shape is necessarily interpreted as a host even if its name
 resembles a misspelled section. Datasets are host-scoped (no global
 `[datasets]` section). Path resolution: host config -> defaults (`data/`,
 `data/scratch/`), from the config alone. `target` is read by
-`brokkr env`'s storage report and by `brokkr clean`, which looks for pbfhogg's
-leftover verify output under it; absent, both use cargo's target dir. Builds always
-use cargo's.
+`brokkr env`'s storage report alone, which falls back to cargo's target dir when
+it is absent. Builds and `brokkr clean` always use cargo's.
 
 **elivagar's host keys.** `output` (elivagar's durable tilegen output store)
 and `[<host>.tilegen.<name>]` blocks are elivagar's own: brokkr reads neither,

@@ -2822,9 +2822,8 @@ pub fn resolve_paths(config: &DevConfig, hostname: &str, project_root: &Path) ->
 }
 
 /// The host section's `target` (relative to `project_root`), else `cargo`,
-/// the target dir cargo metadata reports for the tree acted on. What `brokkr
-/// env` reports and where clean looks for pbfhogg's verify output; builds
-/// themselves use cargo's.
+/// the target dir cargo metadata reports for the tree acted on. Read by
+/// `brokkr env`'s storage report alone; builds and clean use cargo's.
 pub fn host_target_dir(
     config: &DevConfig,
     hostname: &str,

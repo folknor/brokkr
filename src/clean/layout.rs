@@ -307,7 +307,7 @@ impl<'a> PbfhoggLayout<'a> {
     }
 
     /// Where clean looks for the output the retired pbfhogg verify left: under `target_dir`,
-    /// the host section's `target` else cargo's (`config::host_target_dir`).
+    /// cargo's resolved target dir, where it wrote; a host `target` never applied to it.
     pub(crate) fn verify_output(target_dir: &Path) -> PathBuf {
         target_dir.join(crate::target_namespace::VERIFY)
     }

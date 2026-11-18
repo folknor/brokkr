@@ -216,12 +216,6 @@ pub(crate) fn cmd_clean(
     let worktree_root = build_root.as_path();
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root)?;
-    let host_target = crate::config::host_target_dir(
-        dev_config,
-        &paths.hostname,
-        project_root.as_path(),
-        &pi.target_dir,
-    );
     let project_root = project_root.as_path();
     let state = layout::ProjectState::new(project_root);
 
@@ -231,9 +225,12 @@ pub(crate) fn cmd_clean(
     if !dry_run {
         reclaim_launch_leases();
     }
-    // The retired verify harness wrote only under target/verify.
+    // The retired verify harness wrote only under cargo's resolved target dir
+    // (`pi.target_dir`), never under a host `target`, so that is where its
+    // leftovers are swept. A leftover under a cargo target root that has since
+    // moved is not found; the host key is no evidence of where one was.
     if *project == Project::Pbfhogg {
-        let verify_dir = layout::PbfhoggLayout::verify_output(&host_target);
+        let verify_dir = layout::PbfhoggLayout::verify_output(&pi.target_dir);
         if c.guarded_dir(&verify_dir)? {
             output::run_msg(&format!("{} verify output", c.verb()));
         }
@@ -242,8 +239,8 @@ pub(crate) fn cmd_clean(
     // Reclaim the per-sweep isolated target dirs a `rustflags` `[[check]]`
     // entry mints (`<target>/rustflags-<hash>`). Under `pi.target_dir` -
     // cargo's real resolved target dir, where the check/test phase actually
-    // built them - not `paths.target_dir` (which a host `target` override can
-    // repoint). Routine scratch: reproducible, and nothing else reaches them.
+    // built them - not a host `target` (which only `brokkr env` reads).
+    // Routine scratch: reproducible, and nothing else reaches them.
     clean_rustflags_target_dirs(&pi.target_dir, &c)?;
 
     clean_scratch(project, &paths, &c)?;

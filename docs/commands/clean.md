@@ -111,7 +111,9 @@ Nothing sweeps these, and they can accumulate:
 
 Bare `brokkr clean`, in order:
 
-- `<target>/verify` - verify output a pbfhogg verify of an earlier brokkr left.
+- `<target>/verify` - verify output a pbfhogg verify of an earlier brokkr left,
+  under the current cargo-resolved target root, where it wrote. A host
+  `target` plays no part.
 - `<target>/rustflags-*` - the per-sweep isolated target dirs a
   `rustflags`-carrying `[[check]]` entry builds into. Reproducible caches
   nothing else reaches. Taken from cargo's real resolved target dir, not a
