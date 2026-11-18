@@ -31,32 +31,25 @@ pub(crate) const WITH_EXE_ENV: &str = "BROKKR_WITH_EXE";
 
 /// Flags of `brokkr run` that take a separate value argument. Derived from
 /// clap so adding an option cannot silently desynchronise the argv pre-pass.
-/// Build on a larger-stack helper thread: constructing brokkr's full clap
-/// tree overflows the small stacks used by libtest workers.
-fn run_value_flags() -> Option<&'static [String]> {
-    static FLAGS: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
-    FLAGS
-        .get_or_init(|| {
-            let built = std::thread::Builder::new().stack_size(8 << 20).spawn(|| {
-                use clap::CommandFactory;
+fn run_value_flags() -> &'static [String] {
+    static FLAGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    FLAGS.get_or_init(|| {
+        use clap::CommandFactory;
 
-                let mut cli = crate::cli::Cli::command();
-                let Some(run) = cli.find_subcommand_mut("run") else {
-                    return Vec::new();
-                };
-                run.get_arguments()
-                    .filter(|arg| arg.get_action().takes_values())
-                    .flat_map(|arg| {
-                        arg.get_long()
-                            .map(|name| format!("--{name}"))
-                            .into_iter()
-                            .chain(arg.get_short().map(|name| format!("-{name}")))
-                    })
-                    .collect()
-            });
-            built.ok().and_then(|thread| thread.join().ok())
-        })
-        .as_deref()
+        let mut cli = crate::cli::Cli::command();
+        let Some(run) = cli.find_subcommand_mut("run") else {
+            return Vec::new();
+        };
+        run.get_arguments()
+            .filter(|arg| arg.get_action().takes_values())
+            .flat_map(|arg| {
+                arg.get_long()
+                    .map(|name| format!("--{name}"))
+                    .into_iter()
+                    .chain(arg.get_short().map(|name| format!("-{name}")))
+            })
+            .collect()
+    })
 }
 
 /// Rewrite `run [flags] -- ARGS...` so the `--` no longer lands in the
@@ -74,12 +67,7 @@ pub fn bare_run_sentinel(args: Vec<String>) -> Vec<String> {
     if args.get(run_at).is_none_or(|a| a != "run") {
         return args;
     }
-    let Some(value_flags) = run_value_flags() else {
-        // If the helper thread cannot be created, leave argv untouched so
-        // clap reports the invocation instead of using a stale hand-maintained
-        // list of value-taking options.
-        return args;
-    };
+    let value_flags = run_value_flags();
     let mut i = run_at + 1;
     while args.get(i).is_some_and(|a| a.starts_with('-') && a != "--") {
         // `--features=a` carries its value inline; `--features a` does not.

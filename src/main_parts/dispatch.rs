@@ -97,7 +97,7 @@ pub(super) fn run(
         .and_then(lockfile::LockGuard::take_maintenance)
     {
         let mode = match &cli.command {
-            Command::Clean { dry_run: true, .. } => crate::maintenance::Mode::Report,
+            Command::Clean(cli::CleanCmd { dry_run: true, .. }) => crate::maintenance::Mode::Report,
             _ => crate::maintenance::Mode::Apply,
         };
         crate::maintenance::run(phase, mode, state_root.map(project::ProjectRoot::as_path));
@@ -128,24 +128,26 @@ pub(super) fn run(
         _ => None,
     };
     match &cli.command {
-        Command::Fmt { args } => run_fmt(args, detection),
-        Command::Man {
+        Command::Fmt(cli::FmtCmd { args }) => run_fmt(args, detection),
+        Command::Man(cli::ManCmd {
             topic,
             sections,
             full,
-        } => run_man(topic.as_deref(), sections, *full, detection),
+        }) => run_man(topic.as_deref(), sections, *full, detection),
         Command::Lock => cmd_lock(),
-        Command::Kill {
+        Command::Kill(cli::KillCmd {
             hard,
             project: named,
             all,
-        } => cmd_kill(
+        }) => cmd_kill(
             &crate::lock_cmd::KillScope::resolve(named.as_deref(), *all, detection)?,
             *hard,
         ),
-        Command::Strays { kill } => crate::stray::cmd_strays(*kill),
-        Command::Guard { install, remove } => crate::guard::cmd_guard(*install, *remove),
-        Command::History {
+        Command::Strays(cli::StraysCmd { kill }) => crate::stray::cmd_strays(*kill),
+        Command::Guard(cli::GuardCmd { install, remove }) => {
+            crate::guard::cmd_guard(*install, *remove)
+        }
+        Command::History(cli::HistoryCmd {
             id,
             command,
             project,
@@ -156,7 +158,7 @@ pub(super) fn run(
             slow,
             limit,
             all,
-        } => history_cmd::cmd_history(history_cmd::HistoryQuery {
+        }) => history_cmd::cmd_history(history_cmd::HistoryQuery {
             id: *id,
             command: command.clone(),
             project: project.clone(),
@@ -169,11 +171,11 @@ pub(super) fn run(
             all: *all,
         }),
 
-        Command::Run {
+        Command::Run(cli::RunCmd {
             name,
             program,
             args,
-        } => run_program(
+        }) => run_program(
             name.as_deref(),
             profile_choice(program.debug, program.release, program.profile.as_ref()),
             &program_features(program),
@@ -182,7 +184,7 @@ pub(super) fn run(
             args,
             detection,
         ),
-        Command::Serve {
+        Command::Serve(cli::ServeCmd {
             target,
             program,
             name,
@@ -191,7 +193,7 @@ pub(super) fn run(
             grace,
             stop,
             args,
-        } => {
+        }) => {
             if let Some(which) = stop {
                 if !program.is_empty() {
                     return Err(DevError::Usage(
@@ -230,7 +232,7 @@ pub(super) fn run(
                 detection,
             })
         }
-        Command::Build {
+        Command::Build(cli::BuildCmd {
             name,
             debug,
             release,
@@ -239,7 +241,7 @@ pub(super) fn run(
             all_features,
             no_default_features,
             commit,
-        } => {
+        }) => {
             let feat = runnables::FeatureArgs {
                 features,
                 all: *all_features,
@@ -253,18 +255,18 @@ pub(super) fn run(
                 detection,
             )
         }
-        Command::Install {
+        Command::Install(cli::InstallCmd {
             debug,
             release,
             profile,
             unlocked,
-        } => run_install(
+        }) => run_install(
             profile_choice(*debug, *release, profile.as_ref()),
             *unlocked,
             detection,
         ),
-        Command::Wc { threshold } => run_wc(*threshold, detection),
-        Command::Crit {
+        Command::Wc(cli::WcCmd { threshold }) => run_wc(*threshold, detection),
+        Command::Crit(cli::CritCmd {
             target,
             commit,
             compare,
@@ -272,7 +274,7 @@ pub(super) fn run(
             name,
             lenient,
             args,
-        } => crit_cmd::run(
+        }) => crit_cmd::run(
             &crit_cmd::CritArgs {
                 target: target.clone(),
                 commit: commit.clone(),
@@ -287,7 +289,7 @@ pub(super) fn run(
             },
             detection,
         ),
-        Command::Bench {
+        Command::Bench(cli::BenchCmd {
             commit,
             iterations,
             hotpath,
@@ -295,7 +297,7 @@ pub(super) fn run(
             dry_run,
             test,
             bench,
-        } => crate::bench::runner::run(
+        }) => crate::bench::runner::run(
             &crate::bench::runner::BenchArgs {
                 name: bench.first().cloned(),
                 commit: commit.clone(),
@@ -309,12 +311,12 @@ pub(super) fn run(
             require_detection(detection)?,
             invocation,
         ),
-        Command::Deps {
+        Command::Deps(cli::DepsCmd {
             json,
             no_fail,
             focus,
-        } => run_deps(*json, *no_fail, focus.clone(), detection),
-        Command::Check {
+        }) => run_deps(*json, *no_fail, focus.clone(), detection),
+        Command::Check(cli::CheckCmd {
             features,
             no_default_features,
             package,
@@ -329,7 +331,7 @@ pub(super) fn run(
             script_names,
             audit,
             args,
-        } => run_check(
+        }) => run_check(
             features,
             no_default_features,
             package,
@@ -346,7 +348,7 @@ pub(super) fn run(
             args,
             detection,
         ),
-        Command::Clippy {
+        Command::Clippy(cli::ClippyCmd {
             package,
             all_features,
             features,
@@ -354,7 +356,7 @@ pub(super) fn run(
             sweep,
             env,
             lib,
-        } => run_clippy(
+        }) => run_clippy(
             package,
             all_features,
             features,
@@ -413,22 +415,22 @@ fn run_project(
 
     match command {
         Command::Lock
-        | Command::Kill { .. }
-        | Command::Strays { .. }
-        | Command::Guard { .. }
-        | Command::History { .. }
-        | Command::Check { .. }
-        | Command::Clippy { .. }
-        | Command::Fmt { .. }
-        | Command::Crit { .. }
-        | Command::Bench { .. }
-        | Command::Run { .. }
-        | Command::Serve { .. }
-        | Command::Build { .. }
-        | Command::Install { .. }
-        | Command::Wc { .. }
-        | Command::Man { .. }
-        | Command::Deps { .. } => {
+        | Command::Kill(_)
+        | Command::Strays(_)
+        | Command::Guard(_)
+        | Command::History(_)
+        | Command::Check(_)
+        | Command::Clippy(_)
+        | Command::Fmt(_)
+        | Command::Crit(_)
+        | Command::Bench(_)
+        | Command::Run(_)
+        | Command::Serve(_)
+        | Command::Build(_)
+        | Command::Install(_)
+        | Command::Wc(_)
+        | Command::Man(_)
+        | Command::Deps(_) => {
             unreachable!("top-level command dispatch must not re-enter through run_project")
         }
         Command::Env => cmd_env(
@@ -442,20 +444,20 @@ fn run_project(
         // brokkr does not know what a mogwai surface reads. An input the argv
         // names is captured verbatim with it; one the surface defaults
         // internally is named nowhere in the row.
-        Command::Mogwai { mode, target, args } => {
+        Command::Mogwai(cli::MogwaiCmd { mode, target, args }) => {
             run_measured(&mode, detection, invocation, |req| {
                 mogwai::cmd::run(req, target.as_deref(), &args)
             })
         }
 
-        Command::Passthrough {
+        Command::Passthrough(cli::PassthroughCmd {
             features,
             time,
             json,
             runs,
             no_build,
             args,
-        } => {
+        }) => {
             let _lock = context::reenter_command_lock()?;
             let features = resolve_features(dev_config, &features);
             let opts = RunOptions {
@@ -475,7 +477,7 @@ fn run_project(
                 Some(&_lock),
             )
         }
-        Command::Results {
+        Command::Results(cli::ResultsCmd {
             query,
             commit,
             compare,
@@ -496,7 +498,7 @@ fn run_project(
             revalidate,
             rename,
             reason,
-        } => {
+        }) => {
             use crate::bench::marking::MarkAction;
             // clap requires --reason with --retire and --invalidate, and
             // allows one mark flag at most.
@@ -572,7 +574,7 @@ fn run_project(
             };
             results_cmd::cmd_results(dev_config, project_root, &rq)
         }
-        Command::CorpusResults {
+        Command::CorpusResults(cli::CorpusResultsCmd {
             run_id,
             run,
             limit,
@@ -588,7 +590,7 @@ fn run_project(
             sql,
             full,
             compare,
-        } => {
+        }) => {
             let cq = CorpusQuery {
                 run_id,
                 run,
@@ -610,7 +612,7 @@ fn run_project(
             };
             piners::corpus_query::cmd(project_root, &cq)
         }
-        Command::Sidecar {
+        Command::Sidecar(cli::SidecarCmd {
             query,
             samples,
             markers,
@@ -631,7 +633,7 @@ fn run_project(
             every,
             head,
             tail,
-        } => {
+        }) => {
             let view = if let Some(values) = compare {
                 crate::request::SidecarView::Compare {
                     uuids: crate::request::compare_pair(values, "--compare")?,
@@ -674,21 +676,21 @@ fn run_project(
             };
             sidecar_cmd::cmd_sidecar(dev_config, project_root, project.name(), &sq)
         }
-        Command::Invalidate {
+        Command::Invalidate(cli::InvalidateCmd {
             uuid,
             commit,
             force,
-        } => {
+        }) => {
             invalidate_cmd::cmd_invalidate(project_root, uuid.as_deref(), commit.as_deref(), force)
         }
-        Command::Clean {
+        Command::Clean(cli::CleanCmd {
             worktrees,
             cargo,
             archives,
             keep,
             all,
             dry_run,
-        } => {
+        }) => {
             if archives || keep.is_some() {
                 return Err(DevError::Usage(
                     "brokkr clean --archives and --keep are retired: elivagar-devkit's \
@@ -725,7 +727,7 @@ fn run_project(
             )
         }
         // ----- visual testing commands (litehtml + sluggrs) -----
-        Command::Visual { args, litehtml } => {
+        Command::Visual(cli::VisualCmd { args, litehtml }) => {
             // `visual` builds the renderer with cargo, so it takes the global
             // lock like every other build path: the lock is what serialises it
             // against a concurrent measured run (whose timings it would
@@ -756,7 +758,7 @@ fn run_project(
             }
         }
         // ----- cargo single-test runner -----
-        Command::Test {
+        Command::Test(cli::TestCmd {
             name,
             package,
             repeat,
@@ -766,7 +768,7 @@ fn run_project(
             timeout,
             sweep,
             timings,
-        } => {
+        }) => {
             // The lock lives in the config dir (.brokkr); cargo runs
             // against the code tree (build_root), which differs under
             // the one-level-up layout.
@@ -799,7 +801,7 @@ fn run_project(
             ProjectConfig::Sluggrs(cfg) => sluggrs::cmd::list(project_root, cfg),
             _ => unreachable!("command specification admits list only for litehtml/sluggrs"),
         },
-        Command::Approve { fixture, all } => cmd_approve(
+        Command::Approve(cli::ApproveCmd { fixture, all }) => cmd_approve(
             project_config,
             project_root,
             build_root,
@@ -807,7 +809,7 @@ fn run_project(
             fixture,
             all,
         ),
-        Command::Report { run_id } => match project {
+        Command::Report(cli::ReportCmd { run_id }) => match project {
             Project::Litehtml => litehtml::cmd::report(project_root, &run_id),
             Project::Sluggrs => sluggrs::cmd::report(project_root, &run_id),
             _ => unreachable!("command specification admits report only for litehtml/sluggrs"),
@@ -820,20 +822,20 @@ fn run_project(
             }
         },
         // ----- litehtml-only commands -----
-        Command::Prepare { input, output } => {
+        Command::Prepare(cli::PrepareCmd { input, output }) => {
             let ProjectConfig::Litehtml(cfg) = project_config else {
                 unreachable!("command specification admits prepare only for litehtml")
             };
             let _interrupts = crate::shutdown::SigtermGuard::install();
             litehtml::cmd::prepare(project_root, cfg, &input, &output)
         }
-        Command::HtmlExtract {
+        Command::HtmlExtract(cli::HtmlExtractCmd {
             input,
             selector,
             from,
             to,
             output,
-        } => litehtml::cmd::extract(
+        }) => litehtml::cmd::extract(
             project_root,
             &input,
             selector.as_deref(),
@@ -841,18 +843,20 @@ fn run_project(
             to.as_deref(),
             &output,
         ),
-        Command::Outline {
+        Command::Outline(cli::OutlineCmd {
             input,
             depth,
             full,
             selectors,
-        } => litehtml::cmd::outline(project_root, &input, depth, full, selectors),
+        }) => litehtml::cmd::outline(project_root, &input, depth, full, selectors),
         // ----- sluggrs-only commands -----
-        Command::Hotpath { mode, target } => run_measured(&mode, detection, invocation, |req| {
-            sluggrs::hotpath::cmd(req, &target)
-        }),
+        Command::Hotpath(cli::HotpathCmd { mode, target }) => {
+            run_measured(&mode, detection, invocation, |req| {
+                sluggrs::hotpath::cmd(req, &target)
+            })
+        }
         // ----- ratatoskr-only commands -----
-        Command::Service {
+        Command::Service(cli::ServiceCmd {
             script,
             all,
             filter,
@@ -863,7 +867,7 @@ fn run_project(
             profile,
             repeat,
             keep_going,
-        } => {
+        }) => {
             let choice = profile_choice(debug, release, profile.as_ref());
             // Same bare-is-an-index shape as `sync`: bare lists, SCRIPT
             // runs one (a directory runs that cohort), --all runs the
@@ -897,7 +901,7 @@ fn run_project(
                 ratatoskr::cmd::service_list(project_root)
             }
         }
-        Command::Sync {
+        Command::Sync(cli::SyncCmd {
             script,
             all,
             filter,
@@ -911,7 +915,7 @@ fn run_project(
             gate,
             as_baseline,
             commit,
-        } => run_sync(
+        }) => run_sync(
             &script,
             &all,
             &filter,
@@ -926,7 +930,7 @@ fn run_project(
             detection,
             invocation,
         ),
-        Command::MockServe { fixture } => {
+        Command::MockServe(cli::MockServeCmd { fixture }) => {
             let cfg = project_config.ratatoskr()?;
             ratatoskr::saehrimnir::run_mock_serve(&ratatoskr::saehrimnir::MockServeRequest {
                 project_root,
@@ -935,7 +939,7 @@ fn run_project(
             })
         }
         // ----- piners-only commands -----
-        Command::Corpus {
+        Command::Corpus(cli::CorpusCmd {
             keyword,
             probe,
             all,
@@ -951,7 +955,7 @@ fn run_project(
             keep_artefacts,
             harness_args,
             commit,
-        } => {
+        }) => {
             let args = piners::cmd::CorpusArgs {
                 keywords: keyword,
                 probe,

@@ -21,15 +21,8 @@ mod visibility_tests {
         CommandId::from_name(name).is_some_and(|id| visible_to(&id.spec().applies, project))
     }
 
-    /// `Cli::command()` on a thread with the main thread's stack: building the
-    /// whole unoptimized `Command` tree overflows a libtest thread's 2 MiB.
     fn command() -> clap::Command {
-        std::thread::Builder::new()
-            .stack_size(8 << 20)
-            .spawn(Cli::command)
-            .unwrap()
-            .join()
-            .unwrap()
+        Cli::command()
     }
 
     /// Every top-level subcommand must appear in the visibility table.

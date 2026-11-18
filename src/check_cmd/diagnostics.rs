@@ -1121,9 +1121,10 @@ fn has_unlisted_stderr_error(r: &SweepResult, keep: &dyn Fn(&Diagnostic) -> bool
 ///   record per unit, some tens of KB long; measured on a slint workspace
 ///   whose fontconfig build script failed: 1118 JSON lines, about 850 KB,
 ///   beside around 130 lines of cargo's own words). The exception is an
-///   error-level `compiler-message` the phase's `keep` rejected, kept as its
-///   `rendered` text: an allow filtered it from the list, and it is still a
-///   reason cargo failed. Any non-JSON line stays.
+///   error-level `compiler-message` the phase's `keep` rejected, formatted
+///   from its diagnostic: an allow filtered it from the list, and it is
+///   still a reason cargo failed. Undecodable cargo lines are already in the
+///   diagnostic list. Other non-JSON lines stay.
 /// - stderr, when it holds an `error` block, prints its error blocks and
 ///   withholds the rest, with a trailer counting the warnings withheld -
 ///   `append_rustc_errors`'s rule, for the same reason: the same run printed a
@@ -1245,20 +1246,21 @@ fn is_self_contained(text: &str, has_header: bool) -> bool {
 /// What one line of a failed run's stdout contributes to its report
 /// ([`failed_run_streams`]): a non-JSON line itself, an error-level
 /// `compiler-message` that `keep` rejected as a typed diagnostic, any other
-/// cargo record nothing.
+/// cargo record nothing. A cargo JSON decode error, including its raw line,
+/// is already in the diagnostic list.
 /// Parsed rather than prefix-matched, so a tool line that merely starts with
 /// `{` survives.
 fn failed_stdout_line(line: &str, keep: &dyn Fn(&Diagnostic) -> bool) -> Option<String> {
     use serde_json::Value;
-    let record = line
-        .starts_with('{')
-        .then(|| serde_json::from_str::<Value>(line).ok())
-        .flatten()
-        .filter(|v| v.get("reason").is_some_and(Value::is_string));
-    let Some(record) = record else {
+    let record = match cargo_json::parse_cargo_json_line(line, 1) {
+        Ok(Some(record)) => record,
+        Ok(None) => return Some(line.to_owned()),
+        Err(_) => return None,
+    };
+    let Some(reason) = record.get("reason").and_then(Value::as_str) else {
         return Some(line.to_owned());
     };
-    if record.get("reason").and_then(Value::as_str) != Some("compiler-message") {
+    if reason != "compiler-message" {
         return None;
     }
     // The list's own reading of the record: an event it keeps is already

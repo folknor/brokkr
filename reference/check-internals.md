@@ -834,7 +834,9 @@ summaries of a failure reported elsewhere (`could not compile ...`,
 - stdout loses cargo's JSON records (a workspace emits one `compiler-artifact`
   record per unit, the bulk of the stream), except an error-level
   `compiler-message` the allow lists removed from the list, which keeps its
-  rendered text - it is still a reason cargo failed.
+  formatted diagnostic - it is still a reason cargo failed. A Cargo line the
+  JSON decoder rejects is already carried verbatim by its parser error in the
+  list, including when a macro backtrace exceeds serde_json's nesting limit.
 - stderr, when it holds an `error` block, prints every error block the list
   does not already carry, and a trailer counting the warnings withheld
   (`script_check`'s `rustc` rule). A failed build script's `--- stdout`

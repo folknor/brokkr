@@ -604,6 +604,27 @@ error: could not compile `core` (lib) due to 1 previous error
     }
 
     #[test]
+    fn a_deep_macro_diagnostic_survives_the_cargo_json_limit() {
+        let backtrace = format!("{}null{}", r#"{"expansion": "#.repeat(160), "}".repeat(160));
+        let deep = format!(
+            r#"{{"reason":"compiler-message","message":{{"level":"error","message":"recursion limit reached while expanding json_internal","spans":[{backtrace}]}}}}"#
+        );
+        let next = r#"{"reason":"compiler-message","message":{"level":"error","message":"another compiler error"}}"#;
+        let mut r = run("default", None);
+        r.success = false;
+        r.stdout = format!("{deep}\n{next}\n");
+        r.diagnostics = cargo_json::parse_cargo_diagnostics(&r.stdout);
+        r.stderr = "error: failed to run custom build command for `x-sys v1.0.0`\n".to_owned();
+
+        let root = crate::test_scratch::scratch("check-output", "deep_macro_diagnostic");
+        let out = format_clippy_multi("cargo clippy", &[r], None, &root, 1, &|_| true);
+        assert!(out.contains("malformed cargo JSON on stdout line 1: recursion limit exceeded"));
+        assert_eq!(out.lines().filter(|line| *line == deep).count(), 1);
+        assert!(out.contains("error another compiler error"));
+        assert!(out.contains("failed to run custom build command for `x-sys"));
+    }
+
+    #[test]
     fn cargo_status_lines_are_not_warnings() {
         for status in [
             "warning: `a` (lib) generated 3 warnings",

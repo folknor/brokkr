@@ -154,7 +154,7 @@ fn parse_cli(project: Option<&Project>) -> (Cli, cli::CommandId, crate::db::RunI
         Err(e) => e.exit(),
     };
     if matches!(project, Some(Project::Sluggrs))
-        && let Command::Visual { litehtml, .. } = &cli.command
+        && let Command::Visual(cli::VisualCmd { litehtml, .. }) = &cli.command
         && (litehtml.suite.is_some() || litehtml.recapture)
     {
         let flag = if litehtml.suite.is_some() {
@@ -230,7 +230,7 @@ pub(crate) fn main() {
     shutdown::isolate_process_group();
 
     // Don't record `history` itself (avoids recursive noise).
-    let is_history = matches!(cli.command, Command::History { .. });
+    let is_history = matches!(cli.command, Command::History(_));
 
     // Handlers return errors rather than exiting: all command-owned guards
     // (lock, disabled toolchain, scratch and streams) drop before we record

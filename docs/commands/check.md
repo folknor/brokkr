@@ -224,6 +224,9 @@ Output:
 - Each diagnostic becomes one line, compilation noise stripped, passing
   tests aggregated. There is no unfiltered mode: rustc's rendered form -
   source excerpt, carets, `help:` spans - is not used by those renderers.
+  A Cargo record brokkr cannot decode is reported with its original JSON
+  line, so the compiler's message is visible even for a deeply nested macro
+  backtrace.
   A failed nextest pre-build prints the rendered compiler errors (including
   their notes and help) instead; warning-level compiler messages from that
   failed build are omitted.

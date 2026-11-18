@@ -176,14 +176,16 @@ impl CommandSpec {
         benches: Option<&std::collections::BTreeMap<String, crate::config::bench::Bench>>,
     ) -> bool {
         match command {
-            super::Command::Bench { dry_run: true, .. }
-            | super::Command::Bench { test: true, .. } => true,
-            super::Command::Bench { bench, .. } => {
+            super::Command::Bench(super::BenchCmd { dry_run: true, .. })
+            | super::Command::Bench(super::BenchCmd { test: true, .. }) => true,
+            super::Command::Bench(super::BenchCmd { bench, .. }) => {
                 benches.is_none_or(|benches| !crate::bench::runner::runs(benches, bench))
             }
             // Listing and stopping serves: the registry's own flocks govern
             // them, never the global lock (`crate::serve`).
-            super::Command::Serve { target, stop, .. } => target.is_none() || stop.is_some(),
+            super::Command::Serve(super::ServeCmd { target, stop, .. }) => {
+                target.is_none() || stop.is_some()
+            }
             _ => false,
         }
     }
@@ -196,8 +198,8 @@ impl CommandSpec {
             WorktreePolicy::None => Ok(false),
             WorktreePolicy::Mode => {
                 let mode = match command {
-                    | super::Command::Hotpath { mode, .. }
-                    | super::Command::Mogwai { mode, .. } => Some(mode),
+                    super::Command::Hotpath(super::HotpathCmd { mode, .. })
+                    | super::Command::Mogwai(super::MogwaiCmd { mode, .. }) => Some(mode),
                     _ => None,
                 };
                 mode.map(|mode| mode.commit.is_some()).ok_or_else(|| {
@@ -210,15 +212,16 @@ impl CommandSpec {
                 // Historical only when no stage builds the live tree: a
                 // `--with` target built from the live tree needs the live
                 // tree's policy even when the program itself is `--commit`.
-                super::Command::Run { program, .. } | super::Command::Serve { program, .. } => {
+                super::Command::Run(super::RunCmd { program, .. })
+                | super::Command::Serve(super::ServeCmd { program, .. }) => {
                     Ok(program.commit.is_some()
                         && (program.with.is_none() || program.with_commit.is_some()))
                 }
-                super::Command::Build { commit, .. }
-                | super::Command::Crit { commit, .. }
-                | super::Command::Bench { commit, .. }
-                | super::Command::Sync { commit, .. }
-                | super::Command::Corpus { commit, .. } => Ok(commit.is_some()),
+                super::Command::Build(super::BuildCmd { commit, .. })
+                | super::Command::Crit(super::CritCmd { commit, .. })
+                | super::Command::Bench(super::BenchCmd { commit, .. })
+                | super::Command::Sync(super::SyncCmd { commit, .. })
+                | super::Command::Corpus(super::CorpusCmd { commit, .. }) => Ok(commit.is_some()),
                 _ => Err(crate::error::DevError::Internal(
                     "command has direct worktree policy but carries no direct commit field".into(),
                 )),

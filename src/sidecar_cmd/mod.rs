@@ -34,37 +34,30 @@ use source::Source;
 pub(crate) fn view_selector_hint() -> &'static str {
     static HINT: OnceLock<String> = OnceLock::new();
     HINT.get_or_init(|| {
-        std::thread::Builder::new()
-            .stack_size(8 << 20)
-            .spawn(|| {
-                use clap::CommandFactory;
+        use clap::CommandFactory;
 
-                let mut cli = crate::cli::Cli::command();
-                let Some(command) = cli.find_subcommand_mut("sidecar") else {
-                    return "see `brokkr sidecar --help` for available views".to_owned();
-                };
-                let selectors = command
-                    .get_arguments()
-                    .filter(|arg| arg.get_long().is_some())
-                    .filter(|arg| {
-                        command
-                            .get_arg_conflicts_with(arg)
-                            .iter()
-                            .filter(|other| other.get_long().is_some())
-                            .count()
-                            >= 3
-                    })
-                    .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
-                    .collect::<Vec<_>>();
-                if selectors.is_empty() {
-                    "see `brokkr sidecar --help` for available views".to_owned()
-                } else {
-                    format!("views: {}", selectors.join(", "))
-                }
+        let mut cli = crate::cli::Cli::command();
+        let Some(command) = cli.find_subcommand_mut("sidecar") else {
+            return "see `brokkr sidecar --help` for available views".to_owned();
+        };
+        let selectors = command
+            .get_arguments()
+            .filter(|arg| arg.get_long().is_some())
+            .filter(|arg| {
+                command
+                    .get_arg_conflicts_with(arg)
+                    .iter()
+                    .filter(|other| other.get_long().is_some())
+                    .count()
+                    >= 3
             })
-            .ok()
-            .and_then(|worker| worker.join().ok())
-            .unwrap_or_else(|| "see `brokkr sidecar --help` for available views".to_owned())
+            .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+            .collect::<Vec<_>>();
+        if selectors.is_empty() {
+            "see `brokkr sidecar --help` for available views".to_owned()
+        } else {
+            format!("views: {}", selectors.join(", "))
+        }
     })
 }
 

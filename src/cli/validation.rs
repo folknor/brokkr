@@ -143,18 +143,8 @@ mod tests {
     use crate::cli::{Cli, Command};
     use clap::Parser;
 
-    /// `Cli::try_parse_from` on a thread with the main thread's stack. An
-    /// unoptimized parse of the whole `Command` tree needs more than the 2 MiB
-    /// a libtest thread gets, and overflows it - which aborts the harness
-    /// rather than failing the one test.
     fn parse(argv: impl IntoIterator<Item = &'static str>) -> Result<Cli, clap::Error> {
-        let argv: Vec<&'static str> = argv.into_iter().collect();
-        std::thread::Builder::new()
-            .stack_size(8 << 20)
-            .spawn(move || Cli::try_parse_from(argv))
-            .expect("spawn parser thread")
-            .join()
-            .expect("parser thread")
+        Cli::try_parse_from(argv)
     }
 
     /// `brokkr bench --dry-run` reads only, so it takes no lock and writes no
@@ -178,7 +168,10 @@ mod tests {
             CommandSpec::reads_only(&parse(argv).unwrap().command, benches)
         };
         let dry = parse(["brokkr", "bench", "--dry-run", "cat", "--row", "x"]).unwrap();
-        assert!(matches!(dry.command, Command::Bench { dry_run: true, .. }));
+        assert!(matches!(
+            dry.command,
+            Command::Bench(crate::cli::BenchCmd { dry_run: true, .. })
+        ));
         assert!(CommandSpec::reads_only(&dry.command, benches));
         assert!(bench.lock_for(true) == LockPolicy::None);
         assert_eq!(bench.run_log_for(true), None);
@@ -203,7 +196,10 @@ mod tests {
             vec!["brokkr", "bench", "cat", "--n", "--help"],
         ] {
             let run = parse(argv.clone()).unwrap();
-            assert!(matches!(run.command, Command::Bench { dry_run: false, .. }));
+            assert!(matches!(
+                run.command,
+                Command::Bench(crate::cli::BenchCmd { dry_run: false, .. })
+            ));
             assert!(
                 !CommandSpec::reads_only(&run.command, benches),
                 "{argv:?} runs"
@@ -216,12 +212,12 @@ mod tests {
     #[test]
     fn bench_options_stop_at_the_bench_name() {
         let bench = |cli: Cli| match cli.command {
-            Command::Bench {
+            Command::Bench(crate::cli::BenchCmd {
                 commit,
                 iterations,
                 bench,
                 ..
-            } => (commit, iterations.map(std::num::NonZeroU32::get), bench),
+            }) => (commit, iterations.map(std::num::NonZeroU32::get), bench),
             _ => panic!("unexpected command"),
         };
         let (commit, iterations, rest) = bench(
@@ -248,17 +244,10 @@ mod tests {
 
     /// The positional tail the arm key keeps verbatim, from a real parse.
     fn tail(argv: &'static [&'static str]) -> usize {
-        std::thread::Builder::new()
-            .stack_size(8 << 20)
-            .spawn(move || {
-                let mut cmd = <Cli as clap::CommandFactory>::command();
-                let matches = cmd.try_get_matches_from_mut(argv).expect("parse");
-                let argv: Vec<String> = argv.iter().map(|&a| a.to_owned()).collect();
-                crate::run_invocation::positional_tail(&cmd, &matches, &argv).expect("tail")
-            })
-            .expect("spawn parser thread")
-            .join()
-            .expect("parser thread")
+        let mut cmd = <Cli as clap::CommandFactory>::command();
+        let matches = cmd.try_get_matches_from_mut(argv).expect("parse");
+        let argv: Vec<String> = argv.iter().map(|&a| a.to_owned()).collect();
+        crate::run_invocation::positional_tail(&cmd, &matches, &argv).expect("tail")
     }
 
     /// Every trailing positional's values are the argv's suffix, `--`
@@ -370,7 +359,7 @@ mod tests {
     fn test_requires_a_name() {
         assert!(parse(["brokkr", "test"]).is_err());
         let plain = parse(["brokkr", "test", "some_test", "-p", "pkg", "-N", "3"]).expect("parse");
-        let Command::Test { name, repeat, .. } = plain.command else {
+        let Command::Test(crate::cli::TestCmd { name, repeat, .. }) = plain.command else {
             panic!("expected Test")
         };
         assert_eq!(name, "some_test");
@@ -432,7 +421,7 @@ mod tests {
     #[test]
     fn check_accepts_profile_flag() {
         let parsed = parse(["brokkr", "check", "--profile", "tier1"]).expect("parse");
-        let Command::Check { profile, .. } = parsed.command else {
+        let Command::Check(crate::cli::CheckCmd { profile, .. }) = parsed.command else {
             panic!("expected Check");
         };
         assert_eq!(profile.as_deref(), Some("tier1"));
@@ -571,12 +560,12 @@ mod tests {
             "--all-features",
         ])
         .expect("parse");
-        let Command::Clippy {
+        let Command::Clippy(crate::cli::ClippyCmd {
             package,
             all_features,
             env,
             ..
-        } = parsed.command
+        }) = parsed.command
         else {
             panic!("expected clippy command");
         };
