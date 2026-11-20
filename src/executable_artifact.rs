@@ -79,15 +79,11 @@ pub(crate) fn find(
         let mut names: Vec<&str> = bins.iter().map(|r| r.artifact.target.as_str()).collect();
         names.sort_unstable();
         names.dedup();
-        // The package's sole bin, else the one named like the package
-        // (cargo's `-p` alone builds them all).
-        let chosen = match names.as_slice() {
-            [one] => Some(*one),
-            _ => names
-                .iter()
-                .copied()
-                .find(|n| Some(*n) == spec.name.as_deref()),
-        };
+        // Cargo's `-p` alone builds every bin of the package.
+        let chosen = spec
+            .name
+            .as_deref()
+            .map_or_else(|| sole(&names), |pkg| package_bin(&names, pkg));
         match chosen {
             Some(name) => (
                 bins.into_iter()
@@ -129,6 +125,22 @@ pub(crate) fn find(
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
+    }
+}
+
+/// Which bin a selection naming only `package` means, given the package's
+/// distinct bin names: its sole bin, else the one named like the package,
+/// else none - an undecided choice the caller refuses, never settles by
+/// order. Shared by this lookup and `build::resolve_existing_binary`, which
+/// applies it to cargo metadata's declared bins instead of built records.
+pub(crate) fn package_bin<'a>(names: &[&'a str], package: &str) -> Option<&'a str> {
+    sole(names).or_else(|| names.iter().copied().find(|n| *n == package))
+}
+
+fn sole<'a>(names: &[&'a str]) -> Option<&'a str> {
+    match names {
+        [one] => Some(*one),
+        _ => None,
     }
 }
 

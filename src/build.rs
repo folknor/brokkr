@@ -826,8 +826,14 @@ fn is_warning_summary(line: &str) -> bool {
 /// names a JSON target's directory after the canonicalized file's stem, so a
 /// reimplementation names a file cargo did not write. Omitting `--no-build`
 /// takes the path from cargo's own report.
+///
+/// Which bin is chosen from declared identity before the file is looked at,
+/// so a leftover file never settles a choice (see [`resolve_bin_name`]). The
+/// path is cargo's layout, not provenance: another package declaring a bin
+/// of the same name, or a shared target dir, can have written the file.
 pub fn resolve_existing_binary(
-    config: &BuildConfig,
+    package: Option<&str>,
+    profile: &RustProfile,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
     let target_override = cargo_target_dir_override(project_root);
@@ -851,13 +857,13 @@ pub fn resolve_existing_binary(
         )));
     }
     let metadata = metadata::load(project_root, Query::workspace(), &env, None)?;
-    let bin_name = resolve_bin_name(&metadata, config)?;
+    let bin_name = resolve_bin_name(&metadata, package)?;
 
     let mut path = PathBuf::from(&metadata.target_directory);
-    path.push(config.profile.target_dir());
+    path.push(profile.target_dir());
     path.push(bin_name);
 
-    if !path.exists() {
+    if !path.is_file() {
         return Err(DevError::Build(format!(
             "binary not found at {} (build first or omit --no-build)",
             crate::output::path(&path)
@@ -911,47 +917,90 @@ fn build_args(config: &BuildConfig) -> Result<Vec<String>, DevError> {
     Ok(args)
 }
 
-fn resolve_bin_name(metadata: &CargoMetadata, config: &BuildConfig) -> Result<String, DevError> {
-    if let Some(ref bin) = config.bin {
-        return Ok(bin.clone());
-    }
-
-    let package = if let Some(ref name) = config.package {
-        metadata
-            .packages
+/// The bin `--no-build` means, by the selection the build would make: with
+/// `package`, that workspace package's sole bin, else the one named like it
+/// ([`crate::executable_artifact::package_bin`]); with none, the one bin
+/// among the workspace default members a bare `cargo build` selects. An
+/// undecided choice is refused, never settled by metadata order. Choices are
+/// over declared bins: a bin whose `required-features` the build would skip
+/// still counts (the lookup gap [`resolve_existing_binary`] names).
+fn resolve_bin_name(metadata: &CargoMetadata, package: Option<&str>) -> Result<String, DevError> {
+    let bin_names = |pkg: &crate::cargo::metadata::CargoPackage| -> Vec<String> {
+        let mut names: Vec<String> = pkg
+            .targets
             .iter()
-            .find(|pkg| pkg.name == *name)
-            .ok_or_else(|| DevError::Build(format!("package '{name}' not found in metadata")))?
-    } else {
-        metadata
-            .packages
-            .first()
-            .ok_or_else(|| DevError::Build("cargo metadata has no packages".into()))?
+            .filter(|target| target.kind.iter().any(|kind| kind == "bin"))
+            .map(|target| target.name.clone())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
     };
 
-    let bins: Vec<_> = package
-        .targets
-        .iter()
-        .filter(|target| target.kind.iter().any(|kind| kind == "bin"))
-        .collect();
+    if let Some(name) = package {
+        let pkg = metadata
+            .packages
+            .iter()
+            .find(|pkg| pkg.name == name)
+            .ok_or_else(|| DevError::Build(format!("package `{name}` not found in metadata")))?;
+        let names = bin_names(pkg);
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        if let Some(bin) = crate::executable_artifact::package_bin(&refs, name) {
+            return Ok(bin.to_owned());
+        }
+        return Err(DevError::Build(if names.is_empty() {
+            format!("package `{name}` declares no bin")
+        } else {
+            format!(
+                "package `{name}` declares {} bins ({}) and none is named like it; \
+                 --no-build cannot choose one",
+                names.len(),
+                names.join(", ")
+            )
+        }));
+    }
 
-    if bins.is_empty() {
+    // Cargo before 1.71 reports no default members; guessing all members
+    // could launch a member a bare build never selects.
+    let Some(defaults) = &metadata.workspace_default_members else {
         return Err(DevError::Build(
-            "no binary targets found in package metadata".into(),
+            "cargo metadata reports no workspace default members (cargo 1.71 or newer \
+             needed), so --no-build cannot tell which package a build selects"
+                .into(),
         ));
+    };
+    let mut ids: Vec<&crate::cargo::metadata::PackageId> = defaults.iter().collect();
+    ids.sort_unstable_by_key(ToString::to_string);
+    ids.dedup();
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    for id in ids {
+        let pkg = metadata
+            .packages
+            .iter()
+            .find(|pkg| pkg.id == *id)
+            .ok_or_else(|| {
+                DevError::Build(format!("default member {id} is not in cargo metadata"))
+            })?;
+        candidates.extend(
+            bin_names(pkg)
+                .into_iter()
+                .map(|bin| (pkg.name.clone(), bin)),
+        );
     }
-
-    if bins.len() == 1 {
-        return Ok(bins[0].name.clone());
+    match candidates.as_slice() {
+        [(_, bin)] => Ok(bin.clone()),
+        [] => Err(DevError::Build(
+            "the workspace default members declare no bin".into(),
+        )),
+        many => Err(DevError::Build(format!(
+            "the workspace default members declare {} bins ({}); --no-build cannot choose one",
+            many.len(),
+            many.iter()
+                .map(|(pkg, bin)| format!("{pkg}/{bin}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
     }
-
-    if let Some(ref pkg) = config.package
-        && let Some(named) = bins.iter().find(|target| target.name == *pkg)
-    {
-        return Ok(named.name.clone());
-    }
-
-    Ok(bins[0].name.clone())
 }
 
 /// Extract compiler diagnostics from `--message-format=json` stdout and print
@@ -1062,6 +1111,56 @@ fn filtered_build_stderr(stderr: &[u8]) -> String {
         .join("\n")
         .trim_end()
         .to_owned()
+}
+
+#[cfg(test)]
+mod bin_name_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::resolve_bin_name;
+    use crate::cargo::metadata::CargoMetadata;
+
+    fn metadata(defaults: Option<&[&str]>) -> CargoMetadata {
+        let bin = |name: &str| serde_json::json!({ "name": name, "kind": ["bin"] });
+        let mut value = serde_json::json!({
+            "packages": [
+                { "name": "lib", "id": "id-lib", "targets": [{ "name": "lib", "kind": ["lib"] }] },
+                { "name": "app", "id": "id-app", "targets": [bin("worker"), bin("app")] },
+                { "name": "tools", "id": "id-tools", "targets": [bin("a"), bin("b")] },
+                { "name": "one", "id": "id-one", "targets": [bin("solo")] }
+            ],
+            "workspace_members": ["id-lib", "id-app", "id-tools", "id-one"]
+        });
+        if let Some(defaults) = defaults {
+            value["workspace_default_members"] = serde_json::json!(defaults);
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn a_package_takes_its_sole_bin_or_the_one_named_like_it_and_refuses_otherwise() {
+        let meta = metadata(None);
+        assert_eq!(resolve_bin_name(&meta, Some("one")).unwrap(), "solo");
+        assert_eq!(resolve_bin_name(&meta, Some("app")).unwrap(), "app");
+        let err = resolve_bin_name(&meta, Some("tools"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("none is named like it"), "{err}");
+        assert!(resolve_bin_name(&meta, Some("lib")).is_err());
+    }
+
+    #[test]
+    fn no_package_needs_exactly_one_bin_among_default_members() {
+        let one = metadata(Some(&["id-lib", "id-one", "id-one"]));
+        assert_eq!(resolve_bin_name(&one, None).unwrap(), "solo");
+        let many = metadata(Some(&["id-one", "id-app"]));
+        let err = resolve_bin_name(&many, None).unwrap_err().to_string();
+        assert!(err.contains("app/worker"), "{err}");
+        assert!(resolve_bin_name(&metadata(Some(&["id-lib"])), None).is_err());
+        assert!(resolve_bin_name(&metadata(Some(&["id-gone"])), None).is_err());
+        // Cargo before 1.71: no default members, so no guess.
+        assert!(resolve_bin_name(&metadata(None), None).is_err());
+    }
 }
 
 #[cfg(test)]

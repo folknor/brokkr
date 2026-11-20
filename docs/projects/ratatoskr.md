@@ -8,7 +8,8 @@ Project-specific settings live under `[ratatoskr]` in the project
 `brokkr.toml`:
 
 - `[ratatoskr.harness]` names the cargo package (`package`), optional binary
-  target (`binary`, defaulting to the package name), optional cargo
+  target (`binary`; without it the package's sole bin, else the one named
+  like the package, else the build refuses), optional cargo
   `features`, and an optional `debug` or `profile` default. Orchestration builds use
   this spec directly; they do not select a `[[check]]` sweep.
 - `mock_server_binary` points to the sæhrimnir executable and `fixtures_dir`

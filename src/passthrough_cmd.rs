@@ -141,7 +141,7 @@ pub(crate) fn cmd_run(
     };
     let build_start = Instant::now();
     let binary = if opts.no_build {
-        build::resolve_existing_binary(&build_config, build_root.as_path())?
+        build::resolve_existing_binary(package, &build_config.profile, build_root.as_path())?
     } else {
         build::cargo_build(&build_config, build_root.as_path())?.path
     };

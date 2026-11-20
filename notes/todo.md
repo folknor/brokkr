@@ -158,13 +158,6 @@ include path and keep cycle detection separate. Also: with `CARGO_HOME` unset
 the helper consults only a nonempty `HOME`, where cargo falls back to the
 account database.
 
-### `resolve_bin_name` falls back to the first bin (2026-11-20)
-
-When nothing else decides which bin a build means, `resolve_bin_name` takes
-the first bin cargo metadata lists, where the executable selection now
-refuses an undecided choice. One positional fallback is left beside a rule
-that refuses ambiguity.
-
 ### A serve's cleanup after its supervisor dies is best effort (2026-11-15)
 
 `src/serve.rs` retires a generation whose supervisor is gone once a `/proc`
@@ -434,7 +427,7 @@ whose identity rides in the qualifier.
 
 ### Make default binary configurable per-project in brokkr.toml
 
-A build with a package but no `--bin` (a harness without `binary`, passthrough) takes the package's sole bin or the one named like the package, and refuses otherwise (`src/executable_artifact.rs`). This should be configurable in `brokkr.toml` (e.g. a `default_bin` field per project) so projects with multiple binaries can declare which one brokkr should run by default.
+A build with a package but no `--bin` (a harness without `binary`, passthrough) takes the package's sole bin or the one named like the package, and refuses otherwise (`executable_artifact::package_bin`, which `passthrough --no-build` applies to declared bins too). This should be configurable in `brokkr.toml` (e.g. a `default_bin` field per project) so projects with multiple binaries can declare which one brokkr should run by default.
 
 ### `Worktree` has no `Drop` impl
 
