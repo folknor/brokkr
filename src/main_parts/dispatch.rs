@@ -27,7 +27,7 @@ pub(super) fn run(
     detection: Option<&project::Detection>,
     invocation: &crate::db::RunInvocation,
 ) -> Result<(), DevError> {
-    let spec = cli::invocation().spec();
+    let spec = cli::invocation()?.spec();
     if spec.config == cli::ConfigNeed::Required {
         spec.require(&require_detection(detection)?.project)?;
     } else if let Some(detection) = detection {
@@ -58,25 +58,38 @@ pub(super) fn run(
     let reads_only =
         cli::CommandSpec::reads_only(&cli.command, detection.map(|d| &d.config.benches));
     let lock_policy = spec.lock_for(reads_only);
-    let _log = spec.run_log_for(reads_only).map(|kind| {
-        crate::run_log::RunLog::begin(
-            state_root
-                .expect("logging commands resolve a state root")
-                .as_path(),
-            kind,
-        )
-    });
+    let _log = match spec.run_log_for(reads_only) {
+        Some(kind) => {
+            let Some(root) = state_root else {
+                return Err(DevError::Internal(
+                    "logging commands resolve a state root".to_owned(),
+                ));
+            };
+            Some(crate::run_log::RunLog::begin(root.as_path(), kind))
+        }
+        None => None,
+    };
     let _lock = match lock_policy {
         cli::LockPolicy::None => None,
         cli::LockPolicy::Blocking | cli::LockPolicy::NonBlocking => {
+            let Some(project_root) = state_root else {
+                return Err(DevError::Internal(
+                    "locking commands resolve a state root".to_owned(),
+                ));
+            };
+            let Some(build_root) = detection
+                .map(|d| &d.build_root)
+                .or_else(|| fallback_roots.as_ref().map(|roots| &roots.1))
+            else {
+                return Err(DevError::Internal(
+                    "locking commands resolve a build root".to_owned(),
+                ));
+            };
             let ctx = lockfile::LockContext {
                 project: project.as_ref().map(Project::name),
-                command: cli::invocation(),
-                project_root: state_root.expect("locking commands resolve a state root"),
-                build_root: detection
-                    .map(|d| &d.build_root)
-                    .or_else(|| fallback_roots.as_ref().map(|roots| &roots.1))
-                    .expect("locking commands resolve a build root"),
+                command: cli::invocation()?,
+                project_root,
+                build_root,
                 // Activated explicitly below, so it can be skipped for
                 // worktree commands and tracked on the hold.
                 tree: None,

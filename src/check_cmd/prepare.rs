@@ -2175,9 +2175,11 @@ pub(crate) fn prepare_profile(
                     error = Some(e);
                 }
                 plan.lanes.push(record);
-                if !certifying && !stopped {
-                    *lanes.get_mut(lane_idx).expect("lane index comes from sweeps") =
-                        Some(PreparedLane::failed(PrepareFailure { held, message }));
+                if !certifying
+                    && !stopped
+                    && let Some(slot) = lanes.get_mut(lane_idx)
+                {
+                    *slot = Some(PreparedLane::failed(PrepareFailure { held, message }));
                 }
                 continue;
             }
@@ -2188,7 +2190,9 @@ pub(crate) fn prepare_profile(
             plan.incomplete.push(format!("sweep '{}': no inventory - {reason}", sweep.label).into());
             record.include_ignored = prepared.include_ignored;
             plan.lanes.push(record);
-            *lanes.get_mut(lane_idx).expect("lane index comes from sweeps") = Some(prepared);
+            if let Some(slot) = lanes.get_mut(lane_idx) {
+                *slot = Some(prepared);
+            }
             continue;
         }
 
@@ -2243,7 +2247,9 @@ pub(crate) fn prepare_profile(
             Inventory::Prepared { executions, ignored_selected, outside_claim, artifacts, unlisted }
         };
         plan.lanes.push(record);
-        *lanes.get_mut(lane_idx).expect("lane index comes from sweeps") = Some(prepared);
+        if let Some(slot) = lanes.get_mut(lane_idx) {
+            *slot = Some(prepared);
+        }
     }
 
     // Pass two is policy-only and runs only for a certifying profile. It reads

@@ -102,8 +102,7 @@ pub fn format_details(row: &StoredRow) -> String {
 
     let label_width = fields.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
     for (label, value) in &fields {
-        use std::fmt::Write;
-        writeln!(out, "  {label:<label_width$}  {value}").expect("write to String is infallible");
+        out.push_str(&format!("  {label:<label_width$}  {value}\n"));
     }
 
     // Remove trailing newline.

@@ -192,11 +192,13 @@ impl BenchHarness {
             })();
             match profile {
                 Ok(profile) => {
-                    iteration
-                        .result
-                        .as_mut()
-                        .expect("an iteration without an error has a result")
-                        .hotpath = Some(profile);
+                    if let Some(result) = iteration.result.as_mut() {
+                        result.hotpath = Some(profile);
+                    } else {
+                        iteration.fail(DevError::Internal(
+                            "an iteration without an error has a result".to_owned(),
+                        ));
+                    }
                 }
                 Err(error) => iteration.fail(error),
             }

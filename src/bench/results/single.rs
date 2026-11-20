@@ -16,8 +16,19 @@ use super::{
 
 type Record = serde_json::Map<String, serde_json::Value>;
 
+/// Append formatted text to `out`; writing to a String cannot fail.
+fn put(out: &mut String, args: std::fmt::Arguments<'_>) {
+    out.write_fmt(args).unwrap_or_default();
+}
+
+/// [`put`] then a newline.
+fn putln(out: &mut String, args: std::fmt::Arguments<'_>) {
+    put(out, args);
+    out.push('\n');
+}
+
 fn field(out: &mut String, label: &str, value: &str) {
-    writeln!(out, "{label:<10}  {value}").expect("write to String is infallible");
+    putln(out, format_args!("{label:<10}  {value}"));
 }
 
 /// A child's ending as every view words it.
@@ -192,25 +203,27 @@ fn context(out: &mut String, run: &StoredRun) {
         }
     );
     if let Some(resolved) = &b.resolved {
-        write!(
-            build,
-            "; resolved {} with [{}]",
-            resolved.bin,
-            resolved.features.join(",")
-        )
-        .expect("write to String is infallible");
+        put(
+            &mut build,
+            format_args!(
+                "; resolved {} with [{}]",
+                resolved.bin,
+                resolved.features.join(",")
+            ),
+        );
     }
     if let Some(artifact) = &b.artifact {
-        write!(build, "; artifact {artifact}").expect("write to String is infallible");
+        put(&mut build, format_args!("; artifact {artifact}"));
     }
     if let Some(lock) = &b.lockfile {
-        write!(
-            build,
-            "; root Cargo.lock {} {}",
-            lock.source.as_str(),
-            lock.digest.as_deref().unwrap_or("(not read)")
-        )
-        .expect("write to String is infallible");
+        put(
+            &mut build,
+            format_args!(
+                "; root Cargo.lock {} {}",
+                lock.source.as_str(),
+                lock.digest.as_deref().unwrap_or("(not read)")
+            ),
+        );
     }
     field(out, "build", &build);
     if let Some(flags) = &b.rustflags {
@@ -274,8 +287,9 @@ fn child(out: &mut String, idx: usize, child: &Child) {
     } else {
         format!("; {}", losses.join(", "))
     };
-    writeln!(
+    putln(
         out,
+        format_args!(
         "  child {idx}{}  at +{}  {}  {}  {} {}",
         if child.measured { " (measured)" } else { "" },
         ms(child.origin_offset_us),
@@ -283,45 +297,49 @@ fn child(out: &mut String, idx: usize, child: &Child) {
         ending(&child.ending),
         child.program,
         child.argv.join(" ")
-    )
-    .expect("write to String is infallible");
-    writeln!(
+        ),
+    );
+    putln(
         out,
+        format_args!(
         "           {} samples, {} records{loss}",
         e.samples.len(),
         e.records.len()
-    )
-    .expect("write to String is infallible");
+        ),
+    );
     if let Some(executable) = &child.executable {
-        writeln!(
+        putln(
             out,
+            format_args!(
             "           executable {}: {}",
             executable.path,
             executable_identity(&executable.identity)
-        )
-        .expect("write to String is infallible");
+            ),
+        );
     }
     if let Some(cache) = &child.cache {
         // Counts accumulated over the scan interval before launch, not one
         // snapshot, and nothing about the cache once the child ran.
-        writeln!(
+        putln(
             out,
+            format_args!(
             "           page cache ({}), scanned +{} to +{} before launch:",
             cache.procedure,
             ms(cache.scan_from_us),
             ms(cache.scan_to_us)
-        )
-        .expect("write to String is infallible");
+            ),
+        );
         for file in &cache.files {
-            writeln!(
+            putln(
                 out,
+                format_args!(
                 "             {} {}: {} of {} bytes resident",
                 file.mode.name(),
                 file.paths.join(", "),
                 file.resident,
                 file.bytes
-            )
-            .expect("write to String is infallible");
+                ),
+            );
         }
     }
     if let Some(capture) = &child.hotpath {
@@ -332,12 +350,13 @@ fn child(out: &mut String, idx: usize, child: &Child) {
             CaptureOutcome::Unreadable { reason } => format!("unreadable: {reason}"),
             CaptureOutcome::OverBudget => "over budget, not read".to_owned(),
         };
-        writeln!(
+        putln(
             out,
+            format_args!(
             "           hotpath {} #{}: {status}",
             capture.stage, capture.occurrence
-        )
-        .expect("write to String is infallible");
+            ),
+        );
     }
     if let Some(stderr) = &child.stderr {
         stderr_lines(out, stderr);
@@ -368,8 +387,7 @@ fn stderr_lines(out: &mut String, stderr: &StderrCapture) {
         StderrTail::OverBudget => ("; over the run's budget, not kept".to_owned(), None),
         StderrTail::Unreadable { reason } => (format!("; unreadable: {reason}"), None),
     };
-    writeln!(out, "           stderr {size}{unreleased}{state}")
-        .expect("write to String is infallible");
+    putln(out, format_args!("           stderr {size}{unreleased}{state}"));
     let Some(text) = text else { return };
     let lines: Vec<&str> = text.lines().collect();
     let mut shown: Vec<String> = Vec::new();
@@ -393,7 +411,7 @@ fn stderr_lines(out: &mut String, stderr: &StderrCapture) {
         }
     }
     for line in shown.iter().rev() {
-        writeln!(out, "           | {line}").expect("write to String is infallible");
+        putln(out, format_args!("           | {line}"));
     }
 }
 
@@ -443,14 +461,15 @@ fn iterations(out: &mut String, run: &StoredRun) {
             (Some(block), None) => ms(block),
             (Some(block), Some(child)) => format!("{} (block {})", ms(child.wall_us), ms(block)),
         };
-        writeln!(
+        putln(
             out,
+            format_args!(
             "iteration {idx}{result}  {wall}  {}",
             iteration_outcome(&iteration.outcome)
-        )
-        .expect("write to String is infallible");
+            ),
+        );
         for line in super::host::iteration_lines(iteration) {
-            writeln!(out, "  {line}").expect("write to String is infallible");
+            putln(out, format_args!("  {line}"));
         }
         if run.children_loaded {
             for (c, each) in iteration.children.iter().enumerate() {

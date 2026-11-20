@@ -114,7 +114,7 @@ fn resolve_sweeps(
                     "--sweep '{name}' matches no [[check]] or [[lint_sweep]] entry in brokkr.toml"
                 ))
             })?;
-        vec![profile::sweep_from_check_entry(&entry)]
+        vec![profile::sweep_from_check_entry(&entry)?]
     } else if policy.always_adhoc || !inputs.features.is_empty() || inputs.no_default_features {
         let mut sweep = SweepDecl {
             label: policy.label.into(),
@@ -160,14 +160,14 @@ fn resolve_sweeps(
     } else if let Some(name) = effective_profile_name(inputs.test_cfg, inputs.profile_name)? {
         let cfg = inputs
             .test_cfg
-            .expect("resolved profile requires test config");
+            .ok_or_else(|| DevError::Internal("resolved profile requires test config".to_owned()))?;
         profile::resolve(cfg, inputs.check_entries, &name)?
     } else if !inputs.check_entries.is_empty() {
         inputs
             .check_entries
             .iter()
             .map(profile::sweep_from_check_entry)
-            .collect()
+            .collect::<Result<_, _>>()?
     } else {
         vec![SweepDecl {
             label: "all-features".into(),

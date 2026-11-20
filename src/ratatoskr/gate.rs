@@ -6,7 +6,7 @@
 //! reports per-rule pass/fail. Storage and CLI plumbing live in
 //! `src/ratatoskr/gate_store.rs` and `src/ratatoskr/sync/gate.rs`.
 
-use std::fmt::{self, Write};
+use std::fmt;
 
 use serde_json::{Map, Value};
 
@@ -556,12 +556,10 @@ impl GateVerdict {
         }
         for outcome in self.outcomes() {
             let tag = if outcome.pass { "OK  " } else { "FAIL" };
-            writeln!(
-                report,
-                "  [{tag}] {} :: {} ({})",
+            report.push_str(&format!(
+                "  [{tag}] {} :: {} ({})\n",
                 outcome.metric, outcome.rule, outcome.detail
-            )
-            .expect("writing to a String never fails");
+            ));
         }
         if report.ends_with('\n') {
             report.pop();

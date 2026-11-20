@@ -1302,7 +1302,7 @@ fn configured_domain<'m>(
 /// `None` keeps every sweep. An unknown label is a hard error that lists
 /// the labels actually available, so a typo can't silently run nothing.
 pub(super) fn select_sweep(
-    sweeps: Vec<PlannedSweep>,
+    mut sweeps: Vec<PlannedSweep>,
     filter: Option<&str>,
 ) -> Result<Vec<PlannedSweep>, DevError> {
     let Some(label) = filter else {
@@ -1311,7 +1311,7 @@ pub(super) fn select_sweep(
     let available: Vec<&str> = sweeps.iter().map(|s| s.label.as_str()).collect();
     if let Some(pos) = sweeps.iter().position(|s| s.label == label) {
         // Preserve the matched sweep only; index is valid by construction.
-        return Ok(vec![sweeps.into_iter().nth(pos).expect("matched sweep")]);
+        return Ok(vec![sweeps.swap_remove(pos)]);
     }
     Err(DevError::Config(format!(
         "--sweep {label} matches no sweep in the resolved profile; available: {}",

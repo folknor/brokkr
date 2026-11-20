@@ -948,7 +948,7 @@ type BuildShapeKey = (
 /// Synthesize a `SweepDecl` from a `CheckEntry` alone, with no
 /// profile filters. Used by the bare `brokkr check` path when
 /// `[[check]]` is configured but no profile is selected.
-pub fn sweep_from_check_entry(entry: &CheckEntry) -> SweepDecl {
+pub fn sweep_from_check_entry(entry: &CheckEntry) -> Result<SweepDecl, DevError> {
     // No profile in play, so the entry's own filters are all there is.
     let filters = LaneFilters {
         filters: entry_filters(entry),
@@ -969,10 +969,9 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> SweepDecl {
         false,
         None,
         None,
-    )
-    .expect("parsed check entries have a valid execution mode");
+    )?;
 
-    sweep_decl_from_entry(entry, filters, entry.env.clone(), lane_exec)
+    Ok(sweep_decl_from_entry(entry, filters, entry.env.clone(), lane_exec))
 }
 
 /// The `[[check]]` entry's shared sweep fields, with profile resolution
@@ -1647,7 +1646,7 @@ isolation = "process"
 
         // Execution policy, not build shape: an isolated and a plain sweep
         // of the same entry still dedupe to one clippy run.
-        let plain = sweep_from_check_entry(&checks[0]);
+        let plain = sweep_from_check_entry(&checks[0]).expect("sweep resolves");
         assert_eq!(
             plan_decl(plain).build_shape_key(),
             plan_decl(sweeps[0].clone()).build_shape_key()
@@ -1839,7 +1838,7 @@ skip = [{ package = "a", pattern = "slow" }]
         let plain_decl = sweep_from_check_entry(&CheckEntry {
             name: "default".into(),
             ..Default::default()
-        });
+        }).expect("sweep resolves");
         let plain = plan_decl(plain_decl.clone());
         let mut filtered = plain_decl;
         filtered.filters = LaneFilters {
@@ -1885,7 +1884,7 @@ sweeps = ["timing"]
         let resolved = resolve(&cfg, &checks, "timing").unwrap();
         assert_eq!(resolved[0].profile(), Some(SweepProfile::Release));
         assert_eq!(
-            sweep_from_check_entry(&checks[0]).profile(),
+            sweep_from_check_entry(&checks[0]).expect("sweep resolves").profile(),
             Some(SweepProfile::Release)
         );
 
@@ -1893,7 +1892,7 @@ sweeps = ["timing"]
         // never what it compiles: the same build shape.
         let mut required_entry = checks[0].clone();
         required_entry.profile_required = true;
-        let required = sweep_from_check_entry(&required_entry);
+        let required = sweep_from_check_entry(&required_entry).expect("sweep resolves");
         assert_eq!(
             required.profile_pin,
             crate::config::ProfilePin::Required(SweepProfile::Release)
@@ -1909,7 +1908,7 @@ sweeps = ["timing"]
         // run the other.
         let mut dev_entry = checks[0].clone();
         dev_entry.profile = Some(SweepProfile::Dev);
-        let dev = sweep_from_check_entry(&dev_entry);
+        let dev = sweep_from_check_entry(&dev_entry).expect("sweep resolves");
         assert_ne!(
             plan_decl(dev.clone()).build_shape_key(),
             plan_decl(resolved[0].clone()).build_shape_key()
@@ -1920,7 +1919,7 @@ sweeps = ["timing"]
         let mut unset_entry = checks[0].clone();
         unset_entry.profile = None;
         assert_ne!(
-            plan_decl(sweep_from_check_entry(&unset_entry)).build_shape_key(),
+            plan_decl(sweep_from_check_entry(&unset_entry).expect("sweep resolves")).build_shape_key(),
             plan_decl(dev).build_shape_key()
         );
     }
@@ -2001,7 +2000,7 @@ sweeps = ["sim-live"]
         );
         let resolved = resolve(&cfg, &checks, "sim").unwrap();
         assert!(resolved[0].curated);
-        assert!(sweep_from_check_entry(&checks[0]).curated);
+        assert!(sweep_from_check_entry(&checks[0]).expect("sweep resolves").curated);
 
         // Audit policy, not build shape: a curated and a plain sweep of an
         // otherwise-identical entry still dedupe to one clippy run - which
@@ -2009,7 +2008,7 @@ sweeps = ["sim-live"]
         // member sweeps, not the shape.
         let mut plain_entry = checks[0].clone();
         plain_entry.curated = false;
-        let plain = sweep_from_check_entry(&plain_entry);
+        let plain = sweep_from_check_entry(&plain_entry).expect("sweep resolves");
         assert_eq!(
             plan_decl(plain).build_shape_key(),
             plan_decl(resolved[0].clone()).build_shape_key()
@@ -2025,7 +2024,7 @@ sweeps = ["sim-live"]
             build_packages: vec!["pbfhogg-cli".into()],
             ..Default::default()
         };
-        let s = sweep_from_check_entry(&entry);
+        let s = sweep_from_check_entry(&entry).expect("sweep resolves");
         assert_eq!(s.label, "consumer");
         assert_eq!(
             s.features.configured_key(),
@@ -2047,7 +2046,7 @@ sweeps = ["sim-live"]
             only: vec!["virtual_time".into()],
             ..Default::default()
         };
-        let s = sweep_from_check_entry(&entry);
+        let s = sweep_from_check_entry(&entry).expect("sweep resolves");
         assert_eq!(s.rustflags, vec!["--cfg", "madsim"]);
         assert_eq!(s.filters.cargo_args(), vec!["--test", "reconciliation"]);
         assert_eq!(s.filters.libtest_args(), vec!["--skip", "flaky::"]);
@@ -2237,7 +2236,7 @@ packages = ["nautilus-core"]
 env = { HIGH_PRECISION = "1" }
 "#,
         );
-        let s = sweep_from_check_entry(&checks[0]);
+        let s = sweep_from_check_entry(&checks[0]).expect("sweep resolves");
         assert_eq!(s.packages, vec!["nautilus-core"]);
         assert_eq!(s.env.get("HIGH_PRECISION").map(String::as_str), Some("1"));
     }
@@ -2251,7 +2250,7 @@ name = "ws"
 test_exclude_packages = ["nautilus-pyo3", "nautilus-python"]
 "#,
         );
-        let s = sweep_from_check_entry(&checks[0]);
+        let s = sweep_from_check_entry(&checks[0]).expect("sweep resolves");
         assert_eq!(
             s.test_exclude_packages,
             vec!["nautilus-pyo3", "nautilus-python"]

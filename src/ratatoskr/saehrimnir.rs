@@ -210,10 +210,14 @@ pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
         *slot = Some(port);
     }
 
-    let missing: Vec<&str> = Protocol::all()
-        .filter(|protocol| ports[protocol.index()].is_none())
-        .map(Protocol::sentinel_name)
-        .collect();
+    let mut resolved = [0u16; Protocol::COUNT];
+    let mut missing: Vec<&str> = Vec::new();
+    for protocol in Protocol::all() {
+        match ports[protocol.index()] {
+            Some(port) => resolved[protocol.index()] = port,
+            None => missing.push(protocol.sentinel_name()),
+        }
+    }
     if !missing.is_empty() {
         return Err(DevError::Verify(format!(
             "saehrimnir sentinel missing entries: {}",
@@ -221,10 +225,7 @@ pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
         )));
     }
 
-    // The missing list above proves each slot is Some.
-    Ok(Endpoints::from_ordered(
-        ports.map(|port| port.expect("checked above")),
-    ))
+    Ok(Endpoints::from_ordered(resolved))
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +270,8 @@ pub struct DeadlineWait {
 pub struct ManagedMock<'a> {
     fixture_name: String,
     server: Option<MockServer>,
+    endpoints: Endpoints,
+    ready_elapsed: Duration,
     endpoint_envs: Vec<(String, String)>,
     lock: &'a LockGuard,
 }
@@ -294,6 +297,8 @@ impl<'a> ManagedMock<'a> {
         let endpoint_envs = endpoint_env_pairs(cfg, server.endpoints());
         Ok(Self {
             fixture_name: fixture_name.to_owned(),
+            endpoints: *server.endpoints(),
+            ready_elapsed: server.ready_elapsed(),
             server: Some(server),
             endpoint_envs,
             lock,
@@ -301,17 +306,11 @@ impl<'a> ManagedMock<'a> {
     }
 
     pub fn endpoints(&self) -> &Endpoints {
-        self.server
-            .as_ref()
-            .expect("managed mock is running until shutdown")
-            .endpoints()
+        &self.endpoints
     }
 
     pub fn ready_elapsed(&self) -> Duration {
-        self.server
-            .as_ref()
-            .expect("managed mock is running until shutdown")
-            .ready_elapsed()
+        self.ready_elapsed
     }
 
     pub fn env_pair_refs(&self) -> Vec<(&str, &str)> {

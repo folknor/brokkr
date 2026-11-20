@@ -46,7 +46,7 @@ pub(crate) fn cmd_clippy(
     // lives in `sweep.packages`, where it already disqualifies promotion.
     let sweep = resolve_invocation_sweeps(vec![declaration], project_root, &[], &ForwardedArgs::parse(&[]))?
         .pop()
-        .expect("one declaration plans one sweep");
+        .ok_or_else(|| DevError::Internal("one declaration plans one sweep".to_owned()))?;
     // The same serial-builds rule `check` resolves: a configured cargo build
     // dir makes one chain of the probe's runs too.
     let serial_builds = resolve_serial_builds(project_root, false, std::slice::from_ref(&sweep), "clippy", &Narrator::live());

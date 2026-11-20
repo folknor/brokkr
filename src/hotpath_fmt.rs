@@ -3,7 +3,6 @@
 //! Reads the structured `HotpathData` produced by parsing the hotpath crate's
 //! JSON output, and formats it as column-aligned ASCII tables.
 
-use std::fmt::Write;
 
 use std::collections::BTreeSet;
 
@@ -107,53 +106,45 @@ fn format_functions_table(
     }
 
     // Header line.
-    writeln!(out, "{label} - {description}").expect("write to String");
+    out.push_str(&format!("{label} - {description}\n"));
 
     // Column headers.
-    write!(
-        out,
+    out.push_str(&format!(
         "{:<w_name$}  {:>w_calls$}  {:>w_avg$}",
         "Function", "Calls", "Avg",
-    )
-    .expect("write to String");
+    ));
     for (i, key) in percentile_keys.iter().enumerate() {
-        write!(
-            out,
+        out.push_str(&format!(
             "  {:>width$}",
             key.to_string().to_uppercase(),
             width = w_pcts[i]
-        )
-        .expect("write to String");
+        ));
     }
-    writeln!(out, "  {:>w_total$}  {:>w_pct_total$}", "Total", "% Total",)
-        .expect("write to String");
+    out.push_str(&format!(
+        "  {:>w_total$}  {:>w_pct_total$}\n",
+        "Total", "% Total",
+    ));
 
     // Data rows.
     for f in data {
-        write!(
-            out,
+        out.push_str(&format!(
             "{:<w_name$}  {:>w_calls$}  {:>w_avg$}",
             f.name,
             f.calls.map(|c| c.to_string()).unwrap_or_default(),
             metric_text(f.avg.as_ref()),
-        )
-        .expect("write to String");
+        ));
         for (i, key) in percentile_keys.iter().enumerate() {
-            write!(
-                out,
+            out.push_str(&format!(
                 "  {:>width$}",
                 percentile_value(f, *key),
                 width = w_pcts[i]
-            )
-            .expect("write to String");
+            ));
         }
-        writeln!(
-            out,
-            "  {:>w_total$}  {:>w_pct_total$}",
+        out.push_str(&format!(
+            "  {:>w_total$}  {:>w_pct_total$}\n",
             metric_text(f.total.as_ref()),
             metric_text(f.percent_total.as_ref()),
-        )
-        .expect("write to String");
+        ));
     }
 }
 
@@ -241,46 +232,38 @@ fn format_threads_table(out: &mut String, threads: &[HotpathThread], summary: &[
     } else {
         format!(" ({})", header_parts.join(", "))
     };
-    writeln!(out, "threads{annotation}").expect("write to String");
+    out.push_str(&format!("threads{annotation}\n"));
 
     // Column headers.
-    write!(
-        out,
+    out.push_str(&format!(
         "{:<w_name$}  {:<w_status$}  {:>w_cpu_pct$}  {:>w_cpu_max$}  {:>w_cpu_avg$}",
         "Thread", "Status", "CPU%", "Max%", "Avg%",
-    )
-    .expect("write to String");
+    ));
     if has_alloc {
-        write!(
-            out,
+        out.push_str(&format!(
             "  {:>w_alloc$}  {:>w_dealloc$}  {:>w_diff$}",
             "Alloc", "Dealloc", "Diff",
-        )
-        .expect("write to String");
+        ));
     }
     out.push('\n');
 
     // Data rows.
     for t in threads {
-        write!(
-            out,
+        out.push_str(&format!(
             "{:<w_name$}  {:<w_status$}  {:>w_cpu_pct$}  {:>w_cpu_max$}  {:>w_cpu_avg$}",
             t.name,
             t.status.as_deref().unwrap_or(""),
             quantity_or_dash(t.cpu_percent.as_ref()),
             quantity_or_dash(t.cpu_percent_max.as_ref()),
             quantity_or_dash(t.cpu_percent_avg.as_ref()),
-        )
-        .expect("write to String");
+        ));
         if has_alloc {
-            write!(
-                out,
+            out.push_str(&format!(
                 "  {:>w_alloc$}  {:>w_dealloc$}  {:>w_diff$}",
                 quantity_or_dash(t.alloc_bytes.as_ref()),
                 quantity_or_dash(t.dealloc_bytes.as_ref()),
                 quantity_or_dash(t.mem_diff.as_ref()),
-            )
-            .expect("write to String");
+            ));
         }
         out.push('\n');
     }
@@ -437,24 +420,20 @@ fn format_section_diff(
     let desc_a = data_a.first().and_then(|f| f.description.as_deref());
     let desc_b = data_b.first().and_then(|f| f.description.as_deref());
     let description = desc_a.or(desc_b).unwrap_or("");
-    writeln!(out, "{label} - {description}").expect("write to String");
+    out.push_str(&format!("{label} - {description}\n"));
 
     // Column headers.
-    writeln!(
-        out,
-        "{:<w_name$}  {:>w_total_a$}  {:>w_total_b$}  {:>w_change$}",
+    out.push_str(&format!(
+        "{:<w_name$}  {:>w_total_a$}  {:>w_total_b$}  {:>w_change$}\n",
         "Function", "Total A", "Total B", "Change",
-    )
-    .expect("write to String");
+    ));
 
     // Data rows.
     for (i, &name) in names.iter().enumerate() {
-        writeln!(
-            out,
-            "{:<w_name$}  {:>w_total_a$}  {:>w_total_b$}  {:>w_change$}",
+        out.push_str(&format!(
+            "{:<w_name$}  {:>w_total_a$}  {:>w_total_b$}  {:>w_change$}\n",
             name, row_total_a[i], row_total_b[i], row_change[i],
-        )
-        .expect("write to String");
+        ));
     }
 
     out

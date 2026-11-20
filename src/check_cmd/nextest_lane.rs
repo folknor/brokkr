@@ -1151,8 +1151,10 @@ fn qualified_skips_filterset<'a>(
     skips: impl IntoIterator<Item = &'a crate::profile::Filter>,
 ) -> Result<Option<String>, DevError> {
     let mut terms = Vec::new();
-    for skip in skips.into_iter().filter(|filter| filter.package.is_some()) {
-        let package = skip.package.as_deref().expect("qualified skip");
+    for skip in skips {
+        let Some(package) = skip.package.as_deref() else {
+            continue;
+        };
         terms.push(format!("({})", qualified_skip_filterset(package, &skip.pattern)?));
     }
     Ok((!terms.is_empty()).then(|| terms.join(" & ")))

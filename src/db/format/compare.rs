@@ -832,9 +832,7 @@ fn compute_compare_widths(
 }
 
 fn append_compare_header(out: &mut String, commit_a: &str, commit_b: &str, w: &CompareWidths) {
-    use std::fmt::Write;
-    write!(
-        out,
+    out.push_str(&format!(
         "{:<cmd_w$}  {:<var_w$}  {:<in_w$}  {:>a_w$}  {:>b_w$}  {:>ch_w$}",
         "command",
         "mode",
@@ -848,11 +846,9 @@ fn append_compare_header(out: &mut String, commit_a: &str, commit_b: &str, w: &C
         a_w = w.col_a,
         b_w = w.col_b,
         ch_w = w.change,
-    )
-    .expect("write to String is infallible");
+    ));
     if w.has_output {
-        write!(
-            out,
+        out.push_str(&format!(
             "  {:>oa_w$}  {:>ob_w$}  {:>oc_w$}",
             "output_a",
             "output_b",
@@ -860,12 +856,10 @@ fn append_compare_header(out: &mut String, commit_a: &str, commit_b: &str, w: &C
             oa_w = w.output_a,
             ob_w = w.output_b,
             oc_w = w.output_change,
-        )
-        .expect("write to String is infallible");
+        ));
     }
     if w.has_rss {
-        write!(
-            out,
+        out.push_str(&format!(
             "  {:>ra_w$}  {:>rb_w$}  {:>rc_w$}",
             "rss_a",
             "rss_b",
@@ -873,42 +867,35 @@ fn append_compare_header(out: &mut String, commit_a: &str, commit_b: &str, w: &C
             ra_w = w.rss_a,
             rb_w = w.rss_b,
             rc_w = w.rss_change,
-        )
-        .expect("write to String is infallible");
+        ));
     }
     if w.has_rewrite {
-        write!(
-            out,
+        out.push_str(&format!(
             "  {:>rwa_w$}  {:>rwb_w$}",
             "rewrite_a",
             "rewrite_b",
             rwa_w = w.rewrite_a,
             rwb_w = w.rewrite_b,
-        )
-        .expect("write to String is infallible");
+        ));
     }
     if w.has_blobs {
-        write!(
-            out,
+        out.push_str(&format!(
             "  {:>ba_w$}  {:>bb_w$}",
             "blobs_a",
             "blobs_b",
             ba_w = w.blobs_a,
             bb_w = w.blobs_b,
-        )
-        .expect("write to String is infallible");
+        ));
     }
 }
 
 fn append_compare_row(out: &mut String, pair: &ComparisonPair, w: &CompareWidths) {
-    use std::fmt::Write;
     let cmd = &pair.key.command;
     let var = &pair.key.mode;
     let a_str = format_ms_or_dash(pair.a_wall);
     let b_str = format_ms_or_dash(pair.b_wall);
     let ch = format_change_pair(pair);
-    write!(
-        out,
+    out.push_str(&format!(
         "{:<cmd_w$}  {:<var_w$}  {:<in_w$}  {:>a_w$}  {:>b_w$}  {:>ch_w$}",
         cmd,
         var,
@@ -922,14 +909,12 @@ fn append_compare_row(out: &mut String, pair: &ComparisonPair, w: &CompareWidths
         a_w = w.col_a,
         b_w = w.col_b,
         ch_w = w.change,
-    )
-    .expect("write to String is infallible");
+    ));
     if w.has_output {
         let oa = format_bytes_or_dash(pair.a_output_bytes);
         let ob = format_bytes_or_dash(pair.b_output_bytes);
         let oc = format_change_bytes(pair.a_output_bytes, pair.b_output_bytes);
-        write!(
-            out,
+        out.push_str(&format!(
             "  {:>oa_w$}  {:>ob_w$}  {:>oc_w$}",
             oa,
             ob,
@@ -937,15 +922,13 @@ fn append_compare_row(out: &mut String, pair: &ComparisonPair, w: &CompareWidths
             oa_w = w.output_a,
             ob_w = w.output_b,
             oc_w = w.output_change,
-        )
-        .expect("write to String is infallible");
+        ));
     }
     if w.has_rss {
         let ra = format_rss_or_dash(pair.a_rss_mb);
         let rb = format_rss_or_dash(pair.b_rss_mb);
         let rc = format_change_rss(pair.a_rss_mb, pair.b_rss_mb);
-        write!(
-            out,
+        out.push_str(&format!(
             "  {:>ra_w$}  {:>rb_w$}  {:>rc_w$}",
             ra,
             rb,
@@ -953,34 +936,29 @@ fn append_compare_row(out: &mut String, pair: &ComparisonPair, w: &CompareWidths
             ra_w = w.rss_a,
             rb_w = w.rss_b,
             rc_w = w.rss_change,
-        )
-        .expect("write to String is infallible");
+        ));
     }
     if w.has_rewrite {
         let rwa = format_pct_or_dash(pair.a_rewrite_pct);
         let rwb = format_pct_or_dash(pair.b_rewrite_pct);
-        write!(
-            out,
+        out.push_str(&format!(
             "  {:>rwa_w$}  {:>rwb_w$}",
             rwa,
             rwb,
             rwa_w = w.rewrite_a,
             rwb_w = w.rewrite_b,
-        )
-        .expect("write to String is infallible");
+        ));
     }
     if w.has_blobs {
         let ba = format_opt_str_or_dash(&pair.a_blobs);
         let bb = format_opt_str_or_dash(&pair.b_blobs);
-        write!(
-            out,
+        out.push_str(&format!(
             "  {:>ba_w$}  {:>bb_w$}",
             ba,
             bb,
             ba_w = w.blobs_a,
             bb_w = w.blobs_b,
-        )
-        .expect("write to String is infallible");
+        ));
     }
 }
 

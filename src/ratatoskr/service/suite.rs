@@ -480,12 +480,11 @@ fn format_suite_summary(results: &[CycleRun], total: usize, cycles: u32, bailed:
             crate::output::format_duration_ms(max),
             crate::output::format_duration_ms(avg)
         )
-    } else if bailed {
-        // First failure stops the cohort; report the cycle and script.
-        let first_fail = results
-            .iter()
-            .find(|r| !r.result.succeeded)
-            .expect("bailed implies a failure");
+    } else if bailed
+        && let Some(first_fail) = results.iter().find(|r| !r.result.succeeded)
+    {
+        // First failure stops the cohort (fail_count > 0 guarantees one);
+        // report the cycle and script.
         format!(
             "soak: stopped at cycle {}/{cycles} {} ({pass_count} passed, {fail_count} failed)",
             first_fail.cycle, first_fail.name

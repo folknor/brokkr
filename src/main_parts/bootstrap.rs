@@ -30,7 +30,7 @@ where
     let project_root = detection.project_root.as_path();
     let requested_mode = resolve_mode(mode);
     let mm = if requested_mode == measure::MeasureMode::Run {
-        cli::invocation().spec().default_mode
+        cli::invocation()?.spec().default_mode
     } else {
         requested_mode
     };
@@ -107,9 +107,14 @@ fn parse_cli(project: Option<&Project>) -> (Cli, cli::CommandId, crate::db::RunI
         .collect();
 
     for name in names {
-        let spec = cli::CommandId::from_name(&name)
-            .expect("every clap command has an exhaustive command specification")
-            .spec();
+        let Some(command_id) = cli::CommandId::from_name(&name) else {
+            clap::Error::raw(
+                clap::error::ErrorKind::InvalidSubcommand,
+                "every clap command has an exhaustive command specification",
+            )
+            .exit();
+        };
+        let spec = command_id.spec();
         let prefix = spec.help_prefix();
         cmd = cmd.mut_subcommand(&name, |sub| {
             let about = sub.get_about().map(ToString::to_string).unwrap_or_default();
@@ -833,9 +838,11 @@ pub(super) fn run_check(
         // No project config, but the user-wide layer applies to any tree
         // brokkr checks. A repo without brokkr.toml is exactly where a
         // personal convention may be the only rule in force.
-        let user = user_config
-            .as_ref()
-            .expect("the unconfigured branch loaded user config");
+        let Some(user) = user_config.as_ref() else {
+            return Err(DevError::Internal(
+                "the unconfigured branch loaded user config".to_owned(),
+            ));
+        };
         (
             &[][..],
             &[][..],

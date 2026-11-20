@@ -5,7 +5,6 @@
 //! named under the pair rather than splitting it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write;
 
 use super::super::store::{Build, CaptureOutcome, MarkView, StoredRun};
 use super::{
@@ -526,10 +525,10 @@ fn pointer_line(
         change(result_wall(x), result_wall(y))
     );
     if let Some(build) = build_line(&x.doc.build, &y.doc.build) {
-        write!(line, "; {}", build.trim_start()).expect("write to String is infallible");
+        line.push_str(&format!("; {}", build.trim_start()));
     }
     if let Some(host) = host_line(x, y) {
-        write!(line, "; {}", host.trim_start()).expect("write to String is infallible");
+        line.push_str(&format!("; {}", host.trim_start()));
     }
     Some(line)
 }
@@ -699,7 +698,8 @@ pub(crate) fn format_compare(
     ]];
     for (ra, rb) in &rows {
         let (x, y) = (ra.first().copied(), rb.first().copied());
-        let any = x.or(y).expect("a key has a run on some side");
+        // Every key came from a run on some side.
+        let Some(any) = x.or(y) else { continue };
         table.push([
             bench_name(marks, any).to_owned(),
             params_summary(any),
@@ -814,12 +814,10 @@ pub(crate) fn format_compare(
     }
     let withheld = total.saturating_sub(limit);
     if withheld > 0 {
-        writeln!(
-            out,
-            "\n({withheld} more pair{} not shown - raise --limit)",
+        out.push_str(&format!(
+            "\n({withheld} more pair{} not shown - raise --limit)\n",
             if withheld == 1 { "" } else { "s" }
-        )
-        .expect("write to String is infallible");
+        ));
     }
     while out.ends_with('\n') {
         out.pop();

@@ -364,7 +364,6 @@ pub struct HistoryFilter {
 /// Format a single history entry as a labelled detail block for
 /// `brokkr history <id>`.
 pub fn format_detail(entry: &HistoryEntry) -> String {
-    use std::fmt::Write;
     let mut fields: Vec<(&str, String)> = Vec::new();
     fields.push(("id", entry.id.to_string()));
     fields.push(("timestamp", entry.timestamp.clone()));
@@ -393,7 +392,7 @@ pub fn format_detail(entry: &HistoryEntry) -> String {
     let width = fields.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
     let mut out = String::new();
     for (label, value) in &fields {
-        writeln!(out, "{label:<width$}  {value}").expect("write to String is infallible");
+        out.push_str(&format!("{label:<width$}  {value}\n"));
     }
     if out.ends_with('\n') {
         out.pop();

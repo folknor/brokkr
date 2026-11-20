@@ -345,7 +345,9 @@ fn check_adapter_group(
         .iter()
         .find(|(_, doc)| workspace_dependencies(doc).is_some())
         .map(|(_, doc)| doc)
-        .expect("workspace dependencies came from a scanned manifest");
+        .ok_or_else(|| {
+            DevError::Internal("workspace dependencies came from a scanned manifest".into())
+        })?;
     let workspace_walker = ManifestDeps::new(workspace_manifest);
     let real_names: std::collections::BTreeMap<&str, String> = workspace_walker
         .entries()

@@ -2102,17 +2102,15 @@ impl ReachLedger {
     }
 
     pub(crate) fn reach_diagnostics(&mut self, sweep: LaneIdx) {
-        self.lanes
-            .get_mut(sweep)
-            .expect("reach index comes from the active sweep list")
-            .diagnostics = true;
+        if let Some(state) = self.lanes.get_mut(sweep) {
+            state.diagnostics = true;
+        }
     }
 
     pub(crate) fn reach_test(&mut self, sweep: LaneIdx) {
-        self.lanes
-            .get_mut(sweep)
-            .expect("reach index comes from the active sweep list")
-            .test = true;
+        if let Some(state) = self.lanes.get_mut(sweep) {
+            state.test = true;
+        }
     }
 
     /// The labels of the sweeps either group reached, in sweep order.

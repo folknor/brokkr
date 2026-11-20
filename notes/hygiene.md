@@ -4,13 +4,6 @@ Current gaps only: remove an entry when it is resolved, and delete the file
 once none remain. An entry closed with no action owes a comment at the code
 sites it names, so the finding is not hunted again.
 
-## Panicking code is only partly denied
-
-`unwrap_used`, `print_stdout` and `print_stderr` are denied; `expect_used`
-and `panic` are not, though `.expect(...)` and `panic!` end the process the
-same way. `indexing_slicing` is also off, deliberately: much indexing is
-provably in bounds, so it is a per-site judgement, not a mechanical change.
-
 ## Operator path lines are not all on `output::path`
 
 `output::path` (src/output/paths.rs) prints a project path relative to the invocation directory. Some output lines use it; most `DevError` text and the remaining `.display()` sites (install steps, guard, reservations, registry errors, fixture lint, nextest lane, rustflags, and others) still print absolute. Nothing enforces the helper: `.display()` is also correct for argv, stored values and foreign paths, so a textlint ban would need per-site exemptions. Options: migrate per module as touched, or a typed message representation that keeps paths as `Path` until rendering.

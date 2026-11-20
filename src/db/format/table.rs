@@ -243,9 +243,7 @@ fn compute_table_widths(rows: &[StoredRow], matcher: &DatasetMatcher) -> TableWi
 }
 
 fn append_table_header(out: &mut String, w: &TableWidths) {
-    use std::fmt::Write;
-    write!(
-        out,
+    out.push_str(&format!(
         "{:<uuid_w$}  {:<ts_w$}  {:<cm_w$}  {:<cmd_w$}  {:<var_w$}  {:>el_w$}  {:<in_w$}  {:<args_w$}",
         "uuid",
         "timestamp",
@@ -263,21 +261,18 @@ fn append_table_header(out: &mut String, w: &TableWidths) {
         el_w = w.elapsed,
         in_w = w.input,
         args_w = w.args,
-    )
-    .expect("write to String is infallible");
+    ));
     if w.env > 0 {
-        write!(out, "  {:<env_w$}", "env", env_w = w.env).expect("write to String is infallible");
+        out.push_str(&format!("  {:<env_w$}", "env", env_w = w.env));
     }
 }
 
 fn append_table_row(out: &mut String, row: &StoredRow, w: &TableWidths, matcher: &DatasetMatcher) {
-    use std::fmt::Write;
     let uuid_short = short_uuid(&row.uuid);
     let elapsed_str = format_wall(row.elapsed);
     let input_str = matcher.short_name(&row.input_file);
     let args_str = format_args_summary(row);
-    write!(
-        out,
+    out.push_str(&format!(
         "{:<uuid_w$}  {:<ts_w$}  {:<cm_w$}  {:<cmd_w$}  {:<var_w$}  {:>el_w$}  {:<in_w$}  {:<args_w$}",
         uuid_short,
         row.timestamp,
@@ -295,11 +290,10 @@ fn append_table_row(out: &mut String, row: &StoredRow, w: &TableWidths, matcher:
         el_w = w.elapsed,
         in_w = w.input,
         args_w = w.args,
-    )
-    .expect("write to String is infallible");
+    ));
     if w.env > 0 {
         let env_str = format_env_summary(&row.captured_env);
-        write!(out, "  {env_str:<env_w$}", env_w = w.env).expect("write to String is infallible");
+        out.push_str(&format!("  {env_str:<env_w$}", env_w = w.env));
     }
 }
 

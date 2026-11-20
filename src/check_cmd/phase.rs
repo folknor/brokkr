@@ -634,7 +634,7 @@ fn lint_lanes_for_claim(
     let decls = owed
         .iter()
         .map(|e| profile::sweep_from_check_entry(&e.as_check_entry()))
-        .collect();
+        .collect::<Result<_, _>>()?;
     resolve_invocation_sweeps(decls, invocation.0, invocation.1, &ForwardedArgs::parse(invocation.2))
 }
 

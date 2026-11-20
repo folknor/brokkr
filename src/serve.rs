@@ -267,7 +267,7 @@ pub(crate) fn refuse_measurement(what: &str) -> Result<(), DevError> {
 /// registry only; reconciling is for the commands that act on it.
 pub(crate) fn warn_if_live() {
     static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if cfg!(test) || crate::cli::invocation() == crate::cli::CommandId::Serve {
+    if cfg!(test) || matches!(crate::cli::invocation(), Ok(crate::cli::CommandId::Serve)) {
         return;
     }
     let Some(dir) = registry::dir() else { return };

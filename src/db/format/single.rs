@@ -18,7 +18,6 @@ use super::table::{format_wall, format_wall_value};
 ///
 /// Plus trailing sections for distribution stats and kv pairs when present.
 pub fn format_single_result(row: &StoredRow, has_sidecar: bool) -> String {
-    use std::fmt::Write;
 
     let ident = identity_fields(row);
     let host = host_fields(row);
@@ -61,7 +60,7 @@ pub fn format_single_result(row: &StoredRow, has_sidecar: bool) -> String {
             out.push('\n');
         }
         for (l, v) in sec {
-            writeln!(out, "{l:<max_label$}  {v}").expect("write to String is infallible");
+            out.push_str(&format!("{l:<max_label$}  {v}\n"));
         }
     };
 
@@ -75,13 +74,12 @@ pub fn format_single_result(row: &StoredRow, has_sidecar: bool) -> String {
         out.push('\n');
     }
     for (l, v) in &invo {
-        writeln!(out, "{l:<max_label$}  {v}").expect("write to String is infallible");
+        out.push_str(&format!("{l:<max_label$}  {v}\n"));
     }
     if !row.cli_args.is_empty() {
         let indent = max_label + 2;
         let rendered = format_cli_args_multiline(&row.cli_args, indent);
-        writeln!(out, "{:<max_label$}  {rendered}", "cli_args")
-            .expect("write to String is infallible");
+        out.push_str(&format!("{:<max_label$}  {rendered}\n", "cli_args"));
     }
 
     render_section(&mut out, &extras);

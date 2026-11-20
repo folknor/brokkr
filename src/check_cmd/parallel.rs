@@ -927,6 +927,7 @@ mod parallel_lane_tests {
             name: "default".into(),
             ..Default::default()
         })
+        .expect("sweep resolves")
     }
 
     fn bare_sweep() -> PlannedSweep {

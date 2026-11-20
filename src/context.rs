@@ -70,7 +70,7 @@ pub(crate) fn acquire_cmd_lock_opt(
     // not only the commands that come through here.
     lockfile::acquire(&lockfile::LockContext {
         project: project.map(Project::name),
-        command: crate::cli::invocation(),
+        command: crate::cli::invocation()?,
         project_root,
         build_root,
         tree: configured_tree(),
@@ -156,7 +156,7 @@ impl MeasurementSession {
         // held lock. Path resolution is config alone and asks cargo nothing.
         let lock = lockfile::acquire(&lockfile::LockContext {
             project: Some(project.name()),
-            command: crate::cli::invocation(),
+            command: crate::cli::invocation()?,
             project_root,
             build_root,
             tree: configured_tree(),
@@ -342,7 +342,7 @@ where
             // its checkout exists.
             let lock = lockfile::acquire_without_tree(&lockfile::LockContext {
                 project: project.map(Project::name),
-                command: crate::cli::invocation(),
+                command: crate::cli::invocation()?,
                 project_root,
                 build_root,
                 tree: None,

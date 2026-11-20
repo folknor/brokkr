@@ -119,10 +119,10 @@ pub(crate) fn set_invocation(command: CommandId) {
     // The first installed command wins; a second install is a no-op.
     INVOCATION.set(command).ok();
 }
-pub(crate) fn invocation() -> CommandId {
-    *INVOCATION
-        .get()
-        .expect("command policy is installed before dispatch")
+pub(crate) fn invocation() -> Result<CommandId, crate::error::DevError> {
+    INVOCATION.get().copied().ok_or_else(|| {
+        crate::error::DevError::Internal("command policy is installed before dispatch".into())
+    })
 }
 
 pub(crate) fn visible_to(vis: &Visibility, project: &Project) -> bool {

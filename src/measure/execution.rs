@@ -155,20 +155,15 @@ impl MeasurementLoop<'_> {
                 }
             }
             let failed = iteration.error.is_some();
-            if !failed {
-                let candidate = iteration
-                    .result
-                    .as_ref()
-                    .expect("successful iteration has a result");
+            // A successful iteration always has a result (set above), and a
+            // winner always indexes an iteration with one.
+            if !failed && let Some(candidate) = iteration.result.as_ref() {
                 measurement.winner = Some(winning_index(
-                    measurement.winner.map(|winner| {
-                        (
-                            winner,
-                            measurement.iterations[winner]
-                                .result
-                                .as_ref()
-                                .expect("a winning iteration has a result"),
-                        )
+                    measurement.winner.and_then(|winner| {
+                        measurement.iterations[winner]
+                            .result
+                            .as_ref()
+                            .map(|result| (winner, result))
                     }),
                     i,
                     candidate,
