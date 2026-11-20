@@ -434,8 +434,7 @@ fn protocol_value(line: usize, value: &str) -> Result<String, String> {
             line,
             "protocol",
             value,
-            "one of jmap, imap, smtp, graph, gmail, caldav, carddav, people, \
-             gcal, or discovery",
+            &crate::ratatoskr::saehrimnir::protocol_names_phrase(),
         ));
     }
     Ok(value.to_owned())

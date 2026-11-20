@@ -54,6 +54,11 @@ mode = "ahem"                     # "ahem" or "default"
 pixel_diff_threshold = 0.5
 element_match_threshold = 95.0
 fallback_aspect_ratio = 2.0  # optional, for prepare command
+regression_tolerance = 0.5   # optional, ratchet slack in pp
+pixel_fuzz_percent = 5       # optional, per-channel match tolerance
+position_tolerance = 2.0     # optional, element x/y tolerance in px
+size_tolerance = 5.0         # optional, element w/h tolerance in px
+offender_print_limit = 10    # optional, offenders printed per failing row
 
 [[litehtml.fixture]]
 id = "creatine_hero"
@@ -82,6 +87,16 @@ thresholds are percentages in percentage points. `mode` is `ahem` (pass
 The optional `fallback_aspect_ratio` is used only by `prepare` and must be
 finite and greater than zero. When omitted, brokkr supplies its default value.
 Fixture viewport overrides must also be greater than zero.
+
+The comparison-policy keys are optional and project-wide; each absent key
+takes the value shown above. `regression_tolerance` is how far a score may
+move past its approval before it is a `REGRESSION`; `pixel_fuzz_percent` (an
+integer 0 to 100) is the per-channel difference still counted as a matching
+pixel; `position_tolerance` and `size_tolerance` bound an element's geometry
+deltas before it is an offender; `offender_print_limit` caps the offenders
+printed under a failing row (0 prints only the pointer to `offenders.txt`,
+which always holds the full list). The tolerances must be finite and at least
+zero. See `docs/commands/visual.md` for how each is applied.
 
 Each `[[litehtml.fixture]]` requires a unique, path-safe `id`, an HTML `path`,
 and `expected = "pass" | "fail"`. `tags` is an optional list used by

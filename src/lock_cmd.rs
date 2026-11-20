@@ -726,9 +726,16 @@ fn hard_kill(info: &lockfile::LockInfo) -> Result<(), DevError> {
         .chain(info.mocks.iter().map(|(pid, start)| ("mock", *pid, start)));
     let mut targets = Vec::new();
     let mut skipped = Vec::new();
+    // Recorded processes whose own generation is gone (or goes before its
+    // signal lands): a group they led may still have live members, which
+    // only `kill_leaderless_group` reaches once they leave brokkr's tree.
+    let mut leaderless = Vec::new();
     for (role, pid, starttime) in recorded {
         if provably_gone(info, pid, starttime) {
             skipped.push((role, pid));
+            if let Some(start) = crate::process::StartTicks::parse(starttime) {
+                leaderless.push((role, pid, start));
+            }
             continue;
         }
         targets.push(
@@ -765,12 +772,22 @@ fn hard_kill(info: &lockfile::LockInfo) -> Result<(), DevError> {
                 target.role, target.pid
             ));
         }
+        if matches!(delivery, Ok(false)) {
+            leaderless.push((
+                target.role,
+                target.pid,
+                target.process.identity().start(),
+            ));
+        }
         output::lock_msg(&format!(
             "SIGKILL {} {kind} {}: {}",
             target.role,
             target.pid,
             describe_delivery(&delivery),
         ));
+    }
+    for &(role, pgid, leader_start) in &leaderless {
+        kill_leaderless_group(info, role, pgid, leader_start, &mut failed);
     }
     // Then everything else beneath brokkr. The recorded child is only the
     // process brokkr published: a test binary under cargo, a rustc under a
@@ -898,6 +915,104 @@ fn provably_gone(info: &lockfile::LockInfo, pid: u32, starttime: &str) -> bool {
     })
 }
 
+/// SIGKILL the surviving members of a group a recorded child or mock led,
+/// once that leader is gone: members reparented away from brokkr are beyond
+/// the descendant sweep, and with the leader's generation gone there is no
+/// identity to re-verify before a `kill(-pgid)`.
+///
+/// No group signal is sent. The pgid number stays allocated while any member
+/// lives, but once every member has exited it can be reused by an unrelated
+/// group, and nothing about the group itself tells the two apart. So each
+/// member is judged and signalled alone: it must be in group `pgid`, have
+/// started no earlier than the recorded leader, and carry this acquisition's
+/// launch cohort in `BROKKR_EXEC` - a 128-bit random id every process spawned
+/// under the hold inherits, which a stranger's group cannot hold by accident.
+/// The member is then pinned to a pidfd under the recorded boot and its group
+/// re-read before the signal, so PID reuse during the walk cannot redirect
+/// it. A member whose environment cannot be read (another user, `hidepid`)
+/// or that exec'd with a cleared one is left alone. Two sweeps, for a member
+/// forked mid-walk; failures join `failed`.
+fn kill_leaderless_group(
+    info: &lockfile::LockInfo,
+    role: &'static str,
+    pgid: u32,
+    leader_start: crate::process::StartTicks,
+    failed: &mut Vec<String>,
+) {
+    if info.acq_id.is_empty() {
+        return;
+    }
+    let Some(boot) = crate::process::BootId::new(&info.boot_id) else {
+        return;
+    };
+    let exclude = [info.pid, std::process::id()];
+    let mut killed = 0usize;
+    for _ in 0..2 {
+        let Ok(table) = crate::process::ProcTable::snapshot() else {
+            break;
+        };
+        for (pid, row) in table.iter() {
+            if exclude.contains(&pid.get()) || !in_leaderless_group(row, pgid, leader_start) {
+                continue;
+            }
+            let marker = crate::process::environ_value(pid.get(), crate::process::spawn::EXEC_ENV);
+            if !marked_for(marker.as_deref(), &info.acq_id) {
+                continue;
+            }
+            let Ok(member) = crate::process::VerifiedProcess::open(row.identity(), Some(&boot))
+            else {
+                continue;
+            };
+            let still_member = crate::process::ProcStat::read(*pid).is_ok_and(|now| {
+                now.identity() == row.identity() && in_leaderless_group(&now, pgid, leader_start)
+            });
+            if !still_member {
+                continue;
+            }
+            match member.send_signal(libc::SIGKILL) {
+                Ok(true) => killed += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    failed.push(format!(
+                        "SIGKILL {role} PG {pgid} member PID {}: {e}",
+                        pid.get()
+                    ));
+                    output::lock_msg(&format!(
+                        "SIGKILL {role} PG {pgid} member PID {}: FAILED ({e})",
+                        pid.get()
+                    ));
+                }
+            }
+        }
+    }
+    if killed > 0 {
+        output::lock_msg(&format!(
+            "SIGKILL sent to {} left in {role} PG {pgid} after its leader exited",
+            output::count(killed, "process")
+        ));
+    }
+}
+
+/// Whether a process row could be a member of the group a recorded leader
+/// (`pgid`, started at `leader_start`) created: in that group, and started no
+/// earlier than the leader. Necessary, never sufficient - a reused pgid passes
+/// too, which is what [`marked_for`] rules out.
+fn in_leaderless_group(
+    row: &crate::process::ProcStat,
+    pgid: u32,
+    leader_start: crate::process::StartTicks,
+) -> bool {
+    row.group().map(crate::process::Pid::get) == Some(pgid) && row.start() >= leader_start
+}
+
+/// Whether a `BROKKR_EXEC` value names launch cohort of acquisition `acq`.
+fn marked_for(marker: Option<&str>, acq: &str) -> bool {
+    !acq.is_empty()
+        && marker
+            .and_then(lockfile::observe::parse_exec)
+            .is_some_and(|(owner, _)| owner == acq)
+}
+
 fn typed_process_identity(pid: u32, starttime: &str) -> Option<crate::process::ProcIdentity> {
     Some(crate::process::ProcIdentity::new(
         crate::process::Pid::new(pid)?,
@@ -989,5 +1104,42 @@ mod tests {
 
         assert!(!KillScope::Project(String::new()).covers(false, "", "/a"));
         assert!(KillScope::All.covers(false, "", "/b"));
+    }
+
+    /// A stat row for `pid` in group `pgrp`, started at `start` ticks.
+    #[allow(clippy::expect_used)]
+    fn row(pid: u32, pgrp: u32, start: u64) -> crate::process::ProcStat {
+        crate::process::ProcStat::parse(&format!(
+            "{pid} (cmd) S 1 {pgrp} {pgrp} 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 {start} 0 0"
+        ))
+        .expect("synthetic stat row parses")
+    }
+
+    /// A leaderless group's candidate is in the recorded pgid and started
+    /// no earlier than the recorded leader; anything else is out.
+    #[test]
+    fn a_leaderless_member_is_in_the_group_and_not_older_than_its_leader() {
+        use super::in_leaderless_group;
+        let leader = crate::process::StartTicks::new(1000);
+        assert!(in_leaderless_group(&row(50, 40, 1000), 40, leader));
+        assert!(in_leaderless_group(&row(50, 40, 5000), 40, leader));
+        assert!(!in_leaderless_group(&row(50, 40, 999), 40, leader));
+        assert!(!in_leaderless_group(&row(50, 41, 5000), 40, leader));
+        assert!(!in_leaderless_group(&row(50, 0, 5000), 40, leader));
+    }
+
+    /// Only this acquisition's launch cohort marks a member as ours: a reused
+    /// pgid's members carry another cohort or none, and an empty recorded
+    /// acquisition id proves nothing.
+    #[test]
+    fn only_this_acquisitions_cohort_marks_a_member() {
+        use super::marked_for;
+        let acq = "0123456789abcdef0123456789abcdef";
+        assert!(marked_for(Some(&format!("{acq}.7")), acq));
+        assert!(!marked_for(Some("fedcba98765432100123456789abcdef.7"), acq));
+        assert!(!marked_for(Some(acq), acq));
+        assert!(!marked_for(Some(&format!("{acq}.x")), acq));
+        assert!(!marked_for(None, acq));
+        assert!(!marked_for(Some(".7"), ""));
     }
 }

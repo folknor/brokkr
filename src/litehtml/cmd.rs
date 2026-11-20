@@ -106,7 +106,11 @@ impl Subject for TestContext<'_> {
             outcome.status,
             compare::Status::FailThreshold | compare::Status::Regression
         ) {
-            print_offenders(&fixture.id, &outcome.offenders);
+            print_offenders(
+                &fixture.id,
+                &outcome.offenders,
+                self.config.effective_offender_print_limit(),
+            );
         }
     }
 
@@ -368,11 +372,20 @@ fn score_fixture(
     // the latter enforced neither the element threshold nor the ratchet, and
     // approving it stored a NULL element baseline that disabled the element
     // ratchet for good.
-    let px = match compare::compare_pixels(&pipeline_png, ref_png, &diff_png) {
+    let px = match compare::compare_pixels(
+        &pipeline_png,
+        ref_png,
+        &diff_png,
+        ctx.config.effective_pixel_fuzz_percent(),
+    ) {
         Ok(px) => px,
         Err(e) => return record_error(ctx, fixture, &format!("pixel comparison failed: {e}")),
     };
-    let em = match compare::compare_elements(&pipeline_json, ref_json) {
+    let em = match compare::compare_elements(
+        &pipeline_json,
+        ref_json,
+        compare::ElementComparisonPolicy::from_config(ctx.config),
+    ) {
         Ok(em) => em,
         Err(e) => return record_error(ctx, fixture, &format!("element comparison failed: {e}")),
     };
@@ -385,6 +398,7 @@ fn score_fixture(
         thresholds: compare::ComparisonThresholds {
             pixel: pixel_threshold,
             element: element_threshold,
+            regression_tolerance: ctx.config.effective_regression_tolerance(),
         },
         expected_fail,
         approved: compare::ApprovedScores {
@@ -446,12 +460,10 @@ fn format_offender(o: &compare::Offender) -> String {
     )
 }
 
-/// Presentation limit for each table row; comparison tolerances live in
-/// `compare.rs`, and the complete offender list is persisted separately.
-const OFFENDER_PRINT_LIMIT: usize = 10;
-
-fn print_offenders(fixture_id: &str, offenders: &[compare::Offender]) {
-    for line in offender_messages(fixture_id, offenders, OFFENDER_PRINT_LIMIT) {
+/// Print at most `limit` offenders under a failing row (`[litehtml]
+/// offender_print_limit`); the complete list is persisted separately.
+fn print_offenders(fixture_id: &str, offenders: &[compare::Offender], limit: usize) {
+    for line in offender_messages(fixture_id, offenders, limit) {
         output::litehtml_msg(&line);
     }
 }
@@ -954,9 +966,17 @@ pub(crate) fn status(
     ));
     output::litehtml_msg(&format!("  {}", "\u{2500}".repeat(70)));
 
+    let regression_tolerance = litehtml_config.effective_regression_tolerance();
     for fixture in &litehtml_config.fixtures {
         let width = fixture.resolved_viewport_width(litehtml_config);
-        print_fixture_status(fixture, width, &approvals, &db, &fixtures_root)?;
+        print_fixture_status(
+            fixture,
+            width,
+            regression_tolerance,
+            &approvals,
+            &db,
+            &fixtures_root,
+        )?;
     }
 
     Ok(())
@@ -971,6 +991,7 @@ pub(crate) fn status(
 fn print_fixture_status(
     fixture: &LitehtmlFixture,
     width: u32,
+    regression_tolerance: f64,
     approvals: &[super::db::Approval],
     db: &MechanicalDb,
     fixtures_root: &Path,
@@ -1034,6 +1055,7 @@ fn print_fixture_status(
             latest.as_ref().and_then(|row| row.pixel_diff_pct),
             applicable_approval.map(|entry| entry.pixel_diff_pct),
             true,
+            regression_tolerance,
         ),
     };
     output::litehtml_msg(&engine::format_status_row(
@@ -1469,6 +1491,11 @@ mod tests {
             pixel_diff_threshold: 0.5,
             element_match_threshold: 95.0,
             fallback_aspect_ratio: None,
+            regression_tolerance: None,
+            pixel_fuzz_percent: None,
+            position_tolerance: None,
+            size_tolerance: None,
+            offender_print_limit: None,
             fixtures,
         }
     }

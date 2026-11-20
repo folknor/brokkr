@@ -60,7 +60,11 @@ an orchestration command never widens the per-crate feature graph that
 
 See `RatatoskrConfig` rustdoc in
 `src/config_parts/project_config/ratatoskr.rs` and `HarnessConfig` in
-`src/config_parts/schema.rs` for the fields. The orchestration commands
+`src/config_parts/schema.rs` for the fields. The protocol list itself is
+spelled once, in the `ratatoskr_protocols!` registry in that same
+`ratatoskr.rs`: it drives the `test_endpoint_env_<protocol>` keys, the
+sentinel parse, the endpoint shapes and the frontmatter `protocol` values.
+The orchestration commands
 accept `--debug` / `--release` / `--profile <name>` (mutually exclusive) to
 override the toml on a per-invocation basis. Every run's `run.toml` records
 the `profile` the harness was built under.

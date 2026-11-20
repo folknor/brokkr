@@ -3,6 +3,9 @@ use serde::Deserialize;
 use std::collections::HashSet;
 
 const DEFAULT_FALLBACK_ASPECT_RATIO: f64 = 2.0;
+pub(crate) const DEFAULT_POSITION_TOLERANCE: f64 = 2.0;
+pub(crate) const DEFAULT_SIZE_TOLERANCE: f64 = 5.0;
+pub(crate) const DEFAULT_OFFENDER_PRINT_LIMIT: usize = 10;
 
 /// Which pipeline renders a fixture: `ahem` (the Ahem-font fixture mode) or
 /// `default` (the normal invocation, which omits `--fixture`).
@@ -40,6 +43,26 @@ pub struct LitehtmlConfig {
     pub pixel_diff_threshold: f64,
     pub element_match_threshold: f64,
     pub fallback_aspect_ratio: Option<f64>,
+    /// Ratchet slack in percentage points; absent means
+    /// [`crate::visual::status::DEFAULT_REGRESSION_TOLERANCE`].
+    #[serde(default)]
+    pub regression_tolerance: Option<f64>,
+    /// Per-channel pixel tolerance, percent of 0-255; absent means
+    /// [`crate::visual::compare::DEFAULT_PIXEL_FUZZ_PERCENT`].
+    #[serde(default)]
+    pub pixel_fuzz_percent: Option<i64>,
+    /// Element x/y tolerance in CSS px; absent means
+    /// [`DEFAULT_POSITION_TOLERANCE`].
+    #[serde(default)]
+    pub position_tolerance: Option<f64>,
+    /// Element w/h tolerance in CSS px; absent means
+    /// [`DEFAULT_SIZE_TOLERANCE`].
+    #[serde(default)]
+    pub size_tolerance: Option<f64>,
+    /// How many offenders a failing row prints; absent means
+    /// [`DEFAULT_OFFENDER_PRINT_LIMIT`]. The full list is always written.
+    #[serde(default)]
+    pub offender_print_limit: Option<i64>,
     #[serde(rename = "fixture")]
     pub fixtures: Vec<LitehtmlFixture>,
 }
@@ -102,6 +125,25 @@ impl LitehtmlConfig {
                 "[litehtml].fallback_aspect_ratio must be a finite number greater than zero".into(),
             ));
         }
+        if let Some(fuzz) = self.pixel_fuzz_percent {
+            crate::visual::compare::validate_fuzz_percent("litehtml", fuzz)?;
+        }
+        if let Some(limit) = self.offender_print_limit
+            && limit < 0
+        {
+            return Err(DevError::Config(format!(
+                "[litehtml].offender_print_limit must be >= 0, got {limit}"
+            )));
+        }
+        for (key, value) in [
+            ("regression_tolerance", self.regression_tolerance),
+            ("position_tolerance", self.position_tolerance),
+            ("size_tolerance", self.size_tolerance),
+        ] {
+            if let Some(value) = value {
+                crate::visual::status::validate_tolerance("litehtml", key, value)?;
+            }
+        }
 
         let mut ids = HashSet::new();
         for fixture in &self.fixtures {
@@ -127,6 +169,32 @@ impl LitehtmlConfig {
     pub fn effective_fallback_aspect_ratio(&self) -> f64 {
         self.fallback_aspect_ratio
             .unwrap_or(DEFAULT_FALLBACK_ASPECT_RATIO)
+    }
+
+    pub fn effective_regression_tolerance(&self) -> f64 {
+        self.regression_tolerance
+            .unwrap_or(crate::visual::status::DEFAULT_REGRESSION_TOLERANCE)
+    }
+
+    /// Load-time validation guarantees 0..=100.
+    pub fn effective_pixel_fuzz_percent(&self) -> u8 {
+        self.pixel_fuzz_percent
+            .and_then(|p| u8::try_from(p).ok())
+            .unwrap_or(crate::visual::compare::DEFAULT_PIXEL_FUZZ_PERCENT)
+    }
+
+    pub fn effective_position_tolerance(&self) -> f64 {
+        self.position_tolerance.unwrap_or(DEFAULT_POSITION_TOLERANCE)
+    }
+
+    pub fn effective_size_tolerance(&self) -> f64 {
+        self.size_tolerance.unwrap_or(DEFAULT_SIZE_TOLERANCE)
+    }
+
+    pub fn effective_offender_print_limit(&self) -> usize {
+        self.offender_print_limit
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(DEFAULT_OFFENDER_PRINT_LIMIT)
     }
 
     pub fn fixtures_for_suite(&self, suite: &str) -> Vec<&LitehtmlFixture> {
@@ -178,6 +246,40 @@ mod tests {
         for invalid in ["0.0", "nan", "inf", "-1.0"] {
             let body = format!("{BASE}viewport_width = 800\nfallback_aspect_ratio = {invalid}\n");
             assert!(parse_str(&body).is_err(), "{invalid} accepted");
+        }
+    }
+
+    #[test]
+    fn comparison_policy_defaults_and_validation() {
+        let cfg = parse_str(&format!("{BASE}viewport_width = 800\n")).unwrap();
+        assert_eq!(cfg.effective_regression_tolerance(), 0.5);
+        assert_eq!(cfg.effective_pixel_fuzz_percent(), 5);
+        assert_eq!(cfg.effective_position_tolerance(), 2.0);
+        assert_eq!(cfg.effective_size_tolerance(), 5.0);
+        assert_eq!(cfg.effective_offender_print_limit(), 10);
+
+        let cfg = parse_str(&format!(
+            "{BASE}viewport_width = 800\nregression_tolerance = 1.0\npixel_fuzz_percent = 0\n\
+             position_tolerance = 0.0\nsize_tolerance = 3.5\noffender_print_limit = 0\n"
+        ))
+        .unwrap();
+        assert_eq!(cfg.effective_regression_tolerance(), 1.0);
+        assert_eq!(cfg.effective_pixel_fuzz_percent(), 0);
+        assert_eq!(cfg.effective_size_tolerance(), 3.5);
+        assert_eq!(cfg.effective_offender_print_limit(), 0);
+
+        for (key, bad) in [
+            ("regression_tolerance", "-0.1"),
+            ("regression_tolerance", "nan"),
+            ("position_tolerance", "inf"),
+            ("size_tolerance", "-1.0"),
+            ("pixel_fuzz_percent", "101"),
+            ("pixel_fuzz_percent", "-1"),
+            ("offender_print_limit", "-1"),
+        ] {
+            let err = parse_str(&format!("{BASE}viewport_width = 800\n{key} = {bad}\n"))
+                .expect_err(&format!("{key} = {bad} accepted"));
+            assert!(err.to_string().contains(key), "{key}: {err}");
         }
     }
 

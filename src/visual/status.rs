@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
+use crate::error::DevError;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Status {
     Pass,
@@ -40,13 +42,14 @@ impl Status {
         current_pixel_diff: Option<f64>,
         approved_pixel_diff: Option<f64>,
         show_unapproved_pass: bool,
+        regression_tolerance: f64,
     ) -> &'static str {
         match self {
             Status::Pass
                 if matches!(
                     (current_pixel_diff, approved_pixel_diff),
                     (Some(current), Some(approved))
-                        if current < approved - REGRESSION_TOLERANCE
+                        if current < approved - regression_tolerance
                 ) =>
             {
                 " (improved)"
@@ -138,12 +141,30 @@ impl StatusTally {
     }
 }
 
-pub(crate) const REGRESSION_TOLERANCE: f64 = 0.5;
+/// Default ratchet slack, in percentage points: how far a score may drift
+/// past its approved baseline before it is a REGRESSION (and how far it must
+/// improve to be annotated as improved). Configurable per subject as
+/// `regression_tolerance`.
+pub(crate) const DEFAULT_REGRESSION_TOLERANCE: f64 = 0.5;
+/// Below the `{:+.1}` display quantum, a delta prints as no change. Tied to
+/// the format, so not configurable.
 const DISPLAY_DELTA_TOLERANCE: f64 = 0.05;
 
 pub(crate) struct ComparisonThresholds {
     pub(crate) pixel: f64,
     pub(crate) element: Option<f64>,
+    pub(crate) regression_tolerance: f64,
+}
+
+/// Load-time check for a non-negative finite percentage-point tolerance.
+pub(crate) fn validate_tolerance(section: &str, key: &str, value: f64) -> Result<(), DevError> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(())
+    } else {
+        Err(DevError::Config(format!(
+            "[{section}].{key} must be a finite number >= 0, got {value}"
+        )))
+    }
 }
 
 pub(crate) struct ApprovedScores {
@@ -174,12 +195,12 @@ pub(crate) fn determine_status(input: &StatusInput) -> Status {
         return Status::FailThreshold;
     }
     if let Some(approved) = input.approved.pixel
-        && input.pixel_diff_pct > approved + REGRESSION_TOLERANCE
+        && input.pixel_diff_pct > approved + input.thresholds.regression_tolerance
     {
         return Status::Regression;
     }
     if let (Some(current), Some(approved)) = (input.element_match_pct, input.approved.element)
-        && current < approved - REGRESSION_TOLERANCE
+        && current < approved - input.thresholds.regression_tolerance
     {
         return Status::Regression;
     }
@@ -212,6 +233,7 @@ pub(crate) fn status_columns(
     current_pixel_diff: Option<f64>,
     approved_pixel_diff: Option<f64>,
     show_unapproved_pass: bool,
+    regression_tolerance: f64,
 ) -> StatusColumns {
     let Some(status) = status else {
         return StatusColumns {
@@ -231,6 +253,7 @@ pub(crate) fn status_columns(
                 current_pixel_diff,
                 approved_pixel_diff,
                 show_unapproved_pass,
+                regression_tolerance,
             )
             .to_owned(),
     }

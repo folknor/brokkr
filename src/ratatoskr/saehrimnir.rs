@@ -19,7 +19,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::clean::layout::ProjectState;
-use crate::config::project_config::ratatoskr::RatatoskrConfig;
+use crate::config::project_config::ratatoskr::{EndpointFormat, RatatoskrConfig};
 use crate::error::{DevError, ProcessEnding};
 use crate::lockfile::LockGuard;
 use crate::output;
@@ -29,63 +29,21 @@ pub use crate::ratatoskr::timing::{READINESS_BUDGET, SHUTDOWN_BUDGET};
 
 const MOCK_HOST: &str = "127.0.0.1";
 
-/// A protocol exposed by sæhrimnir's readiness sentinel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(usize)]
-pub(crate) enum Protocol {
-    Jmap,
-    Imap,
-    Smtp,
-    Graph,
-    Gmail,
-    Caldav,
-    Carddav,
-    People,
-    Gcal,
-    #[doc(hidden)]
-    __Count,
-}
+// The protocol registry lives beside the config keys it backs; this module
+// adds the sentinel and endpoint behaviour on top of it.
+pub(crate) use crate::config::project_config::ratatoskr::Protocol;
+
+/// `discovery` is a harness annotation for WebFinger tests; sæhrimnir
+/// serves it through JMAP and does not expose a separate listener.
+const DISCOVERY_ANNOTATION: &str = "discovery";
 
 impl Protocol {
-    pub(crate) const COUNT: usize = Self::__Count as usize;
-    const ALL: [Self; Self::COUNT] = [
-        Self::Jmap,
-        Self::Imap,
-        Self::Smtp,
-        Self::Graph,
-        Self::Gmail,
-        Self::Caldav,
-        Self::Carddav,
-        Self::People,
-        Self::Gcal,
-    ];
-
-    fn index(self) -> usize {
-        self as usize
-    }
-
-    pub(crate) fn all() -> impl Iterator<Item = Self> {
-        Self::ALL.into_iter()
-    }
-
     fn from_sentinel(name: &str) -> Option<Self> {
         Self::all().find(|protocol| protocol.sentinel_name() == name)
     }
 
-    pub(crate) fn name(self) -> &'static str {
-        self.spec().name
-    }
-
-    fn sentinel_name(self) -> &'static str {
-        self.spec().sentinel_name
-    }
-
-    fn configured_env(self, cfg: &RatatoskrConfig) -> Option<&str> {
-        (self.spec().endpoint_env)(cfg)
-    }
-
     fn endpoint(self, port: u16) -> String {
-        match self.spec().format {
+        match self.endpoint_format() {
             EndpointFormat::HttpOrigin => format!("http://{MOCK_HOST}:{port}"),
             EndpointFormat::HostPort => format!("{MOCK_HOST}:{port}"),
         }
@@ -93,9 +51,20 @@ impl Protocol {
 }
 
 pub(crate) fn is_protocol_name(name: &str) -> bool {
-    // `discovery` is a harness annotation for WebFinger tests; sæhrimnir
-    // serves it through JMAP and does not expose a separate listener.
-    name == "discovery" || Protocol::all().any(|protocol| protocol.name() == name)
+    name == DISCOVERY_ANNOTATION || Protocol::all().any(|protocol| protocol.name() == name)
+}
+
+/// The accepted `protocol` frontmatter values, for refusal messages:
+/// every protocol name, then `discovery`.
+pub(crate) fn protocol_names_phrase() -> String {
+    let mut phrase = String::from("one of ");
+    for protocol in Protocol::all() {
+        phrase.push_str(protocol.name());
+        phrase.push_str(", ");
+    }
+    phrase.push_str("or ");
+    phrase.push_str(DISCOVERY_ANNOTATION);
+    phrase
 }
 
 /// Validated sæhrimnir locations shared by service and sync preflight.
@@ -170,89 +139,9 @@ fn safe_fixture_dir_name(name: &str) -> String {
         .collect()
 }
 
-#[derive(Clone, Copy)]
-enum EndpointFormat {
-    HttpOrigin,
-    HostPort,
-}
-
-type EndpointEnvLookup = for<'a> fn(&'a RatatoskrConfig) -> Option<&'a str>;
-
-struct ProtocolSpec {
-    name: &'static str,
-    sentinel_name: &'static str,
-    format: EndpointFormat,
-    endpoint_env: EndpointEnvLookup,
-}
-
-// This exhaustive match is the protocol registry. A new variant must
-// supply its sentinel name, typed config accessor and endpoint shape; the enum's
-// `all` iterator then drives parsing and output consistently.
-impl Protocol {
-    fn spec(self) -> ProtocolSpec {
-        match self {
-            Self::Jmap => ProtocolSpec {
-                name: "jmap",
-                sentinel_name: "JMAP",
-                format: EndpointFormat::HttpOrigin,
-                endpoint_env: |cfg| cfg.test_endpoint_env_jmap.as_deref(),
-            },
-            Self::Imap => ProtocolSpec {
-                name: "imap",
-                sentinel_name: "IMAP",
-                format: EndpointFormat::HostPort,
-                endpoint_env: |cfg| cfg.test_endpoint_env_imap.as_deref(),
-            },
-            Self::Smtp => ProtocolSpec {
-                name: "smtp",
-                sentinel_name: "SMTP",
-                format: EndpointFormat::HostPort,
-                endpoint_env: |cfg| cfg.test_endpoint_env_smtp.as_deref(),
-            },
-            Self::Graph => ProtocolSpec {
-                name: "graph",
-                sentinel_name: "GRAPH",
-                format: EndpointFormat::HttpOrigin,
-                endpoint_env: |cfg| cfg.test_endpoint_env_graph.as_deref(),
-            },
-            Self::Gmail => ProtocolSpec {
-                name: "gmail",
-                sentinel_name: "GMAIL",
-                format: EndpointFormat::HttpOrigin,
-                endpoint_env: |cfg| cfg.test_endpoint_env_gmail.as_deref(),
-            },
-            Self::Caldav => ProtocolSpec {
-                name: "caldav",
-                sentinel_name: "CALDAV",
-                format: EndpointFormat::HttpOrigin,
-                endpoint_env: |cfg| cfg.test_endpoint_env_caldav.as_deref(),
-            },
-            Self::Carddav => ProtocolSpec {
-                name: "carddav",
-                sentinel_name: "CARDDAV",
-                format: EndpointFormat::HttpOrigin,
-                endpoint_env: |cfg| cfg.test_endpoint_env_carddav.as_deref(),
-            },
-            Self::People => ProtocolSpec {
-                name: "people",
-                sentinel_name: "PEOPLE",
-                format: EndpointFormat::HttpOrigin,
-                endpoint_env: |cfg| cfg.test_endpoint_env_people.as_deref(),
-            },
-            Self::Gcal => ProtocolSpec {
-                name: "gcal",
-                sentinel_name: "GCAL",
-                format: EndpointFormat::HttpOrigin,
-                endpoint_env: |cfg| cfg.test_endpoint_env_gcal.as_deref(),
-            },
-            Self::__Count => unreachable!("protocol count marker has no metadata"),
-        }
-    }
-}
-
 /// Resolved per-protocol listening ports parsed out of sæhrimnir's
 /// readiness sentinel. Every entry is required - sæhrimnir always binds
-/// all nine listeners and the sentinel carries one line per protocol.
+/// every protocol's listener and the sentinel carries one line per protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Endpoints {
     ports: [u16; Protocol::COUNT],
@@ -269,20 +158,9 @@ impl Endpoints {
     }
 }
 
-/// Parse sæhrimnir's readiness sentinel. Expects exactly nine lines,
-/// one per protocol, in any order:
-///
-/// ```text
-/// JMAP <port>
-/// IMAP <port>
-/// SMTP <port>
-/// GRAPH <port>
-/// GMAIL <port>
-/// CALDAV <port>
-/// CARDDAV <port>
-/// PEOPLE <port>
-/// GCAL <port>
-/// ```
+/// Parse sæhrimnir's readiness sentinel. Expects exactly one
+/// `<SENTINEL_NAME> <port>` line per [`Protocol`], in any order
+/// (`JMAP 12345`, `IMAP 23456`, ...).
 ///
 /// Whitespace between name and port is one-or-more ASCII spaces.
 /// Blank lines are tolerated (the file is written atomically via
@@ -754,7 +632,7 @@ pub fn require_path(
 }
 
 /// Build a list of `(env_var_name, value)` pairs for the protocols whose
-/// `test_endpoint_env_<proto>` field is set in `[ratatoskr]`. Owned
+/// `test_endpoint_env_<proto>` key is set in `[ratatoskr]`. Owned
 /// strings so the caller can hand `&str` views into
 /// `run_captured_with_env_and_deadline` without lifetime gymnastics.
 ///
@@ -767,8 +645,8 @@ pub fn require_path(
 pub fn endpoint_env_pairs(cfg: &RatatoskrConfig, endpoints: &Endpoints) -> Vec<(String, String)> {
     Protocol::all()
         .filter_map(|protocol| {
-            protocol
-                .configured_env(cfg)
+            cfg.test_endpoint_env
+                .get(protocol)
                 .map(|name| (name.to_owned(), protocol.endpoint(endpoints.port(protocol))))
         })
         .collect()

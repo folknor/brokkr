@@ -179,6 +179,14 @@ exactly that movement. References are local files brokkr publishes, so the
 only path that replaces one under an approval is that explicit flag; a hand
 edit of the files is not detected.
 
+## Pixel comparison
+
+Both subjects pad the two PNGs to the larger size and count a pixel as
+different when any of its R, G or B channels differs by more than
+`pixel_fuzz_percent` (default 5) percent of 255, rounded to the nearest step
+(13 at the default). Alpha is not compared. The pixel score is the share of
+differing pixels; `diff.png` marks them red.
+
 ## Element comparison (litehtml only)
 
 `compare_elements` joins the pipeline and Chrome layout dumps by dom path
@@ -189,9 +197,10 @@ not positional). Scoring is designed to be honest rather than flattering:
   box when the parent resolves in both dumps (roots and orphaned elements
   fall back to absolute). Cumulative document drift - integer-vs-fractional
   line-height rounding accumulates ~6px over a 10,000px email - cancels
-  out instead of failing every element below the drift point, so the 2px
-  position tolerance means "sits wrong inside its parent". Sizes (5px
-  tolerance) are always absolute.
+  out instead of failing every element below the drift point, so the
+  position tolerance (`[litehtml] position_tolerance`, default 2px) means
+  "sits wrong inside its parent". Sizes (`size_tolerance`, default 5px) are
+  always absolute.
 - **`head` is filtered from both sides** - the `head` element and its
   subtree, matched by whole path segment, so `thead` is scored.
 - **Both dumps are required.** A missing or unreadable `pipeline.json` /
@@ -215,8 +224,8 @@ not positional). Scoring is designed to be honest rather than flattering:
 
 Matched-but-out-of-tolerance elements are **offenders**: the full list
 lands in `fixtures/<id>/offenders.txt` (worst first, deltas are
-pipeline-minus-reference), and the highest-ranked offenders print below the
-fixture's row when its status is `FAIL_THRESHOLD` or `REGRESSION`. The file is
+pipeline-minus-reference), and the highest-ranked offenders (up to
+`[litehtml] offender_print_limit`, default 10) print below the fixture's row when its status is `FAIL_THRESHOLD` or `REGRESSION`. The file is
 removed only when a run finds that fixture completely clean - a PASS whose
 score cleared the threshold can still keep a file listing its out-of-tolerance
 stragglers.
@@ -245,8 +254,10 @@ A sluggrs snapshot with an approval record but no `approved.png` is an
 `ERROR`, not `NO_BASELINE`: the baseline was deleted, not never set.
 
 `REGRESSION` is the ratchet against the approved baseline, on either
-metric: pixel diff rising more than 0.5pp above the approved value, or
-element match dropping more than 0.5pp below it. Absolute thresholds
+metric: pixel diff rising more than the subject's `regression_tolerance`
+(default 0.5pp) above the approved value, or element match dropping more than
+it below. The same tolerance decides the `(improved)` annotation in `status`.
+Absolute thresholds
 can't be meaningful across fixtures (denominator bias, email length);
 the ratchet is the gate, absolute numbers are for humans.
 

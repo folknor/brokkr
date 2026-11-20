@@ -11,6 +11,8 @@ compares them with approved PNGs.
 width = 800
 height = 600
 pixel_diff_threshold = 0.5
+regression_tolerance = 0.5   # optional, ratchet slack in pp
+pixel_fuzz_percent = 5       # optional, per-channel match tolerance
 
 [[sluggrs.snapshot]]
 id = "home"
@@ -20,7 +22,10 @@ optional_fonts = ["assets/fonts/emoji.ttf"]
 ```
 
 `[sluggrs]` requires `width`, `height`, and `pixel_diff_threshold`. The
-threshold is a pixel-difference percentage in percentage points.
+threshold is a pixel-difference percentage in percentage points. The optional
+`regression_tolerance` (finite, at least zero) and `pixel_fuzz_percent`
+(integer 0 to 100) default to the values shown and mean what they do for
+litehtml; see `docs/commands/visual.md`.
 
 Each `[[sluggrs.snapshot]]` requires a unique, path-safe `id`, a `description`,
 and a `fonts` list. Font paths are resolved under the project config root and

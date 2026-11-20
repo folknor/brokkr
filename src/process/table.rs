@@ -10,6 +10,8 @@ pub struct ProcStat {
     comm: String,
     state: char,
     parent: Option<Pid>,
+    /// The process group id (`pgrp`, field 5); `None` for 0.
+    group: Option<Pid>,
     user_ticks: u64,
     system_ticks: u64,
     minor_faults: u64,
@@ -58,6 +60,7 @@ impl ProcStat {
         }
         let state = fields.first()?.chars().next()?;
         let parent = fields.get(1)?.parse::<u32>().ok().and_then(Pid::new);
+        let group = fields.get(2)?.parse::<u32>().ok().and_then(Pid::new);
         let user_ticks = fields.get(11)?.parse().ok()?;
         let system_ticks = fields.get(12)?.parse().ok()?;
         let minor_faults = fields.get(7)?.parse().ok()?;
@@ -71,6 +74,7 @@ impl ProcStat {
             comm,
             state,
             parent,
+            group,
             user_ticks,
             system_ticks,
             minor_faults,
@@ -99,6 +103,10 @@ impl ProcStat {
 
     pub const fn parent(&self) -> Option<Pid> {
         self.parent
+    }
+
+    pub const fn group(&self) -> Option<Pid> {
+        self.group
     }
 
     pub const fn user_ticks(&self) -> u64 {

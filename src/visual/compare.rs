@@ -22,13 +22,27 @@ pub(crate) fn validate_artifact_id(id: &str, kind: &str) -> Result<(), DevError>
     Ok(())
 }
 
-/// Per-channel tolerance as a share of the 0-255 range.
-const FUZZ_PERCENT: u32 = 5;
+/// Default per-channel tolerance as a share of the 0-255 range; configurable
+/// per subject as `pixel_fuzz_percent`.
+pub(crate) const DEFAULT_PIXEL_FUZZ_PERCENT: u8 = 5;
 
-/// The largest per-channel difference still counted as a match: 5% of 255
-/// (12.75), rounded to the nearest whole step.
-#[allow(clippy::cast_possible_truncation)] // at most 255 for FUZZ_PERCENT <= 100
-const FUZZ_THRESHOLD: u8 = ((255 * FUZZ_PERCENT + 50) / 100) as u8;
+/// The largest per-channel difference still counted as a match: `percent`
+/// of 255, rounded to the nearest whole step (5% gives 13).
+fn fuzz_threshold(percent: u8) -> u8 {
+    let step = (255 * u32::from(percent.min(100)) + 50) / 100;
+    u8::try_from(step).unwrap_or(u8::MAX)
+}
+
+/// Load-time check for a `pixel_fuzz_percent` value.
+pub(crate) fn validate_fuzz_percent(section: &str, value: i64) -> Result<(), DevError> {
+    if (0..=100).contains(&value) {
+        Ok(())
+    } else {
+        Err(DevError::Config(format!(
+            "[{section}].pixel_fuzz_percent must be between 0 and 100, got {value}"
+        )))
+    }
+}
 
 struct DecodedPng {
     width: u32,
@@ -156,7 +170,9 @@ pub(crate) fn compare_pixels(
     pipeline_png: &Path,
     reference_png: &Path,
     diff_output: &Path,
+    fuzz_percent: u8,
 ) -> Result<PixelDiffResult, DevError> {
+    let fuzz = fuzz_threshold(fuzz_percent);
     let pipeline = decode_png(pipeline_png)?;
     let reference = decode_png(reference_png)?;
     let max_w = pipeline.width.max(reference.width);
@@ -174,7 +190,7 @@ pub(crate) fn compare_pixels(
         let dg = pipe_rgba[base + 1].abs_diff(ref_rgba[base + 1]);
         let db = pipe_rgba[base + 2].abs_diff(ref_rgba[base + 2]);
 
-        if dr > FUZZ_THRESHOLD || dg > FUZZ_THRESHOLD || db > FUZZ_THRESHOLD {
+        if dr > fuzz || dg > fuzz || db > fuzz {
             diff_pixels += 1;
             diff_rgba[base..base + 4].copy_from_slice(&[255, 0, 0, 255]);
         } else {
@@ -202,6 +218,16 @@ pub(crate) fn compare_pixels(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fuzz_threshold_default_matches_the_former_constant() {
+        assert_eq!(fuzz_threshold(DEFAULT_PIXEL_FUZZ_PERCENT), 13);
+        assert_eq!(fuzz_threshold(0), 0);
+        assert_eq!(fuzz_threshold(100), 255);
+        assert!(validate_fuzz_percent("x", 100).is_ok());
+        assert!(validate_fuzz_percent("x", 101).is_err());
+        assert!(validate_fuzz_percent("x", -1).is_err());
+    }
 
     #[test]
     fn to_rgba_rgb_input() {

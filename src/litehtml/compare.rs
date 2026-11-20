@@ -53,21 +53,36 @@ impl Offender {
 // Element comparison
 // ---------------------------------------------------------------------------
 
-/// Geometry policy used by the scorer. Kept as an explicit input so tests can
-/// exercise threshold boundaries without changing production defaults.
+/// Geometry policy used by the scorer. The position and size tolerances come
+/// from `[litehtml]` (`position_tolerance`, `size_tolerance`); the
+/// zero-height cut is fixed by the reference dump format.
 #[derive(Clone, Copy)]
-struct ElementComparisonPolicy {
+pub(crate) struct ElementComparisonPolicy {
     position_tolerance: f64,
     size_tolerance: f64,
     zero_height_threshold: f64,
 }
 
+/// Below Chrome's 0.1px dump quantum: "the reference says this element has
+/// no height at all". A property of the dump, not a tolerance, so it is not
+/// configurable.
+const ZERO_HEIGHT_THRESHOLD: f64 = 0.05;
+
+impl ElementComparisonPolicy {
+    pub(crate) fn from_config(config: &crate::config::project_config::litehtml::LitehtmlConfig) -> Self {
+        Self {
+            position_tolerance: config.effective_position_tolerance(),
+            size_tolerance: config.effective_size_tolerance(),
+            zero_height_threshold: ZERO_HEIGHT_THRESHOLD,
+        }
+    }
+}
+
+#[cfg(test)]
 const DEFAULT_ELEMENT_POLICY: ElementComparisonPolicy = ElementComparisonPolicy {
-    position_tolerance: 2.0,
-    size_tolerance: 5.0,
-    // Below Chrome's 0.1px dump quantum: "the reference says this element
-    // has no height at all".
-    zero_height_threshold: 0.05,
+    position_tolerance: crate::config::project_config::litehtml::DEFAULT_POSITION_TOLERANCE,
+    size_tolerance: crate::config::project_config::litehtml::DEFAULT_SIZE_TOLERANCE,
+    zero_height_threshold: ZERO_HEIGHT_THRESHOLD,
 };
 
 #[derive(serde::Deserialize)]
@@ -133,6 +148,7 @@ fn is_inline_tag(tag: &str) -> bool {
 pub(crate) fn compare_elements(
     pipeline_json: &Path,
     reference_json: &Path,
+    policy: ElementComparisonPolicy,
 ) -> Result<ElementMatchResult, DevError> {
     let pipeline_text = std::fs::read_to_string(pipeline_json)
         .map_err(|e| DevError::Verify(format!("cannot read {}: {e}", pipeline_json.display())))?;
@@ -144,11 +160,16 @@ pub(crate) fn compare_elements(
     let reference_elems: Vec<LayoutElement> = serde_json::from_str(&reference_text)
         .map_err(|e| DevError::Verify(format!("invalid JSON {}: {e}", reference_json.display())))?;
 
-    Ok(compare_element_sets(&pipeline_elems, &reference_elems))
+    Ok(compare_element_sets_with_policy(
+        &pipeline_elems,
+        &reference_elems,
+        policy,
+    ))
 }
 
-/// The comparison core, split from the file I/O so tests can feed
+/// The comparison core at the default policy, for tests that feed
 /// synthetic element sets directly.
+#[cfg(test)]
 fn compare_element_sets(
     pipeline_elems: &[LayoutElement],
     reference_elems: &[LayoutElement],
@@ -156,6 +177,7 @@ fn compare_element_sets(
     compare_element_sets_with_policy(pipeline_elems, reference_elems, DEFAULT_ELEMENT_POLICY)
 }
 
+/// The comparison core, split from the file I/O.
 fn compare_element_sets_with_policy(
     pipeline_elems: &[LayoutElement],
     reference_elems: &[LayoutElement],
@@ -331,6 +353,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::visual::status::DEFAULT_REGRESSION_TOLERANCE;
 
     const PREPARE_JS: &str = include_str!("../../scripts/litehtml-prepare/prepare.js");
 
@@ -481,27 +504,32 @@ mod tests {
 
     #[test]
     fn status_columns_render_missing_values_and_delta_annotations() {
-        let missing = status_columns(None, None, None, true);
+        let tol = DEFAULT_REGRESSION_TOLERANCE;
+        let missing = status_columns(None, None, None, true, tol);
         assert_eq!(missing.pixel, "\u{2014}");
         assert_eq!(missing.delta, "\u{2014}");
         assert_eq!(missing.status, "\u{2014}");
         assert_eq!(missing.annotation, "");
 
-        let improved = status_columns(Some(Status::Pass), Some(1.0), Some(1.6), true);
+        let improved = status_columns(Some(Status::Pass), Some(1.0), Some(1.6), true, tol);
         assert_eq!(improved.pixel, "1.0%");
         assert_eq!(improved.delta, "-0.6%");
         assert_eq!(improved.status, "PASS");
         assert_eq!(improved.annotation, " (improved)");
 
-        let small_delta = status_columns(Some(Status::Pass), Some(1.0), Some(1.04), false);
+        let small_delta = status_columns(Some(Status::Pass), Some(1.0), Some(1.04), false, tol);
         assert_eq!(small_delta.delta, "\u{2014}");
         assert_eq!(small_delta.annotation, "");
 
         // An approved pass that did not improve is not "unapproved"; only a
         // pass with no approval behind it is.
-        let approved = status_columns(Some(Status::Pass), Some(1.0), Some(1.04), true);
+        let approved = status_columns(Some(Status::Pass), Some(1.0), Some(1.04), true, tol);
         assert_eq!(approved.annotation, "");
-        let unapproved = status_columns(Some(Status::Pass), Some(1.0), None, true);
+        let unapproved = status_columns(Some(Status::Pass), Some(1.0), None, true, tol);
+
+        // A wider configured tolerance stops calling the same drop improved.
+        let wide = status_columns(Some(Status::Pass), Some(1.0), Some(1.6), true, 1.0);
+        assert_eq!(wide.annotation, "");
         assert_eq!(unapproved.annotation, " (unapproved)");
     }
 
@@ -637,6 +665,7 @@ mod tests {
             thresholds: ComparisonThresholds {
                 pixel: 10.0,
                 element: Some(80.0),
+                regression_tolerance: DEFAULT_REGRESSION_TOLERANCE,
             },
             expected_fail: false,
             approved: ApprovedScores {
@@ -655,6 +684,7 @@ mod tests {
             thresholds: ComparisonThresholds {
                 pixel: 10.0,
                 element: Some(80.0),
+                regression_tolerance: DEFAULT_REGRESSION_TOLERANCE,
             },
             expected_fail: false,
             approved: ApprovedScores {
@@ -673,6 +703,7 @@ mod tests {
             thresholds: ComparisonThresholds {
                 pixel: 10.0,
                 element: Some(80.0),
+                regression_tolerance: DEFAULT_REGRESSION_TOLERANCE,
             },
             expected_fail: false,
             approved: ApprovedScores {
@@ -691,6 +722,7 @@ mod tests {
             thresholds: ComparisonThresholds {
                 pixel: 10.0,
                 element: Some(80.0),
+                regression_tolerance: DEFAULT_REGRESSION_TOLERANCE,
             },
             expected_fail: true,
             approved: ApprovedScores {
@@ -709,6 +741,7 @@ mod tests {
             thresholds: ComparisonThresholds {
                 pixel: 10.0,
                 element: Some(80.0),
+                regression_tolerance: DEFAULT_REGRESSION_TOLERANCE,
             },
             expected_fail: false,
             approved: ApprovedScores {
@@ -727,6 +760,7 @@ mod tests {
             thresholds: ComparisonThresholds {
                 pixel: 10.0,
                 element: Some(80.0),
+                regression_tolerance: DEFAULT_REGRESSION_TOLERANCE,
             },
             expected_fail: false,
             approved: ApprovedScores {
@@ -746,6 +780,7 @@ mod tests {
             thresholds: ComparisonThresholds {
                 pixel: 10.0,
                 element: Some(80.0),
+                regression_tolerance: DEFAULT_REGRESSION_TOLERANCE,
             },
             expected_fail: false,
             approved: ApprovedScores {
@@ -764,6 +799,7 @@ mod tests {
             thresholds: ComparisonThresholds {
                 pixel: 10.0,
                 element: Some(80.0),
+                regression_tolerance: DEFAULT_REGRESSION_TOLERANCE,
             },
             expected_fail: false,
             approved: ApprovedScores {
@@ -782,6 +818,7 @@ mod tests {
             thresholds: ComparisonThresholds {
                 pixel: 10.0,
                 element: Some(80.0),
+                regression_tolerance: DEFAULT_REGRESSION_TOLERANCE,
             },
             expected_fail: false,
             approved: ApprovedScores {

@@ -72,6 +72,24 @@ fn signal_result(ret: libc::c_int) -> std::io::Result<bool> {
     Err(err)
 }
 
+/// The value of `name` in `/proc/<pid>/environ`: the environment the process's
+/// current image started with. `None` when unreadable (another user, hidepid,
+/// a zombie reads empty) or absent - callers treat that as unmarked.
+pub(crate) fn environ_value(pid: u32, name: &str) -> Option<String> {
+    let block = fs::read(format!("/proc/{pid}/environ")).ok()?;
+    env_value(&block, name)
+}
+
+/// The first `name=` entry of a raw NUL-separated environment block, as
+/// `getenv` resolves a duplicated name.
+pub(crate) fn env_value(block: &[u8], name: &str) -> Option<String> {
+    block.split(|b| *b == 0).find_map(|entry| {
+        let rest = entry.strip_prefix(name.as_bytes())?;
+        let value = rest.strip_prefix(b"=")?;
+        String::from_utf8(value.to_vec()).ok()
+    })
+}
+
 /// Whether `pid` refers to a live process.
 ///
 /// Implemented as `kill(pid, 0)`:
@@ -220,6 +238,15 @@ mod tests {
         // After wait(), the PID is reaped; pid_is_alive should be false
         // (kernel does not reuse PIDs immediately on a quiet system).
         assert!(!pid_is_alive(pid));
+    }
+
+    #[test]
+    fn env_value_takes_the_first_exact_name() {
+        let block = b"PATH=/bin\0BROKKR_EXEC=a.1\0BROKKR_EXEC=b.2\0";
+        assert_eq!(env_value(block, "BROKKR_EXEC").as_deref(), Some("a.1"));
+        assert_eq!(env_value(b"BROKKR_EXECX=a.1\0", "BROKKR_EXEC"), None);
+        assert_eq!(env_value(b"X_BROKKR_EXEC=a.1\0", "BROKKR_EXEC"), None);
+        assert_eq!(env_value(b"", "BROKKR_EXEC"), None);
     }
 
     #[test]

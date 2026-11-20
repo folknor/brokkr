@@ -335,7 +335,12 @@ fn run_snapshot(
     let pixel_threshold = config.pixel_diff_threshold;
     let approved_pixel = approval.map(|a| a.pixel_diff_pct);
 
-    let pixel_result = compare::compare_pixels(&output_png, &approved_png, &diff_png);
+    let pixel_result = compare::compare_pixels(
+        &output_png,
+        &approved_png,
+        &diff_png,
+        config.effective_pixel_fuzz_percent(),
+    );
 
     let (pixel_diff_pct, status) = match pixel_result {
         Ok(px) => {
@@ -345,6 +350,7 @@ fn run_snapshot(
                 thresholds: status::ComparisonThresholds {
                     pixel: pixel_threshold,
                     element: None,
+                    regression_tolerance: config.effective_regression_tolerance(),
                 },
                 expected_fail: false,
                 approved: status::ApprovedScores {
@@ -587,7 +593,12 @@ pub(crate) fn status(project_root: &Path, sluggrs_config: &SluggrsConfig) -> Res
     output::sluggrs_msg(&format!("  {}", "\u{2500}".repeat(70)));
 
     for snapshot in &sluggrs_config.snapshots {
-        print_snapshot_status(snapshot, &approvals, &db)?;
+        print_snapshot_status(
+            snapshot,
+            sluggrs_config.effective_regression_tolerance(),
+            &approvals,
+            &db,
+        )?;
     }
 
     Ok(())
@@ -595,6 +606,7 @@ pub(crate) fn status(project_root: &Path, sluggrs_config: &SluggrsConfig) -> Res
 
 fn print_snapshot_status(
     snapshot: &SluggrsSnapshot,
+    regression_tolerance: f64,
     approvals: &[super::db::Approval],
     db: &SnapshotDb,
 ) -> Result<(), DevError> {
@@ -610,6 +622,7 @@ fn print_snapshot_status(
         latest.as_ref().and_then(|row| row.pixel_diff_pct),
         approval.map(|entry| entry.pixel_diff_pct),
         false,
+        regression_tolerance,
     );
     output::sluggrs_msg(&engine::format_status_row(
         &snapshot.id,
@@ -681,6 +694,8 @@ mod tests {
             width: 800,
             height: 600,
             pixel_diff_threshold: 0.5,
+            regression_tolerance: None,
+            pixel_fuzz_percent: None,
             snapshots,
         }
     }

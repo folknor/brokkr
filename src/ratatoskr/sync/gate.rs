@@ -661,6 +661,7 @@ mod tests {
 
     use super::*;
     use crate::config::HarnessConfig;
+    use crate::config::project_config::ratatoskr::{EndpointEnvs, Protocol};
     use crate::db::KvValue;
     use crate::harness_build::HarnessBuild;
     use crate::ratatoskr::saehrimnir::{Endpoints, MockOutcome, endpoint_env_pairs};
@@ -773,6 +774,16 @@ mod tests {
     }
 
     fn cfg_with_endpoints() -> RatatoskrConfig {
+        let mut test_endpoint_env = EndpointEnvs::default();
+        for protocol in Protocol::all() {
+            test_endpoint_env.set(
+                protocol,
+                Some(format!(
+                    "RATATOSKR_TEST_{}_ENDPOINT",
+                    protocol.sentinel_name()
+                )),
+            );
+        }
         RatatoskrConfig {
             harness: Some(HarnessConfig {
                 package: "app".into(),
@@ -783,15 +794,7 @@ mod tests {
             }),
             mock_server_binary: None,
             fixtures_dir: None,
-            test_endpoint_env_jmap: Some("RATATOSKR_TEST_JMAP_ENDPOINT".into()),
-            test_endpoint_env_imap: Some("RATATOSKR_TEST_IMAP_ENDPOINT".into()),
-            test_endpoint_env_smtp: Some("RATATOSKR_TEST_SMTP_ENDPOINT".into()),
-            test_endpoint_env_graph: Some("RATATOSKR_TEST_GRAPH_ENDPOINT".into()),
-            test_endpoint_env_gmail: Some("RATATOSKR_TEST_GMAIL_ENDPOINT".into()),
-            test_endpoint_env_caldav: Some("RATATOSKR_TEST_CALDAV_ENDPOINT".into()),
-            test_endpoint_env_carddav: Some("RATATOSKR_TEST_CARDDAV_ENDPOINT".into()),
-            test_endpoint_env_people: Some("RATATOSKR_TEST_PEOPLE_ENDPOINT".into()),
-            test_endpoint_env_gcal: Some("RATATOSKR_TEST_GCAL_ENDPOINT".into()),
+            test_endpoint_env,
             sync_script_dir: None,
             gate: std::collections::BTreeMap::new(),
         }

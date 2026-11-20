@@ -197,7 +197,11 @@ which reaches a test binary under cargo. It verifies every recorded child and
 mock by starttime first and refuses the whole kill on one it cannot verify,
 except that a recorded process that has provably exited (or whose pid now
 names another process) is skipped with a line saying so, so a wedged holder
-whose child already died stays killable. Against any other SIGKILL (the OOM
+whose child already died stays killable. When such a recorded process led a
+process group, its surviving members are SIGKILLed one by one, each only if it
+carries the hold's launch cohort (`BROKKR_EXEC`) and still sits in that group:
+a group number is reused once its members are all gone, so a group signal
+could reach a stranger. Against any other SIGKILL (the OOM
 killer) the runners' direct child carries a parent-death SIGKILL, which
 reaches the test binary on the parallel lane but only cargo on the others;
 what survives below cargo - the test binary, a doctest, anything a test
