@@ -105,8 +105,11 @@ pub(crate) fn install_root(
     {
         return Ok(InstallRoot::Overridden("CARGO_INSTALL_ROOT is set".into()));
     }
+    // One home for the invocation, resolved against cargo's cwd: cargo keeps
+    // its context's home when `install --path` reloads from the package.
+    let home = crate::rustflags::cargo_home(build_root, env)?;
     for dir in [package_dir, build_root] {
-        for (path, doc) in crate::rustflags::read_config_files_under(dir, env)? {
+        for (path, doc) in crate::rustflags::read_config_files_from(dir, &home)? {
             let root = doc
                 .get("install")
                 .and_then(toml::Value::as_table)
@@ -119,14 +122,6 @@ pub(crate) fn install_root(
             }
         }
     }
-    // Cargo treats an empty CARGO_HOME as unset and resolves a relative one
-    // against its cwd, the build root.
-    let home = match env.get_os("CARGO_HOME").filter(|value| !value.is_empty()) {
-        Some(value) => build_root.join(PathBuf::from(value)),
-        None => crate::user_dirs::home()
-            .map(|home| home.join(".cargo"))
-            .ok_or_else(|| DevError::Config("no home directory for the cargo home".into()))?,
-    };
     Ok(InstallRoot::Default(home))
 }
 

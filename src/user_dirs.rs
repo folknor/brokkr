@@ -134,11 +134,12 @@ pub(crate) fn xdg_config_home() -> Option<PathBuf> {
     xdg_dir("XDG_CONFIG_HOME", &[".config"])
 }
 
-/// The cargo home: `$CARGO_HOME`, falling back to `$HOME/.cargo`.
+/// The cargo home: `$CARGO_HOME`, falling back to `.cargo` under `$HOME`,
+/// then under the account's passwd home.
 ///
-/// Mirrors cargo's own resolution (the `home` crate): an empty `CARGO_HOME`
-/// is ignored, and a relative one is taken relative to the cwd, which is what
-/// cargo itself would read.
+/// Mirrors cargo's own resolution (the `home` crate over std's `home_dir`):
+/// an empty `CARGO_HOME` or `HOME` is ignored, and a relative one is taken
+/// relative to the cwd, which is what cargo itself would read.
 pub(crate) fn cargo_home() -> Option<PathBuf> {
     if let Some(v) = non_empty_var("CARGO_HOME") {
         let path = PathBuf::from(v);
@@ -147,7 +148,44 @@ pub(crate) fn cargo_home() -> Option<PathBuf> {
         }
         return std::env::current_dir().ok().map(|cwd| cwd.join(path));
     }
-    home().map(|h| h.join(".cargo"))
+    home().or_else(account_home).map(|h| h.join(".cargo"))
+}
+
+/// The current account's home directory from the passwd database, the
+/// fallback std's `home_dir` (and so cargo) uses when `HOME` is unset or
+/// empty. `None` when the lookup fails or the entry names no directory.
+pub(crate) fn account_home() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    // SAFETY: sysconf takes no pointers.
+    let size = match unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) } {
+        n if n > 0 => usize::try_from(n).unwrap_or(16384),
+        _ => 16384,
+    };
+    let mut buf: Vec<libc::c_char> = vec![0; size];
+    let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: every pointer refers to live storage of the stated size; the
+    // strings the entry points at live in `buf`, which outlives every read.
+    let status = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            entry.as_mut_ptr(),
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if status != 0 || result.is_null() {
+        return None;
+    }
+    // SAFETY: a non-null result points at the initialized `entry`.
+    let dir = unsafe { (*result).pw_dir };
+    if dir.is_null() {
+        return None;
+    }
+    // SAFETY: pw_dir is a NUL-terminated string inside `buf`.
+    let bytes = unsafe { std::ffi::CStr::from_ptr(dir) }.to_bytes().to_vec();
+    (!bytes.is_empty()).then(|| PathBuf::from(OsString::from_vec(bytes)))
 }
 
 /// The cargo config file cargo reads from `dir` (a `.cargo` directory or the

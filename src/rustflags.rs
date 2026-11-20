@@ -31,7 +31,8 @@
 //! resolves to the inert direction, never the destructive one.
 //!
 //! The chain is the whole chain: every `.cargo/config{.toml}` from the build
-//! root upwards, plus `$CARGO_HOME/config{.toml}`. A user-level
+//! root upwards, plus the cargo home's, with their includes
+//! ([`read_config_files_under`] has the walk). A user-level
 //! `[target.<host-triple>] rustflags` is common (linker choice, `target-cpu`),
 //! and it decides the winning layer for every project on that machine.
 //!
@@ -447,43 +448,100 @@ impl CargoLaunchConfig {
 /// Read the exact config documents used for launch reconstruction. Config
 /// locations that are absent are ordinary; once Cargo would select a file, a
 /// read or TOML error means this snapshot cannot safely omit any settings.
+///
+/// The walk mirrors cargo's merged loader (1.97 and later), so the snapshot
+/// holds what cargo merges, repeats included:
+///
+/// - every ancestor `.cargo` contributes its selected file; the cargo home is
+///   skipped only when its directory, canonical or as spelled, is one of the
+///   ancestor `.cargo` directories (cargo compares directories, not files);
+/// - each root file has its own include set, so a file reached from two roots
+///   is read twice, as cargo reads it twice and appends its arrays twice;
+/// - an include is the lexically normalized join of the reached path's parent
+///   and the include string, never a canonical path: two symlinked spellings of
+///   one file are two documents whose relative includes resolve against
+///   different directories, exactly as cargo resolves them;
+/// - within one root a path reached a second time refuses, cycle or diamond,
+///   because cargo's include set is never cleared and cargo fails it too.
+///
+/// Cargo 1.94 to 1.96 opened the joined include path without normalizing it,
+/// so `link/../child.toml` through a symlinked `link` names a different file
+/// on those versions; brokkr follows the current loader.
 pub(crate) fn read_config_files_under(
     build_root: &Path,
     env: EffectiveEnv<'_>,
 ) -> Result<Vec<(PathBuf, toml::Table)>, crate::error::DevError> {
-    let mut roots = Vec::new();
-    let mut seen_roots = HashSet::new();
-    for dir in build_root.ancestors() {
-        push_existing_config(&mut roots, &dir.join(".cargo"), &mut seen_roots)?;
+    let home = cargo_home(build_root, env)?;
+    read_config_files_from(build_root, &home)
+}
+
+/// The cargo home a cargo child rooted at `cwd` uses: a nonempty
+/// `CARGO_HOME`, else `.cargo` under a nonempty `HOME`, else under the
+/// account's passwd home, as std's `home_dir` falls back. A relative value is
+/// resolved against `cwd`, the child's working directory. Cargo cannot start
+/// without a home, so neither source yielding one is an error.
+pub(crate) fn cargo_home(
+    cwd: &Path,
+    env: EffectiveEnv<'_>,
+) -> Result<PathBuf, crate::error::DevError> {
+    if let Some(value) = env.get_os("CARGO_HOME").filter(|value| !value.is_empty()) {
+        return Ok(cwd.join(PathBuf::from(value)));
     }
-    // Cargo treats an empty CARGO_HOME as unset and resolves a relative value
-    // against the cargo process's cwd, which is build_root here.
-    let home = match env.get_os("CARGO_HOME").filter(|value| !value.is_empty()) {
-        Some(value) => Some(build_root.join(PathBuf::from(value))),
-        None => crate::user_dirs::home().map(|home| home.join(".cargo")),
-    };
-    if let Some(home) = home {
-        push_existing_config(&mut roots, &home, &mut seen_roots)?;
+    let home = env
+        .get_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(crate::user_dirs::account_home)
+        .ok_or_else(|| {
+            crate::error::DevError::Config(
+                "no cargo home: CARGO_HOME and HOME are unset and the account has no home directory"
+                    .into(),
+            )
+        })?;
+    Ok(cwd.join(home).join(".cargo"))
+}
+
+/// [`read_config_files_under`] with the ancestor walk starting at
+/// `search_root` and an already resolved cargo `home`, for a cargo that
+/// reloads config from another directory while keeping its context's home
+/// (`cargo install --path`).
+pub(crate) fn read_config_files_from(
+    search_root: &Path,
+    home: &Path,
+) -> Result<Vec<(PathBuf, toml::Table)>, crate::error::DevError> {
+    let mut roots = Vec::new();
+    let mut seen_dirs = HashSet::new();
+    for dir in search_root.ancestors() {
+        let config_root = dir.join(".cargo");
+        if let Some(path) = selected_config_file(&config_root)? {
+            roots.push(path);
+        }
+        seen_dirs.insert(config_root.canonicalize().unwrap_or(config_root));
+    }
+    let canonical_home = home.canonicalize().unwrap_or_else(|_| home.to_owned());
+    if !seen_dirs.contains(&canonical_home)
+        && !seen_dirs.contains(home)
+        && let Some(path) = selected_config_file(home)?
+    {
+        roots.push(path);
     }
 
     let mut files = Vec::new();
-    let mut loaded = HashSet::new();
-    let mut active = HashSet::new();
     for path in roots {
-        push_config_document(&path, false, &mut files, &mut loaded, &mut active)?;
+        push_config_document(&path, &mut files, &mut HashSet::new())?;
     }
     Ok(files)
 }
 
 /// Read a cargo config file passed explicitly through `--config`, including
-/// every config file it includes.
+/// every config file it includes. Cargo shares one include set across all
+/// file-valued `--config` arguments; this reads one file with its own set,
+/// which is enough for a scan of what the files define.
 pub(crate) fn read_config_file(
     path: &Path,
 ) -> Result<Vec<(PathBuf, toml::Table)>, crate::error::DevError> {
     let mut files = Vec::new();
-    let mut loaded = HashSet::new();
-    let mut active = HashSet::new();
-    push_config_document(path, false, &mut files, &mut loaded, &mut active)?;
+    push_config_document(path, &mut files, &mut HashSet::new())?;
     Ok(files)
 }
 
@@ -504,51 +562,22 @@ pub(crate) fn selected_config_file(dir: &Path) -> Result<Option<PathBuf>, crate:
     Ok(None)
 }
 
-fn push_existing_config(
-    out: &mut Vec<PathBuf>,
-    dir: &Path,
-    seen: &mut HashSet<PathBuf>,
-) -> Result<(), crate::error::DevError> {
-    if let Some(path) = selected_config_file(dir)? {
-        let identity = path.canonicalize().unwrap_or_else(|_| path.clone());
-        if seen.insert(identity) {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
+/// Load `path` (as reached, never canonicalized) and its includes into `out`,
+/// highest precedence first. `seen` is the root's include set: every path
+/// loaded under this root, never cleared, as in cargo.
 fn push_config_document(
     path: &Path,
-    optional: bool,
     out: &mut Vec<(PathBuf, toml::Table)>,
-    loaded: &mut HashSet<PathBuf>,
-    active: &mut HashSet<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
 ) -> Result<(), crate::error::DevError> {
-    let identity = path.canonicalize().unwrap_or_else(|_| path.to_owned());
-    if active.contains(&identity) {
+    if !seen.insert(path.to_owned()) {
         return Err(crate::error::DevError::Config(format!(
-            "Cargo config include cycle reaches {}",
+            "Cargo config include cycle reaches {} (cargo refuses a file included twice under one config root)",
             crate::output::path(path)
         )));
     }
-    // A file can be found both in the ancestor chain and through an include.
-    // Cargo config discovery treats that path as one document in this view.
-    if !loaded.insert(identity.clone()) {
-        return Ok(());
-    }
 
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        // Cargo's optional include contract permits a missing file only.
-        // Permission, decoding, and every other read error leave the config
-        // chain incomplete and refuse reconstruction.
-        Err(error) if optional && error.kind() == std::io::ErrorKind::NotFound => {
-            loaded.remove(&identity);
-            return Ok(());
-        }
-        Err(error) => return Err(config_read_error(path, &error)),
-    };
+    let text = std::fs::read_to_string(path).map_err(|error| config_read_error(path, &error))?;
     let doc = text.parse::<toml::Table>().map_err(|error| {
         crate::error::DevError::Config(format!(
             "could not parse Cargo config {}: {error}",
@@ -556,7 +585,6 @@ fn push_config_document(
         ))
     })?;
 
-    active.insert(identity.clone());
     out.push((path.to_owned(), doc.clone()));
     let includes = match doc.get("include") {
         None => &[][..],
@@ -604,16 +632,44 @@ fn push_config_document(
                 )));
             }
         };
-        if !include_path.ends_with(".toml") {
+        // Cargo's checks, on the include string as written.
+        if Path::new(include_path).extension() != Some(std::ffi::OsStr::new("toml")) {
             return Err(crate::error::DevError::Config(format!(
                 "Cargo config {} includes `{include_path}`, which does not end in `.toml`",
                 crate::output::path(path)
             )));
         }
-        push_config_document(&anchor.join(include_path), optional, out, loaded, active)?;
+        if include_path.contains(['*', '?', '[', ']', '{', '}']) {
+            return Err(crate::error::DevError::Config(format!(
+                "Cargo config {} includes `{include_path}`, a glob or template path cargo refuses",
+                crate::output::path(path)
+            )));
+        }
+        let target = lexical_normalize(&anchor.join(include_path));
+        // Cargo skips an optional include whose target does not exist,
+        // following symlinks; any other read failure refuses.
+        if optional && !target.exists() {
+            continue;
+        }
+        push_config_document(&target, out, seen)?;
     }
-    active.remove(&identity);
     Ok(())
+}
+
+/// Cargo's `paths::normalize_path`: `.` dropped and `..` popping its textual
+/// parent, without touching the filesystem.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn config_read_error(path: &Path, error: &std::io::Error) -> crate::error::DevError {
@@ -1645,6 +1701,94 @@ mod tests {
         assert_eq!(paths.first(), Some(&cargo_dir.join("config.toml")));
         assert_eq!(paths.get(1), Some(&cargo_dir.join("second.toml")));
         assert_eq!(paths.get(2), Some(&cargo_dir.join("first.toml")));
+    }
+
+    /// Two symlinked spellings of one file are two documents, each resolving
+    /// its relative include against the directory it was reached through.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_includes_resolve_children_against_the_reached_path() {
+        let root = crate::test_scratch::scratch("rustflags", "symlinked_includes");
+        let cargo_dir = root.join(".cargo");
+        let shared = root.join("shared");
+        for dir in [
+            &cargo_dir,
+            &cargo_dir.join("a"),
+            &cargo_dir.join("b"),
+            &shared,
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(
+            cargo_dir.join("config.toml"),
+            "include = [\"a/common.toml\", \"b/common.toml\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            shared.join("common.toml"),
+            "include = [{ path = \"child.toml\", optional = true }]\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(shared.join("common.toml"), cargo_dir.join("a/common.toml"))
+            .unwrap();
+        std::os::unix::fs::symlink(shared.join("common.toml"), cargo_dir.join("b/common.toml"))
+            .unwrap();
+        std::fs::write(cargo_dir.join("b/child.toml"), "[build]\ntarget = \"x\"\n").unwrap();
+
+        let cargo_home = [("CARGO_HOME", "empty-cargo-home")];
+        let files = read_config_files_under(&root, EffectiveEnv::new(&cargo_home)).unwrap();
+        // Ancestors above the scratch root may hold real configs; only the
+        // scratch root's own chain is under test.
+        let paths: Vec<PathBuf> = files
+            .iter()
+            .map(|(path, _)| path.clone())
+            .filter(|path| path.starts_with(&root))
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                cargo_dir.join("config.toml"),
+                cargo_dir.join("b/common.toml"),
+                cargo_dir.join("b/child.toml"),
+                cargo_dir.join("a/common.toml"),
+            ]
+        );
+    }
+
+    /// Cargo's include set is per root and never cleared: one file included
+    /// twice under a root refuses, while a file reached from two roots is
+    /// read once per root.
+    #[test]
+    fn include_repeats_refuse_within_a_root_and_repeat_across_roots() {
+        let root = crate::test_scratch::scratch("rustflags", "include_repeats");
+        let inner = root.join("inner");
+        std::fs::create_dir_all(inner.join(".cargo")).unwrap();
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::write(root.join(".cargo/shared.toml"), "[build]\nrustflags = []\n").unwrap();
+        std::fs::write(
+            root.join(".cargo/config.toml"),
+            "include = [\"shared.toml\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            inner.join(".cargo/config.toml"),
+            "include = [\"../../.cargo/shared.toml\"]\n",
+        )
+        .unwrap();
+        let cargo_home = [("CARGO_HOME", "empty-cargo-home")];
+        let files = read_config_files_under(&inner, EffectiveEnv::new(&cargo_home)).unwrap();
+        let shared = files
+            .iter()
+            .filter(|(path, _)| *path == root.join(".cargo/shared.toml"))
+            .count();
+        assert_eq!(shared, 2, "{files:?}");
+
+        std::fs::write(
+            root.join(".cargo/config.toml"),
+            "include = [\"shared.toml\", \"./shared.toml\"]\n",
+        )
+        .unwrap();
+        assert!(read_config_files_under(&root, EffectiveEnv::new(&cargo_home)).is_err());
     }
 
     #[cfg(unix)]

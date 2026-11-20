@@ -1923,7 +1923,10 @@ config layer is reached with `--config`, the highest-precedence config source,
 so the project's `.cargo/config.toml` is left untouched.
 
 The chain inspected is the whole chain cargo reads: every `.cargo/config.toml`
-from the build root upwards, plus `$CARGO_HOME/config.toml`. A user-level
+from the build root upwards, plus the cargo home's, and every file they
+include, walked as cargo's loader walks it (an include is the path it was
+reached through, so two symlinked spellings of one file are two documents with
+their own relative children). A user-level
 `[target.<host-triple>] rustflags` is common - a linker choice, a
 `-Ctarget-cpu` - and it silently decides the winning layer for **every**
 project on that machine, including ones whose own flags live in

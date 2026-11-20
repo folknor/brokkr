@@ -145,18 +145,28 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
-### Cargo config discovery dedups symlinked files by canonical path (2026-11-20)
+### Cargo config snapshot residues after the loader mirror (2026-11-20)
 
-`rustflags::read_config_files_under` (and `push_existing_config` for ancestor
-directories) skips a file whose canonical path is already loaded. Cargo tracks
-each include by the path it was reached through and resolves a relative child
-include against that path, so two symlinked includes of one file can pull in
-different children. Brokkr visits the first, misses an optional child only the
-second reaches, then skips the second: a `build.target`, runner or env entry
-cargo sees goes unseen by every `CargoLaunchConfig` consumer. Dedup by the
-include path and keep cycle detection separate. Also: with `CARGO_HOME` unset
-the helper consults only a nonempty `HOME`, where cargo falls back to the
-account database.
+The include walk in `src/rustflags.rs` now follows cargo's merged loader. What
+still diverges from cargo, each independent of the walk:
+
+- `selected_config_file` takes only a regular file; cargo selects a legacy
+  `config` any handle opens and a `config.toml` that merely exists, so a
+  directory there makes cargo fail while brokkr skips it. Shared with
+  `cargo_config_strip`.
+- `cargo_env`'s `--config` scan reads each file with its own include set;
+  cargo shares one set across all file-valued `--config` arguments, and the
+  scan misses `[env]` reached through a dotted CLI include
+  (`--config 'include.path="x.toml"'`).
+- The bundled nextest lane hands the flattened paths to nextest as explicit
+  files; nextest anchors `relative = true` values at the canonical file, so a
+  symlinked `.cargo/config.toml` anchors elsewhere than cargo does.
+- Consumers take the first whole value where cargo merges per key: the direct
+  lane's `[env]` entry (a lower table's `force` is lost), the rustflags sink's
+  `build.target` array, and `effective_rustflags` folding a mixed string/array
+  definition cargo rejects.
+- The ancestor walk starts at the build root as spelled; cargo starts at its
+  child's `current_dir()`, which differs through a symlinked build root.
 
 ### A serve's cleanup after its supervisor dies is best effort (2026-11-15)
 
