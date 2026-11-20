@@ -220,7 +220,7 @@ pub(crate) fn stamp_file(path: &Path, stamp: &Stamp) -> Result<(), DevError> {
         .to_string_lossy()
         .into_owned();
     let scratch = Scratch::new(dir, &name);
-    if dump_section(path, &scratch.check)?.is_some() {
+    if !stamp_sections(path)?.is_empty() {
         return Err(DevError::Build(format!(
             "{} already carries {SECTION}; cargo installed a file brokkr did not expect",
             path.display()
@@ -244,8 +244,8 @@ pub(crate) fn stamp_file(path: &Path, stamp: &Stamp) -> Result<(), DevError> {
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    match dump_section(&scratch.stamped, &scratch.check)? {
-        Some(bytes) if bytes == stamp.content.as_bytes() => {}
+    match stamp_sections(&scratch.stamped)?.as_slice() {
+        [bytes] if bytes.as_slice() == stamp.content.as_bytes() => {}
         _ => {
             return Err(DevError::Build(format!(
                 "the stamped copy of {} does not read back its {SECTION}",
@@ -259,44 +259,9 @@ pub(crate) fn stamp_file(path: &Path, stamp: &Stamp) -> Result<(), DevError> {
     Ok(())
 }
 
-/// [`SECTION`]'s bytes in `file`, or `None` when it has none. `objcopy`
-/// writes a rewritten copy of its input wherever it is pointed, so that goes
-/// to `/dev/null`, never back over `file`. A missing section is told by the
-/// dump file not appearing, not by the exit status: binutils 2.4x reports
-/// "can't dump section - it does not exist" and still exits 0.
-fn dump_section(file: &Path, check: &Path) -> Result<Option<Vec<u8>>, DevError> {
-    match std::fs::remove_file(check) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
-    }
-    let mut section = std::ffi::OsString::from(format!("{SECTION}="));
-    section.push(check.as_os_str());
-    let out = crate::output::child::command_output(
-        crate::process::spawn::ChildPolicy::plain_command("objcopy")
-            .arg("--dump-section")
-            .arg(&section)
-            .arg(file)
-            .arg("/dev/null"),
-    )
-    .map_err(|e| DevError::Build(format!("cannot run objcopy on {}: {e}", file.display())))?;
-    match std::fs::read(check) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // No dump: no section, unless objcopy could not read the file.
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if out.status.success() || stderr.contains("does not exist") {
-                Ok(None)
-            } else {
-                Err(DevError::Build(format!(
-                    "objcopy cannot read {}: {}",
-                    file.display(),
-                    stderr.trim()
-                )))
-            }
-        }
-        Err(e) => Err(e.into()),
-    }
+/// Every [`SECTION`] in `file`, read natively (`crate::elf_section`).
+fn stamp_sections(file: &Path) -> Result<Vec<Vec<u8>>, DevError> {
+    crate::elf_section::read_sections(file, SECTION).map_err(DevError::Build)
 }
 
 /// The scratch files one stamp uses beside the installed file, removed
@@ -304,7 +269,6 @@ fn dump_section(file: &Path, check: &Path) -> Result<Option<Vec<u8>>, DevError> 
 struct Scratch {
     content: PathBuf,
     stamped: PathBuf,
-    check: PathBuf,
 }
 
 impl Scratch {
@@ -313,14 +277,13 @@ impl Scratch {
         Self {
             content: dir.join(format!("{base}.info")),
             stamped: dir.join(&base),
-            check: dir.join(format!("{base}.check")),
         }
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        for path in [&self.content, &self.stamped, &self.check] {
+        for path in [&self.content, &self.stamped] {
             match std::fs::remove_file(path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

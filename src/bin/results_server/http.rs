@@ -183,6 +183,9 @@ fn identity(shared: &Shared, query: Option<&str>) -> Response<Full<Bytes>> {
     if let Some(build) = &shared.build {
         body["build"] = build.as_str().into();
     }
+    if let Some(stamp) = crate::identity::own_stamp() {
+        body["stamp"] = stamp.into();
+    }
     if let Some(probe) = probe {
         body["probe"] = probe.into();
     }

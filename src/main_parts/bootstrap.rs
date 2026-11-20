@@ -198,6 +198,12 @@ pub(crate) fn main() {
     }
     shed_inherited_run_env();
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    // The version banner needs no project, no config beyond the user-wide
+    // results server, and no history row: answered before any of them.
+    if matches!(raw_args.as_slice(), [flag] if flag == "--version" || flag == "-V") {
+        crate::version_cmd::print_version();
+        std::process::exit(0);
+    }
     let start = Instant::now();
 
     // Resolve the project once for help filtering, the toolchain setting, command

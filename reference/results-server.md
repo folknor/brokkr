@@ -135,7 +135,9 @@ still sending its body may see the connection reset instead, which a client
 counts as possibly sent and retries, idempotent by the run uuid.
 
 `GET /bench` is answered by this layer, never the worker: the server, its
-version and protocol, `build` and an echoed `probe` (Deploy, below). Every
+version and protocol, `build`, `stamp` (the `.brokkr.build_info` line read
+once from `/proc/self/exe` through the shared `src/elf_section.rs`, omitted
+when the executable carries none) and an echoed `probe` (Deploy, below). Every
 answer the service composes carries `Cache-Control: no-store`, since a
 replayed identity could report a build no live process runs.
 

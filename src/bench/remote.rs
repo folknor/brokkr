@@ -152,6 +152,33 @@ impl Client {
         }
     }
 
+    /// The server's identity answer from one quick attempt, for `brokkr
+    /// --version`: a version banner must not sit through the read policy's
+    /// retries against a server that is down.
+    pub(crate) fn identity_once(server: &ResultsServer) -> Result<serde_json::Value, String> {
+        let config = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .timeout_connect(Some(Duration::from_secs(3)))
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build();
+        let agent = ureq::Agent::new_with_config(config);
+        let mut response = agent
+            .get(&server.endpoint)
+            .header(wire::PROTOCOL_HEADER, wire::PROTOCOL_VERSION.to_string())
+            .call()
+            .map_err(|e| e.to_string())?;
+        if response.status() != 200 {
+            return Err(format!("answered HTTP {}", response.status().as_u16()));
+        }
+        let body = response
+            .body_mut()
+            .read_to_vec()
+            .map_err(|e| format!("its answer could not be read: {e}"))?;
+        serde_json::from_slice(&body)
+            .map_err(|_| "its identity does not read as a brokkr results server's".to_owned())
+    }
+
     /// One read request, retried, and its answer.
     pub(crate) fn request(&self, request: &wire::Request) -> Result<wire::Answer, DevError> {
         let body = serde_json::to_vec(request)

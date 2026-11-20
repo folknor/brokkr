@@ -21,6 +21,9 @@
 #[path = "../../bench/store/mod.rs"]
 mod store;
 
+#[path = "../../elf_section.rs"]
+mod elf_section;
+
 mod deploy;
 mod http;
 mod identity;

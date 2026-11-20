@@ -347,6 +347,14 @@ carry no stamp. Outside a git checkout the bins carry none either, said in
 one line. A stamp brokkr should write and cannot fails the install, naming
 the bin: it is installed but unstamped.
 
+`brokkr --version` prints brokkr's own stamp and protocol, then asks the
+user-wide `results_server` once (a few seconds at most) and prints its
+stamp and protocol, noting a protocol or commit that differs from this
+brokkr's; an unconfigured or unreachable server is said so, and the command
+still exits 0. brokkr reads stamps itself (`src/elf_section.rs`), so the
+check after `objcopy` adds a section does not depend on `objcopy`'s own
+reading.
+
 What the stamp does not see: edits made while install runs, changes git is
 told to hide (assume-unchanged, skip-worktree), ignored build inputs, path
 dependencies outside the checkout, and whether cargo was right that an

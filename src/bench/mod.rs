@@ -29,7 +29,7 @@ mod params;
 mod policy;
 mod publication;
 mod registry;
-mod remote;
+pub(crate) mod remote;
 mod resources;
 pub(crate) mod results;
 pub(crate) mod runner;

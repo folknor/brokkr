@@ -37,6 +37,26 @@ pub(crate) fn executable_digest() -> Result<String, String> {
     Ok(format!("{:032x}", hasher.digest128()))
 }
 
+/// The build stamp `brokkr install` wrote into this process's executable
+/// (`sha <commit> clean <y|n>`), read once from `/proc/self/exe`, which names
+/// the running file object even after an install replaced its path. `None`
+/// for an unstamped build; an unreadable stamp is logged once and is `None`.
+pub(crate) fn own_stamp() -> Option<&'static str> {
+    static STAMP: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    STAMP
+        .get_or_init(|| match crate::elf_section::own_stamp(STAMP_SECTION) {
+            Ok(stamp) => stamp,
+            Err(e) => {
+                crate::log(&format!("no build stamp on the identity route: {e}"));
+                None
+            }
+        })
+        .as_deref()
+}
+
+/// The section `brokkr install` stamps (`src/build_info.rs`'s `SECTION`).
+const STAMP_SECTION: &str = ".brokkr.build_info";
+
 /// The probe a query names, if any: `probe=<1 to 64 lowercase hex>`, at
 /// most once. Other parameters are ignored.
 pub(crate) fn probe_of(query: Option<&str>) -> Result<Option<String>, String> {

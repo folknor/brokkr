@@ -61,11 +61,15 @@ speaks plain HTTP/1.1.
 
 ```sh
 curl -s http://127.0.0.1:8650/bench
-{"build":"5f0c...","protocol":1,"server":"brokkr-results-server","version":"0.1.0"}
+{"build":"5f0c...","protocol":...,"server":"brokkr-results-server","stamp":"sha 1f0c... clean y","version":"0.1.0"}
 ```
 
 `build` is a digest of the executable the process runs, read when it
 started; it is absent if the server could not read its own executable.
+`stamp` is the build stamp `brokkr install` wrote into that executable
+(`docs/commands/run.md`, Build stamp), absent for a server not installed by
+`brokkr install`. `brokkr --version` asks this route and prints the server's
+stamp and protocol under its own.
 `GET /bench?probe=<hex>` also echoes the probe (1 to 64 lowercase hex
 characters), so a caller knows the answer was made for its request. Every
 answer the server composes says `Cache-Control: no-store` (hyper's own

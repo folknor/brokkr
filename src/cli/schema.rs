@@ -8,9 +8,10 @@ use clap::{ArgGroup, Args, Parser, Subcommand};
 
 /// Version banner: semver plus the short git hash (with a `-dirty` suffix for
 /// an unclean tree) and the UTC build time, stamped at compile time by
-/// `build.rs`. e.g. `0.1.0 (abc123def 2026-07-12 12:34:56 UTC)`. Fed to clap's
-/// `--version` so a stale installed `brokkr` names the commit it was built from.
-const LONG_VERSION: &str = env!("BROKKR_LONG_VERSION");
+/// `build.rs`. e.g. `0.1.0 (abc123def 2026-07-12 12:34:56 UTC)`. The first
+/// line `--version` prints (`crate::version_cmd`), which answers the flag
+/// before clap parses; clap keeps it for the flag's place in help.
+pub(crate) const LONG_VERSION: &str = env!("BROKKR_LONG_VERSION");
 
 /// `brokkr outline --depth` when the flag is absent; clap renders it in the
 /// help text, so the doc comment does not repeat it.
