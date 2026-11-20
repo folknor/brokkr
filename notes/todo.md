@@ -145,12 +145,18 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
-### `passthrough --no-build` builds a path without the target triple (2026-11-20)
+### Cargo config discovery dedups symlinked files by canonical path (2026-11-20)
 
-`build::resolve_existing_binary` joins cargo metadata's `target_directory`,
-the profile dir and the bin name. With a `build.target` configured, cargo
-writes the binary under `<target>/<triple>/<profile>/`, so the path names a
-file cargo did not build: a stale one from an earlier host build, or none.
+`rustflags::read_config_files_under` (and `push_existing_config` for ancestor
+directories) skips a file whose canonical path is already loaded. Cargo tracks
+each include by the path it was reached through and resolves a relative child
+include against that path, so two symlinked includes of one file can pull in
+different children. Brokkr visits the first, misses an optional child only the
+second reaches, then skips the second: a `build.target`, runner or env entry
+cargo sees goes unseen by every `CargoLaunchConfig` consumer. Dedup by the
+include path and keep cycle detection separate. Also: with `CARGO_HOME` unset
+the helper consults only a nonempty `HOME`, where cargo falls back to the
+account database.
 
 ### `resolve_bin_name` falls back to the first bin (2026-11-20)
 

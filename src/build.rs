@@ -811,17 +811,45 @@ fn is_warning_summary(line: &str) -> bool {
     rest.is_empty() || rest.starts_with(" (")
 }
 
-/// Resolve the selected profile's binary path from cargo metadata without
-/// building. A lookup only: nothing here checks that the binary found was
-/// built with the requested features, or under the profile's current
+/// Resolve the selected profile's binary path at the conventional host layout
+/// (`<target dir>/<profile dir>/<bin>`) without building. A lookup only:
+/// nothing here checks that the binary found was built with the requested
+/// features (a bin whose `required-features` the current selection lacks can
+/// still be found from an earlier build), or under the profile's current
 /// definition, and a custom profile's existence goes unchecked because
 /// Cargo, which validates it, never runs.
+///
+/// That layout is cargo's only while no build target is configured. Any
+/// `CARGO_BUILD_TARGET` (even empty) or cargo-config `build.target` is
+/// refused instead of resolved: cargo merges an env value into a configured
+/// array, splits it on whitespace, expands `host-tuple` to its own host and
+/// names a JSON target's directory after the canonicalized file's stem, so a
+/// reimplementation names a file cargo did not write. Omitting `--no-build`
+/// takes the path from cargo's own report.
 pub fn resolve_existing_binary(
     config: &BuildConfig,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
     let target_override = cargo_target_dir_override(project_root);
     let env = target_dir_env(target_override.as_deref());
+    let launch = crate::rustflags::CargoLaunchConfig::discover(
+        project_root,
+        crate::rustflags::EffectiveEnv::new(&env),
+    )?;
+    if let Some(target) = &launch.build_target {
+        let detail = match &target.origin {
+            crate::rustflags::SourceOrigin::Environment(value) => {
+                format!("CARGO_BUILD_TARGET={} is set", value.to_string_lossy())
+            }
+            crate::rustflags::SourceOrigin::Config(path) => {
+                format!("{} sets `build.target`", crate::output::path(path))
+            }
+        };
+        return Err(DevError::Build(format!(
+            "{detail}: --no-build looks only at the host layout, and cargo writes a \
+             configured target's binary elsewhere. Omit --no-build so cargo reports the path."
+        )));
+    }
     let metadata = metadata::load(project_root, Query::workspace(), &env, None)?;
     let bin_name = resolve_bin_name(&metadata, config)?;
 
