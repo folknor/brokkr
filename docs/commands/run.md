@@ -293,13 +293,76 @@ nothing else.
 
 ```
 brokkr install [--debug|--release|--profile NAME] [--unlocked]
+brokkr install --names
 ```
 
-Runs `cargo install [--debug|--profile NAME] --locked --path <pkg dir>` once per selected
+Runs `cargo install [--debug|--profile NAME] --locked --path <pkg dir> --root <cargo home>` once per selected
 package, in the order `[bin] install` lists them, announcing each invocation,
-then the project's `[[install]]` steps (see Post-install steps below).
+stamps the bins each one installed (see Build stamp below), then runs the project's `[[install]]` steps (see Post-install steps below).
 `cargo install --path` installs every bin the package carries, so the
 selection is by *package*, not by target.
+
+### Build stamp
+
+Every bin `install` installs carries the commit it was built from, so a
+stale install is detectable from the file itself, without running it:
+
+```
+objcopy --dump-section .brokkr.build_info=OUT BIN /dev/null
+```
+
+`OUT` then holds one line, `sha <full commit id> clean <y|n>`, and a
+newline; `readelf -p .brokkr.build_info BIN` shows it too. A file with no
+such section - built by plain cargo, installed before stamping existed, or
+one brokkr failed to stamp - has no known commit. Two `objcopy` traps for a
+script reading it: a missing section is reported on stderr with exit
+status 0, so test whether `OUT` was written rather than the exit status;
+and dumping to `/dev/stdout` truncates a stdout that is a file. The last
+argument is where `objcopy` writes a copy of `BIN`; `/dev/null` discards
+it, and leaving it out rewrites `BIN` in place. Nothing in the build changes: brokkr adds the section with
+`objcopy --add-section` after cargo installs the file, writing a copy beside
+it, checking the copy reads back exactly the stamp, and renaming it over
+the original with its permissions. The section is not loaded at run time. A
+project needs no code or config for it. `objcopy` (binutils) must be on
+`PATH`.
+
+The commit and the clean bit are sampled once per package, under the lock
+and before the first cargo runs, at the git top level of the package's own
+directory, which need not be the directory install was run from. Clean
+follows the record rule `check` uses for invocation records, with two
+differences: submodule changes always count, whatever git config says, and
+a tracked file under `.brokkr` counts too. brokkr's own verified tree edits
+during the locked window (a moved toolchain pin, a filtered cargo config)
+do not count, since they are the project's configured install policy at
+that commit. `install` also refuses to run when `brokkr.toml` or a file it
+includes changed while it waited for the lock, so a moved checkout cannot
+pair one commit's stamp with another's plan.
+
+To know where the bins land, brokkr passes `--root` itself: the cargo home
+(`CARGO_HOME`, else `~/.cargo`), which is where cargo would install anyway.
+When `CARGO_INSTALL_ROOT` is set, or a cargo config `install` reads (from
+the package directory or the directory install runs in) sets
+`install.root`, brokkr leaves the root to cargo and warns that the bins
+carry no stamp. Outside a git checkout the bins carry none either, said in
+one line. A stamp brokkr should write and cannot fails the install, naming
+the bin: it is installed but unstamped.
+
+What the stamp does not see: edits made while install runs, changes git is
+told to hide (assume-unchanged, skip-worktree), ignored build inputs, path
+dependencies outside the checkout, and whether cargo was right that an
+artifact was fresh. `[[install]]` copies are not stamped.
+
+### `--names`
+
+`brokkr install --names` prints the bin names `install` would install, one
+per line on stdout, for the same packages, and stops. It builds nothing and
+takes no lock. A bin is listed when each of its `required-features` is
+enabled by the package's default features, following only the package's
+own feature table, since `install` passes no feature flags. A bin requiring
+a dependency's feature (`dep/feat`), or one whose answer depends on whether
+a `dep/feat` entry also enables an optional dependency's implicit feature,
+makes the command fail naming the bin rather than guess. `install` itself
+still installs such a package and warns that its bins carry no stamp.
 
 ### `--locked` is the default
 

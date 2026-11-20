@@ -1032,6 +1032,11 @@ pub(crate) struct InstallCmd {
     /// Re-resolve dependencies instead of honouring Cargo.lock
     #[arg(long)]
     pub(crate) unlocked: bool,
+
+    /// Print the bin names install would install, one per line, and stop:
+    /// no build, no lock
+    #[arg(long, conflicts_with_all = ["debug", "release", "profile", "unlocked"])]
+    pub(crate) names: bool,
 }
 
 // `brokkr wc`'s arguments; see `Command::Wc`.

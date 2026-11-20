@@ -2,6 +2,7 @@ mod artefacts;
 mod atomic_write;
 mod bench;
 mod build;
+mod build_info;
 mod build_provenance;
 mod build_purpose;
 mod cargo;

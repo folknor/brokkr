@@ -217,7 +217,9 @@ pub(crate) fn main() {
     cli::set_invocation(command_id);
     // `build`'s stdout is its value - the snapshot path - so everything else
     // the run says, from the lock wait on, goes to stderr.
-    if command_id == cli::CommandId::Build {
+    if command_id == cli::CommandId::Build
+        || matches!(cli.command, Command::Install(cli::InstallCmd { names: true, .. }))
+    {
         output::reserve_stdout();
     }
 
@@ -341,6 +343,19 @@ pub(super) fn run_install(
         project_root: d.project_root.as_path(),
     });
     let lock = context::reenter_command_lock()?;
+    // The plan was read before the lock wait, and the build stamp samples
+    // the checkout after it: a checkout moved in between would pair a new
+    // commit's stamp with the old commit's plan. Recompose and compare.
+    if let Some(d) = detection {
+        let (now, _) = crate::config::compose(&d.project_root.as_path().join("brokkr.toml"))?;
+        if &now != d.config_sources.composed() {
+            return Err(DevError::Refused(
+                "brokkr.toml or a file it includes changed while install waited for the \
+                 lock - run install again"
+                    .into(),
+            ));
+        }
+    }
     runnables::cmd_install(&build_root, bin_cfg, steps, choice, unlocked, Some(&lock))
 }
 

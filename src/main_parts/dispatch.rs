@@ -255,11 +255,19 @@ pub(super) fn run(
                 detection,
             )
         }
+        Command::Install(cli::InstallCmd { names: true, .. }) => {
+            let (bin_cfg, build_root) = match detection {
+                Some(d) => (d.config.bin.as_ref(), d.build_root.as_path().to_path_buf()),
+                None => (None, std::env::current_dir()?),
+            };
+            runnables::cmd_install_names(&build_root, bin_cfg)
+        }
         Command::Install(cli::InstallCmd {
             debug,
             release,
             profile,
             unlocked,
+            names: false,
         }) => run_install(
             profile_choice(*debug, *release, profile.as_ref()),
             *unlocked,

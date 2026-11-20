@@ -439,12 +439,16 @@ impl Drop for Staging {
 struct InstallPackage {
     name: String,
     package_dir: PathBuf,
+    /// The bins `cargo install` installs for it, or why brokkr cannot name
+    /// them ([`crate::build_info::installable_bins`]).
+    bins: Result<Vec<String>, DevError>,
 }
 
 /// Resolve configured install package names against one metadata snapshot:
 /// package names, never bin names or directory basenames, and an unknown
 /// package refused.
 fn resolve_install_packages(
+    metadata: &crate::cargo::metadata::CargoMetadata,
     runnables: &[Runnable],
     install: &[String],
 ) -> Result<Vec<InstallPackage>, DevError> {
@@ -460,12 +464,76 @@ fn resolve_install_packages(
                  in this workspace"
             )));
         };
+        let package = metadata
+            .packages
+            .iter()
+            .find(|p| &p.name == pkg && Path::new(&p.manifest_path).parent() == Some(first.package_dir.as_path()))
+            .ok_or_else(|| DevError::Internal(format!("package '{pkg}' left the metadata snapshot")))?;
         out.push(InstallPackage {
             name: pkg.clone(),
             package_dir: first.package_dir.clone(),
+            bins: crate::build_info::installable_bins(package),
         });
     }
     Ok(out)
+}
+
+/// The packages `install` installs: `[bin] install`, or the workspace's sole
+/// bin-carrying package; and metadata's `workspace_root`.
+fn select_install_packages(
+    build_root: &Path,
+    cfg: Option<&BinConfig>,
+) -> Result<(Vec<InstallPackage>, PathBuf), DevError> {
+    let metadata = metadata::load(build_root, Query::workspace(), &[], None)?;
+    let (runnables, workspace_root) = runnables_of(&metadata)?;
+    let bins: Vec<&Runnable> = runnables.iter().filter(|r| !r.example).collect();
+
+    let install = match cfg.map(|c| c.install.as_slice()) {
+        Some(list) if !list.is_empty() => list.to_vec(),
+        _ => {
+            // Auto: exactly one package with bin targets.
+            let mut pkgs: Vec<&Runnable> = Vec::new();
+            for r in &bins {
+                if !pkgs.iter().any(|p| p.package == r.package) {
+                    pkgs.push(r);
+                }
+            }
+            match pkgs.as_slice() {
+                [] => {
+                    return Err(DevError::Refused(
+                        "no bin targets in this workspace - nothing to install".into(),
+                    ));
+                }
+                [one] => vec![one.package.clone()],
+                many => {
+                    let mut msg = format!("{} packages carry bin targets:\n", many.len());
+                    for r in many {
+                        msg.push_str(&format!("  {}\n", r.package));
+                    }
+                    msg.push_str("list the ones to install under [bin] install");
+                    return Err(DevError::Refused(msg));
+                }
+            }
+        }
+    };
+    let selected = resolve_install_packages(&metadata, &runnables, &install)?;
+    Ok((selected, workspace_root))
+}
+
+/// `brokkr install --names`: the bin names `install` installs, one per line
+/// on stdout, in package order. Builds nothing and takes no lock. A package
+/// whose bins brokkr cannot name refuses the whole listing: a partial one
+/// would hide a binary from whoever audits the list.
+pub fn cmd_install_names(build_root: &Path, cfg: Option<&BinConfig>) -> Result<(), DevError> {
+    let (selected, _) = select_install_packages(build_root, cfg)?;
+    let mut names = Vec::new();
+    for package in selected {
+        names.extend(package.bins?);
+    }
+    for name in names {
+        output::data_stdout(&name);
+    }
+    Ok(())
 }
 
 /// `brokkr install`: install `[bin] install`'s packages, or the sole
@@ -500,38 +568,14 @@ pub fn cmd_install(
     // Resolved once, before the first package: a refused profile refuses
     // the whole install, and the override warning prints once.
     let profile = bin_profile(purpose, cfg, choice)?;
-    let (runnables, workspace_root) = discover_workspace(build_root)?;
-    let bins: Vec<&Runnable> = runnables.iter().filter(|r| !r.example).collect();
-
-    let install = match cfg.map(|c| c.install.as_slice()) {
-        Some(list) if !list.is_empty() => list.to_vec(),
-        _ => {
-            // Auto: exactly one package with bin targets.
-            let mut pkgs: Vec<&Runnable> = Vec::new();
-            for r in &bins {
-                if !pkgs.iter().any(|p| p.package == r.package) {
-                    pkgs.push(r);
-                }
-            }
-            match pkgs.as_slice() {
-                [] => {
-                    return Err(DevError::Refused(
-                        "no bin targets in this workspace - nothing to install".into(),
-                    ));
-                }
-                [one] => vec![one.package.clone()],
-                many => {
-                    let mut msg = format!("{} packages carry bin targets:\n", many.len());
-                    for r in many {
-                        msg.push_str(&format!("  {}\n", r.package));
-                    }
-                    msg.push_str("list the ones to install under [bin] install");
-                    return Err(DevError::Refused(msg));
-                }
-            }
-        }
-    };
-    let selected = resolve_install_packages(&runnables, &install)?;
+    let (selected, workspace_root) = select_install_packages(build_root, cfg)?;
+    // Sampled here, under the lock and before anything installs: each
+    // package's stamp names its own checkout, which need not be the build
+    // root's (`crate::build_info`).
+    let mut stamps = Vec::with_capacity(selected.len());
+    for package in &selected {
+        stamps.push(crate::build_info::sample(&package.package_dir)?);
+    }
     let plan = crate::install_step::preflight(steps, build_root)?;
 
     // A lock cargo cannot find is a lock `--locked` would only make it abort
@@ -540,7 +584,7 @@ pub fn cmd_install(
     // workspace's `Cargo.lock` at metadata's `workspace_root` - not the member
     // directory, and not wherever brokkr happened to be invoked from.
     let has_lock = workspace_root.join("Cargo.lock").is_file();
-    for package in selected {
+    for (package, stamp) in selected.into_iter().zip(stamps) {
         let locked = !unlocked && has_lock;
         if !unlocked && !locked {
             output::run_msg(&format!(
@@ -564,6 +608,20 @@ pub fn cmd_install(
         if locked {
             cargo_args.push("--locked".into());
         }
+        let env_refs: Vec<(&str, &str)> = shape
+            .env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let root = crate::build_info::install_root(
+            build_root,
+            &package.package_dir,
+            crate::rustflags::EffectiveEnv::new(&env_refs),
+        )?;
+        if let crate::build_info::InstallRoot::Default(root) = &root {
+            cargo_args.push("--root".into());
+            cargo_args.push(root.display().to_string());
+        }
         output::run_msg(&format!("cargo {}", cargo_args.join(" ")));
         let code = run_cargo_with_env(&cargo_args, &shape.env, lock)?;
         if code != 0 {
@@ -573,8 +631,63 @@ pub fn cmd_install(
                 package.name
             )));
         }
+        stamp_installed(&package, stamp.as_ref(), &root)?;
     }
     plan.execute(lock)
+}
+
+/// Stamp the bins cargo just installed for `package`, or say why they carry
+/// no stamp. A stamp brokkr should write and cannot fails the install: the
+/// file is already in place, unstamped, and a fleet audit reads it as
+/// unknown, so the failure has to be as loud as a failed build.
+fn stamp_installed(
+    package: &InstallPackage,
+    stamp: Option<&crate::build_info::Stamp>,
+    root: &crate::build_info::InstallRoot,
+) -> Result<(), DevError> {
+    let Some(stamp) = stamp else {
+        output::run_msg(&format!(
+            "{} is not in a git checkout with a commit - its bins carry no build stamp",
+            package.name
+        ));
+        return Ok(());
+    };
+    let root = match root {
+        crate::build_info::InstallRoot::Default(root) => root,
+        crate::build_info::InstallRoot::Overridden(why) => {
+            output::warn(&format!(
+                "{why}, so cargo chose where {}'s bins went - they carry no build stamp",
+                package.name
+            ));
+            return Ok(());
+        }
+    };
+    let bins = match &package.bins {
+        Ok(bins) => bins,
+        Err(e) => {
+            output::warn(&format!("{e} - {}'s bins carry no build stamp", package.name));
+            return Ok(());
+        }
+    };
+    if bins.is_empty() {
+        return Ok(());
+    }
+    for bin in bins {
+        let path = root
+            .join("bin")
+            .join(format!("{bin}{}", std::env::consts::EXE_SUFFIX));
+        crate::build_info::stamp_file(&path, stamp).map_err(|e| {
+            DevError::Build(format!(
+                "{bin} is installed but unstamped, so it reads as unknown: {e}"
+            ))
+        })?;
+    }
+    output::run_msg(&format!(
+        "stamped {} with {}",
+        bins.join(", "),
+        stamp.content.trim_end()
+    ));
+    Ok(())
 }
 
 /// Spawn cargo with inherited stdio and return its exit code. A signal death

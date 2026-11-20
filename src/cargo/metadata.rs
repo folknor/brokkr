@@ -829,6 +829,10 @@ pub(crate) struct CargoTarget {
     /// The target's root source file (absolute).
     #[serde(default)]
     pub(crate) src_path: String,
+    /// The target's `required-features`: cargo skips building (and
+    /// installing) it unless every one is enabled.
+    #[serde(default, rename = "required-features")]
+    pub(crate) required_features: Vec<String>,
     #[serde(default)]
     #[allow(dead_code)]
     pub(crate) crate_types: Vec<String>,

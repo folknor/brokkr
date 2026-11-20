@@ -60,8 +60,23 @@ impl TreeState {
         Self::read_with_measurement_inputs(root, &included_configs)
     }
 
+    /// Read the status snapshot an install's build stamp judges: submodule
+    /// changes always shown, whatever git config says about them. `root` must
+    /// be the checkout's top level, where porcelain paths are anchored.
+    pub(crate) fn read_for_install(root: &Path) -> Option<Self> {
+        Self::read_with_args(root, &["--ignore-submodules=none"], &HashSet::new())
+    }
+
     fn read_with_measurement_inputs(
         root: &Path,
+        included_configs: &HashSet<PathBuf>,
+    ) -> Option<Self> {
+        Self::read_with_args(root, &[], included_configs)
+    }
+
+    fn read_with_args(
+        root: &Path,
+        extra: &[&str],
         included_configs: &HashSet<PathBuf>,
     ) -> Option<Self> {
         let output = crate::output::child::command_output(
@@ -73,6 +88,7 @@ impl TreeState {
                     "--no-renames",
                     "--untracked-files=all",
                 ])
+                .args(extra)
                 .current_dir(root),
         )
         .ok()?;
@@ -174,6 +190,22 @@ impl TreeState {
         self.entries.iter().any(|entry| {
             entry.paths.iter().any(|path| {
                 !tree_edits.contains(&path.path) && path.class != PathClass::BrokkrStore
+            })
+        })
+    }
+
+    /// Whether an installed binary's build stamp must say the tree was dirty.
+    /// The record rule, except that brokkr state is exempt only while
+    /// untracked: a tracked file under `.brokkr` can be a build input. The
+    /// verified locked-window edits stay exempt, since they are the
+    /// project's configured install policy at this commit.
+    pub(crate) fn for_install(&self) -> bool {
+        let tree_edits = brokkr_tree_edits(&self.root, &self.entries);
+        self.entries.iter().any(|entry| {
+            let untracked = matches!(entry.index, b'?' | b'!');
+            entry.paths.iter().any(|path| {
+                !tree_edits.contains(&path.path)
+                    && !(untracked && path.class == PathClass::BrokkrStore)
             })
         })
     }

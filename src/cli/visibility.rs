@@ -188,6 +188,8 @@ impl CommandSpec {
             super::Command::Serve(super::ServeCmd { target, stop, .. }) => {
                 target.is_none() || stop.is_some()
             }
+            // Listing what install would install reads metadata only.
+            super::Command::Install(super::InstallCmd { names: true, .. }) => true,
             _ => false,
         }
     }
