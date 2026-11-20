@@ -57,6 +57,42 @@ itself, so every build still goes through the lock, the install stamp and the
 recorded provenance. The builtin returns those facts, which answers #200 for
 script consumers and for `--with` alike.
 
+## Launching: brokkr owns the environment
+
+Direction, not scheduled: stop launching programs through `cargo run` and
+launch every one the same way, with an environment brokkr constructs itself,
+at a lower level than "inherit and add a variable" for every invocation.
+
+Why: the launch paths disagree today. Plain `run` builds captured and then
+launches with `cargo run --quiet`, so cargo's launch setup applies. `--commit`
+and `--with` (and benches, `serve`, `build` consumers) execute the artifact
+directly and get none of it. A program that needs that setup works under one
+form and fails under another, which breaks an A/B between them. `--with`
+cannot simply move to `cargo run`: `BROKKR_WITH_EXE` would reach cargo and
+build scripts and become a build input.
+
+What cargo's launch sets up, which a reimplementation has to own (cargo's
+`target_process` in `compiler/compilation.rs` is the reference):
+
+- **Runner.** `target.<triple>.runner` / `CARGO_TARGET_<TRIPLE>_RUNNER`,
+  resolved for the actual compile target (implicit host, `build.target`,
+  `cfg()` matching, config-relative paths, string or array form), launched as
+  `runner <runner args> <artifact> <args>`.
+- **Loader search path.** Ordered: eligible build-script `rustc-link-search`
+  dirs (cargo filters ones outside its build outputs), the profile's output
+  and `deps` dirs, the toolchain's target sysroot lib dir, then the inherited
+  value. `LD_LIBRARY_PATH` on Linux, `DYLD_FALLBACK_LIBRARY_PATH` on macOS,
+  `PATH` on Windows.
+- **Runtime variables.** `CARGO`, `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH`,
+  `CARGO_PKG_*`, cargo config `[env]` with its precedence, and the selected
+  unit's build-script `rustc-env`.
+
+Where the facts come from: cargo's stable `--message-format=json` gives the
+executable, and build-script `env` and `linked_paths`, but no resolved launch
+command; runner and `[env]` need cargo config resolution of brokkr's own (or
+`cargo config get`, unstable). Paths and values should stay OS-native through
+to the spawn, not go through `display()`.
+
 ## Boundary
 
 This is the role `make install`, `make bench` and friends play around a Rust

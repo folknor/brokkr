@@ -1299,13 +1299,18 @@ pub fn run_passthrough_timed(
 /// marking and the lockfile PID publication. The criterion runner (`brokkr
 /// crit`) did exactly that.
 pub fn run_passthrough_in(
-    program: &str,
+    program: impl AsRef<std::ffi::OsStr>,
     args: &[&str],
     dir: Option<&std::path::Path>,
     env: &[(&str, &str)],
     profile: SpawnProfile,
     lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<PassthroughOutput, DevError> {
+    // The program is spawned as given, a path that is not UTF-8 included; only
+    // the label in messages is lossy.
+    let program = program.as_ref();
+    let label = program.to_string_lossy();
+    let label: &str = &label;
     // Install before the `[cargo_env]` evaluation, which polls the flag too.
     let _guard = crate::shutdown::SigtermGuard::install();
     let policy = crate::process::spawn::ChildPolicy::from_cargo_profile(profile);
@@ -1339,7 +1344,7 @@ pub fn run_passthrough_in(
 
     let run = supervise_child(
         child,
-        program,
+        label,
         start,
         ChildLimit::None,
         ChildIsolation::Inherit,
@@ -1355,7 +1360,7 @@ pub fn run_passthrough_in(
             elapsed: run.elapsed,
         }),
         Ending::Interrupted => Err(DevError::Interrupted),
-        ending => match verdict(&ending, program, &run.stderr, Exits::SUCCESS) {
+        ending => match verdict(&ending, label, &run.stderr, Exits::SUCCESS) {
             IterationVerdict::Failed(error) => Err(error),
             IterationVerdict::Interrupted => Err(DevError::Interrupted),
             IterationVerdict::Counted => Ok(PassthroughOutput {

@@ -337,10 +337,9 @@ pub fn cmd_run_built(
     if crate::shutdown::is_shutdown_requested() {
         return Err(DevError::Interrupted);
     }
-    let exe_str = exe.path.display().to_string();
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let ended = output::run_passthrough_in(
-        &exe_str,
+        &exe.path,
         &arg_refs,
         Some(run_dir),
         env,

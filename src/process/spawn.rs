@@ -105,7 +105,7 @@ impl ChildPolicy {
     /// be displaced by a caller pair.
     pub(crate) fn command(
         self,
-        program: &str,
+        program: impl AsRef<std::ffi::OsStr>,
         args: &[&str],
         cwd: Option<&Path>,
         env: &[(&str, &str)],
