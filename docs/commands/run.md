@@ -121,7 +121,9 @@ prefix.
 ## Features
 
 `--features` (short `-F`), `--all-features` and `--no-default-features` are
-**forwarded verbatim** to `cargo run`. Brokkr does not resolve feature names
+**forwarded verbatim** to cargo: each `--features` value reaches cargo as its
+own `--features` argument, unchanged and in order, on every path that builds -
+plain `run`, `--commit`, `--with`'s own flags and `brokkr build`. Brokkr does not resolve feature names
 against the workspace and does not validate them: cargo owns that grammar
 (comma- or space-separated, and `--features` is repeatable), and a typo should
 fail with cargo's own message rather than be silently dropped. This is what
@@ -136,7 +138,7 @@ would change what bare `brokkr run <name>` builds without saying so, which is
 exactly the way a keep/revert measurement gets corrupted - the flag has to be
 visible in the invocation that produced the number.
 
-The feature flags belong to `run` only. `install` ships the project's
+The feature flags belong to `run` and `build`. `install` ships the project's
 binaries as configured, and has no feature surface (see below).
 
 ## `--commit`: running an older build

@@ -265,12 +265,7 @@ pub fn cmd_run(
         purpose,
         profile: bin_profile(purpose, cfg, choice)?,
         packages: vec!["-p".into(), target.package.clone()],
-        features: crate::build_purpose::Features::values(
-            feat.features,
-            feat.all,
-            feat.no_default,
-            crate::build_purpose::FeatureRendering::Occurrences,
-        ),
+        features: crate::build_purpose::Features::values(feat.features, feat.all, feat.no_default),
         unification: Vec::new(),
         targets: Vec::new(),
         env: Vec::new(),

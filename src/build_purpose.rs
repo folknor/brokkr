@@ -276,49 +276,26 @@ pub(crate) fn eligible_sweep_profile(
     }
 }
 
-/// Feature values retain their caller's rendering contract. Joining values
-/// changes whitespace-containing requests, so it must be an explicit choice.
-#[derive(Clone, Copy)]
-pub(crate) enum FeatureRendering {
-    Occurrences,
-    CommaJoined,
-}
-
 /// One prepared feature argv representation for every build request.
 #[derive(Default)]
 pub(crate) struct Features(Vec<String>);
 
 impl Features {
-    pub(crate) fn values(
-        values: &[String],
-        all: bool,
-        no_default: bool,
-        rendering: FeatureRendering,
-    ) -> Self {
+    /// Every value becomes its own `--features VALUE`, intact and in order,
+    /// for every caller: CLI occurrences and config lists alike. Cargo splits
+    /// each value on commas and whitespace and unions the pieces, so this
+    /// resolves exactly as a comma join would, while forwarding what the user
+    /// typed verbatim. Repeated `--features` needs cargo 1.38 or newer.
+    pub(crate) fn values(values: &[String], all: bool, no_default: bool) -> Self {
         let mut args = Vec::new();
-        match rendering {
-            FeatureRendering::Occurrences => {
-                for value in values {
-                    args.extend(["--features".into(), value.clone()]);
-                }
-                if all {
-                    args.push("--all-features".into());
-                }
-                if no_default {
-                    args.push("--no-default-features".into());
-                }
-            }
-            FeatureRendering::CommaJoined => {
-                if no_default {
-                    args.push("--no-default-features".into());
-                }
-                if all {
-                    args.push("--all-features".into());
-                }
-                if !values.is_empty() {
-                    args.extend(["--features".into(), values.join(",")]);
-                }
-            }
+        for value in values {
+            args.extend(["--features".into(), value.clone()]);
+        }
+        if all {
+            args.push("--all-features".into());
+        }
+        if no_default {
+            args.push("--no-default-features".into());
         }
         Self(args)
     }
@@ -555,7 +532,7 @@ mod tests {
                 purpose,
                 profile: profile(purpose, Profiles::default()).unwrap(),
                 packages: vec!["-p".into(), "pkg".into()],
-                features: Features::values(&values, false, true, FeatureRendering::Occurrences),
+                features: Features::values(&values, false, true),
                 unification: Vec::new(),
                 targets: Vec::new(),
                 env: Vec::new(),
