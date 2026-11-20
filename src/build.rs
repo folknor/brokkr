@@ -661,19 +661,29 @@ fn cargo_build_inner(
     Ok(built)
 }
 
-/// `brokkr run`'s prebuild: `cargo` with `args` (a `build` of exactly what the
-/// following `cargo run` selects) in `project_root`, its output captured.
+/// What [`cargo_captured`] does with a successful build's compiler warnings.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompilerWarnings {
+    /// Print them: nothing after this build shows them (`install`).
+    Print,
+    /// Leave them to the quiet `cargo run` that follows, which replays a
+    /// fresh local crate's warnings itself, so each prints once (`run`).
+    LeaveToRun,
+}
+
+/// `cargo` with `args` (built `--color=never --message-format=json`) in
+/// `project_root`, its output captured: `run`'s prebuild and `install`.
 ///
-/// On failure everything cargo said is printed, once, and the error is a bare
-/// label. On success only what the following quiet `cargo run` would not
-/// repeat is printed: build-script `cargo::warning` lines and cargo's own
-/// warnings, which a quiet shell swallows. Compiler diagnostics are left to
-/// that run, which replays a fresh local crate's warnings itself, so each
-/// prints once.
-pub(crate) fn cargo_prebuild(
+/// On failure everything cargo said is printed, once, and the error is the
+/// bare label `failure`. On success build-script `cargo::warning` lines and
+/// cargo's own warnings are printed, and compiler warnings as `compiler`
+/// says.
+pub(crate) fn cargo_captured(
     args: &[String],
     env: &[(String, String)],
     project_root: &Path,
+    failure: &str,
+    compiler: CompilerWarnings,
 ) -> Result<(), DevError> {
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -692,7 +702,10 @@ pub(crate) fn cargo_prebuild(
         if !captured.success() {
             dump_compiler_messages(&captured.stdout);
             dump_build_stderr(&captured.stderr);
-            return Err(DevError::Reported("cargo build failed".into()));
+            return Err(DevError::Reported(failure.into()));
+        }
+        if compiler == CompilerWarnings::Print {
+            dump_compiler_messages(&captured.stdout);
         }
         let warnings = prebuild_warnings(&captured.stderr);
         if !warnings.is_empty() {
@@ -763,6 +776,12 @@ fn is_progress_line(line: &str) -> bool {
                 | "Unpacking"
                 | "Running"
                 | "Documenting"
+                | "Installing"
+                | "Installed"
+                | "Replacing"
+                | "Replaced"
+                | "Ignored"
+                | "Summary"
         )
     )
 }

@@ -239,7 +239,13 @@ pub fn cmd_run(
     // Held across the handoff: the prebuild's own guard drops when it
     // returns, and a stop landing between the two cargos must still be seen.
     let _interrupts = crate::shutdown::SigtermGuard::install();
-    crate::build::cargo_prebuild(&build_args, &shape.env, project_root)?;
+    crate::build::cargo_captured(
+        &build_args,
+        &shape.env,
+        project_root,
+        "cargo build failed",
+        crate::build::CompilerWarnings::LeaveToRun,
+    )?;
     if crate::shutdown::is_shutdown_requested() {
         return Err(DevError::Interrupted);
     }
@@ -676,15 +682,17 @@ pub fn cmd_install(
             cargo_args.push("--root".into());
             cargo_args.push(root.display().to_string());
         }
-        output::run_msg(&format!("cargo {}", cargo_args.join(" ")));
-        let (code, _) = run_cargo_with_env(&cargo_args, &shape.env, lock)?;
-        if code != 0 {
-            // Cargo printed its own error; this names which brokkr step died.
-            return Err(DevError::Reported(format!(
-                "cargo install failed for {} (exit code {code})",
-                package.name
-            )));
-        }
+        // Captured like `run`'s build: progress held back, diagnostics on
+        // failure. Nothing replays compiler warnings after an install, so
+        // they print here on success.
+        cargo_args.splice(1..1, ["--color=never".into(), "--message-format=json".into()]);
+        crate::build::cargo_captured(
+            &cargo_args,
+            &shape.env,
+            build_root,
+            &format!("cargo install failed for {}", package.name),
+            crate::build::CompilerWarnings::Print,
+        )?;
         stamp_installed(&package, stamp.as_ref(), &root)?;
     }
     plan.execute(lock)

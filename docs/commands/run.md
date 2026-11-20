@@ -80,8 +80,9 @@ build exits 1 after its diagnostics, on every path; a rebuild the plain run's
 target killed by a signal it did not get from brokkr's stop is reported by
 brokkr, which exits 1, on every path: on Unix cargo execs the program (or a
 configured runner) in its own place, so brokkr sees the signal death itself.
-An accepted interrupt or graceful stop exits 130. A failing `cargo install` ends with a one-line `[error]` naming
-the package and cargo's exit code, and exits 1.
+An accepted interrupt or graceful stop exits 130. A failing `cargo install`
+ends with cargo's diagnostics and a one-line `[error]` naming the package,
+and exits 1.
 
 `brokkr kill`, run in the holder's own project (or with `--project NAME` or
 `--all`; see `brokkr man hygiene`), asks the lock holder to stop via SIGTERM,
@@ -335,6 +336,14 @@ package, in the order `[bin] install` lists them, announcing each invocation,
 stamps the bins each one installed (see Build stamp below), then runs the project's `[[install]]` steps (see Post-install steps below).
 `cargo install --path` installs every bin the package carries, so the
 selection is by *package*, not by target.
+
+Each `cargo install` runs `--color=never --message-format=json` with its
+output captured, as `run`'s build is: a `[build]` line announces it and a
+`done in` line closes it (both suppressed in quiet mode). A failure prints
+cargo's diagnostics and a closing `cargo install failed for PACKAGE` line and
+exits 1. A success prints the compiler warnings, build-script
+`cargo::warning` lines and cargo's own warnings (a `PATH` hint among them),
+and nothing of cargo's progress.
 
 ### Build stamp
 
