@@ -661,6 +661,137 @@ fn cargo_build_inner(
     Ok(built)
 }
 
+/// `brokkr run`'s prebuild: `cargo` with `args` (a `build` of exactly what the
+/// following `cargo run` selects) in `project_root`, its output captured.
+///
+/// On failure everything cargo said is printed, once, and the error is a bare
+/// label. On success only what the following quiet `cargo run` would not
+/// repeat is printed: build-script `cargo::warning` lines and cargo's own
+/// warnings, which a quiet shell swallows. Compiler diagnostics are left to
+/// that run, which replays a fresh local crate's warnings itself, so each
+/// prints once.
+pub(crate) fn cargo_prebuild(
+    args: &[String],
+    env: &[(String, String)],
+    project_root: &Path,
+) -> Result<(), DevError> {
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    output::build_msg(&format!("cargo {}", arg_refs.join(" ")));
+    with_published_cargo(None, |publish| {
+        let start = Instant::now();
+        let captured = output::run_captured_observed(
+            "cargo",
+            &arg_refs,
+            project_root,
+            &env_refs,
+            Some(publish),
+            crate::shutdown::ChildIsolation::Inherit,
+            output::SpawnProfile::Cargo { phase: None },
+        )?;
+        if !captured.success() {
+            dump_compiler_messages(&captured.stdout);
+            dump_build_stderr(&captured.stderr);
+            return Err(DevError::Reported("cargo build failed".into()));
+        }
+        let warnings = prebuild_warnings(&captured.stderr);
+        if !warnings.is_empty() {
+            output::warn(&warnings);
+        }
+        output::build_msg(&format!("done in {}", output::format_duration(start.elapsed())));
+        Ok(())
+    })
+}
+
+/// The warning records of a successful build's stderr (built `--color=never`):
+/// each `warning:` line with the lines that continue it, up to the next status
+/// line or record. cargo's per-crate compiler-warning tallies are dropped; the
+/// rendered compiler warnings themselves are on stdout as JSON, not here.
+/// Anything before the first record (none is expected) is dropped too.
+fn prebuild_warnings(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let mut kept: Vec<&str> = Vec::new();
+    let mut keeping = false;
+    for raw in text.lines() {
+        // A forced progress bar (`term.progress.when = "always"`) redraws
+        // with carriage returns; only what the last one left is the line.
+        let line = raw.rsplit('\r').next().unwrap_or(raw);
+        if line.trim().is_empty() && raw.contains('\r') {
+            continue;
+        }
+        if is_progress_line(line)
+            || line.trim_start().starts_with("Building [")
+            || line.starts_with("error:")
+        {
+            keeping = false;
+        } else if line.starts_with("warning:") {
+            keeping = !is_warning_summary(line);
+            if keeping {
+                kept.push(line);
+            }
+        } else if keeping {
+            kept.push(line);
+        }
+    }
+    kept.join("\n").trim().to_owned()
+}
+
+/// A cargo status line: a verb right-aligned to cargo's 12 columns, a space,
+/// then what it acted on. The alignment is what tells it from a warning's
+/// continuation line that happens to start with the same word.
+fn is_progress_line(line: &str) -> bool {
+    let Some((head, _)) = line.split_at_checked(12) else {
+        return false;
+    };
+    if !line[12..].starts_with(' ') {
+        return false;
+    }
+    matches!(
+        Some(head.trim_start()),
+        Some(
+            "Compiling"
+                | "Fresh"
+                | "Finished"
+                | "Checking"
+                | "Building"
+                | "Blocking"
+                | "Downloading"
+                | "Downloaded"
+                | "Locking"
+                | "Updating"
+                | "Adding"
+                | "Unpacking"
+                | "Running"
+                | "Documenting"
+        )
+    )
+}
+
+/// cargo's `warning: `pkg` (bin "x") generated 3 warnings` tally, which
+/// counts compiler warnings the run replays with their own tally.
+fn is_warning_summary(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("warning: `") else {
+        return false;
+    };
+    let Some((_, tally)) = rest.split_once(" generated ") else {
+        return false;
+    };
+    let digits = tally.chars().take_while(char::is_ascii_digit).count();
+    if digits == 0 {
+        return false;
+    }
+    // ` warning` or ` warnings`, then the end or a parenthesised note
+    // (`(run `cargo fix ...`)`, `(1 duplicate)`).
+    let after = &tally[digits..];
+    let Some(rest) = after
+        .strip_prefix(" warnings")
+        .or_else(|| after.strip_prefix(" warning"))
+    else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with(" (")
+}
+
 /// Resolve the selected profile's binary path from cargo metadata without
 /// building. A lookup only: nothing here checks that the binary found was
 /// built with the requested features, or under the profile's current
@@ -1073,7 +1204,47 @@ mod profile_tests {
 
 #[cfg(test)]
 mod failure_report_tests {
-    use super::{filtered_build_stderr, rendered_diagnostics};
+    use super::{filtered_build_stderr, prebuild_warnings, rendered_diagnostics};
+
+    #[test]
+    fn a_successful_prebuild_keeps_script_and_cargo_warnings_only() {
+        let stderr = concat!(
+            "    Updating crates.io index\n",
+            "   Compiling sys v0.1.0\n",
+            "warning: sys@0.1.0: system library missing, using bundled\n",
+            "warning: `app` (bin \"app\") generated 2 warnings\n",
+            "warning: Patch `x v1.0.0` was not used in the crate graph.\n",
+            "Running `cargo update` may fix it.\n",
+            "    Finished `release` profile [optimized] target(s) in 1.2s\n",
+        );
+        assert_eq!(
+            prebuild_warnings(stderr.as_bytes()),
+            "warning: sys@0.1.0: system library missing, using bundled\n\
+             warning: Patch `x v1.0.0` was not used in the crate graph.\n\
+             Running `cargo update` may fix it."
+        );
+        assert_eq!(prebuild_warnings(b"   Compiling a v0.1.0\n    Finished dev\n"), "");
+        assert_eq!(
+            prebuild_warnings(b"warning: `foo` generated a warning file\n"),
+            "warning: `foo` generated a warning file"
+        );
+        assert_eq!(
+            prebuild_warnings(b"    Building [==>  ] 3/9: a\r                  \rwarning: w\n"),
+            "warning: w"
+        );
+        assert_eq!(prebuild_warnings(b"    Building [==>  ] 3/9: a\r\n"), "");
+        assert_eq!(prebuild_warnings(b"warning: keep\nerror: drop\n"), "warning: keep");
+        assert_eq!(
+            prebuild_warnings(b"warning: `foo` generated 2 warning files\n"),
+            "warning: `foo` generated 2 warning files"
+        );
+        assert_eq!(
+            prebuild_warnings(
+                b"warning: `a` (lib) generated 1 warning (run `cargo fix --lib -p a` to apply 1 suggestion)\n"
+            ),
+            ""
+        );
+    }
 
     #[test]
     fn stderr_keeps_the_cause_and_drops_progress_lines() {

@@ -1306,11 +1306,19 @@ pub fn run_passthrough_in(
     profile: SpawnProfile,
     lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<PassthroughOutput, DevError> {
-    let start = Instant::now();
     // Install before the `[cargo_env]` evaluation, which polls the flag too.
     let _guard = crate::shutdown::SigtermGuard::install();
     let policy = crate::process::spawn::ChildPolicy::from_cargo_profile(profile);
     let cmd = policy.command(program, args, dir, env, ChildIsolation::Inherit)?;
+    // A stop that landed while the command was prepared launches nothing: the
+    // supervisor would kill the child at its first poll, but not before it
+    // had started doing whatever it does.
+    if crate::shutdown::is_shutdown_requested() {
+        return Err(DevError::Interrupted);
+    }
+    // The elapsed time is the child's, from its launch: preparation, the
+    // `[cargo_env]` evaluation included, is not counted.
+    let start = Instant::now();
     // A passthrough child (`brokkr passthrough`) can be a real, long-running
     // workload with no sidecar window around it. Historically
     // this used a bare `cmd.status()`, which left brokkr with the default

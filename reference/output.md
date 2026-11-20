@@ -11,10 +11,11 @@ id is its only handle, so it is never quiet-suppressed.
 
 Operator messages default to stdout. Sidecar query provenance, including its
 errors and warnings, uses stderr so query data on stdout stays parseable. A
-command whose stdout is a value (`brokkr build`, whose one line is a path)
-calls `console::reserve_stdout` at startup, before the lock is taken: from then
-on every prefixed line, raw replay and status line goes to stderr, and
-`console::data_stdout` is the only writer left on stdout.
+command whose stdout is a value (`brokkr build`, whose one line is a path) or
+belongs to a program it runs (`brokkr run`) calls `console::reserve_stdout` at startup, before the lock is taken: from then
+on every prefixed line and raw replay goes to stderr, the transient status
+line is off, and `console::data_stdout` is brokkr's only writer left on
+stdout. A child with inherited streams still writes where it likes.
 Late bookkeeping warnings use `output::warn_forced` on stderr to leave a final
 JSON trailer intact. Shutdown warnings and errors attempt the log and renderer
 with bounded mutex waits rather than waiting indefinitely. A busy run log is

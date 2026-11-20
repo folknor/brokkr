@@ -186,8 +186,9 @@ fn resolve_target<'a>(
     Ok(Some(target))
 }
 
-/// `brokkr run [NAME]`: resolve the runnable, then exec
-/// `cargo run [--release] -p <pkg> [--example <name>] [-- <args>]`.
+/// `brokkr run [NAME]`: resolve the runnable, build it with cargo's output
+/// captured, then exec `cargo run --quiet [--release] -p <pkg> --bin|--example
+/// <name> [-- <args>]`.
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_run(
     project_root: &Path,
@@ -219,12 +220,32 @@ pub fn cmd_run(
         env: Vec::new(),
         build_root: Some(project_root),
     });
-    let mut cargo_args: Vec<String> = vec!["run".into()];
-    cargo_args.extend(shape.args);
     // Always name the target explicitly. `-p` alone leaves a multi-bin
     // package ambiguous, and cargo bails rather than guessing.
-    cargo_args.push(if target.example { "--example" } else { "--bin" }.into());
-    cargo_args.push(target.name.clone());
+    let mut selection = shape.args;
+    selection.push(if target.example { "--example" } else { "--bin" }.into());
+    selection.push(target.name.clone());
+
+    // Build first with the output captured, then let a quiet `cargo run` of
+    // the same selection launch it. The run finds the units fresh, so it
+    // compiles nothing as a rule, and cargo still launches the program
+    // itself: its runner, loader paths and `[env]` apply, which a direct
+    // exec of the artifact would lose.
+    // `--color=never` keeps the captured stderr parseable whatever
+    // `CARGO_TERM_COLOR` says; colour is presentation, not a build input.
+    let mut build_args: Vec<String> = vec!["build".into(), "--color=never".into()];
+    build_args.extend(selection.iter().cloned());
+    build_args.push("--message-format=json".into());
+    // Held across the handoff: the prebuild's own guard drops when it
+    // returns, and a stop landing between the two cargos must still be seen.
+    let _interrupts = crate::shutdown::SigtermGuard::install();
+    crate::build::cargo_prebuild(&build_args, &shape.env, project_root)?;
+    if crate::shutdown::is_shutdown_requested() {
+        return Err(DevError::Interrupted);
+    }
+
+    let mut cargo_args: Vec<String> = vec!["run".into(), "--quiet".into()];
+    cargo_args.extend(selection);
     if !args.is_empty() {
         cargo_args.push("--".into());
         cargo_args.extend(args.iter().cloned());
@@ -232,9 +253,29 @@ pub fn cmd_run(
     // The program's own exit code is the command's: cargo has nothing of its
     // own to add once the program ran, so echoing it as a brokkr error and
     // exiting 1 only lost the code.
-    match run_cargo_with_env(&cargo_args, &shape.env, lock)? {
+    let ended = run_cargo_with_env(&cargo_args, &shape.env, lock);
+    report_runtime(&target.name, &ended);
+    match ended?.0 {
         0 => Ok(()),
         code => Err(DevError::ExitCode(code)),
+    }
+}
+
+/// `[run] NAME finished after X (exit CODE)` on stderr once a launched run
+/// ends with a code: the supervisor's time from the launch to the end, the
+/// build and the launch's preparation not counted. "finished", not "exited":
+/// on the plain path a non-zero code can be cargo's own, from a rebuild it
+/// failed. An interrupt or a signal death carries no timing out of the
+/// supervisor, so it says only how the run ended; a launch that never
+/// happened says nothing, its error being the report.
+fn report_runtime(name: &str, ended: &Result<(i32, std::time::Duration), DevError>) {
+    match ended {
+        Ok((code, elapsed)) => output::run_msg(&format!(
+            "{name} finished after {} (exit {code})",
+            output::format_duration(*elapsed)
+        )),
+        Err(DevError::Interrupted) => output::run_msg(&format!("{name} interrupted")),
+        Err(_) => {}
     }
 }
 
@@ -284,21 +325,34 @@ pub fn cmd_run_built(
         all_features: feat.all,
         profile: resolve_profile(cfg, choice),
     };
+    // Held across the build-to-exec handoff, as in `cmd_run`.
+    let _interrupts = crate::shutdown::SigtermGuard::install();
     let exe = crate::build::cargo_build(&build, worktree)?;
+    if crate::shutdown::is_shutdown_requested() {
+        return Err(DevError::Interrupted);
+    }
     let exe_str = exe.path.display().to_string();
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = output::run_passthrough_in(
+    let ended = output::run_passthrough_in(
         &exe_str,
         &arg_refs,
         Some(run_dir),
         env,
         output::SpawnProfile::Plain,
         Some(lock),
-    )?;
+    )
+    .map(|out| {
+        (
+            out.failed_code(crate::output::child::Exits::SUCCESS)
+                .unwrap_or(0),
+            out.elapsed,
+        )
+    });
+    report_runtime(&target.name, &ended);
     // Same contract as `cmd_run`: the program's code, silently.
-    match out.failed_code(crate::output::child::Exits::SUCCESS) {
-        None => Ok(()),
-        Some(code) => Err(DevError::ExitCode(code)),
+    match ended?.0 {
+        0 => Ok(()),
+        code => Err(DevError::ExitCode(code)),
     }
 }
 
@@ -623,7 +677,7 @@ pub fn cmd_install(
             cargo_args.push(root.display().to_string());
         }
         output::run_msg(&format!("cargo {}", cargo_args.join(" ")));
-        let code = run_cargo_with_env(&cargo_args, &shape.env, lock)?;
+        let (code, _) = run_cargo_with_env(&cargo_args, &shape.env, lock)?;
         if code != 0 {
             // Cargo printed its own error; this names which brokkr step died.
             return Err(DevError::Reported(format!(
@@ -709,14 +763,15 @@ pub(crate) fn run_cargo(
     args: &[String],
     lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<i32, DevError> {
-    run_cargo_with_env(args, &[], lock)
+    run_cargo_with_env(args, &[], lock).map(|(code, _)| code)
 }
 
+/// The exit code, and the elapsed time from cargo's launch to its end.
 fn run_cargo_with_env(
     args: &[String],
     env: &[(String, String)],
     lock: Option<&crate::lockfile::LockGuard>,
-) -> Result<i32, DevError> {
+) -> Result<(i32, std::time::Duration), DevError> {
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let out = output::run_passthrough_in(
@@ -727,9 +782,11 @@ fn run_cargo_with_env(
         output::SpawnProfile::Cargo { phase: None },
         lock,
     )?;
-    Ok(out
-        .failed_code(crate::output::child::Exits::SUCCESS)
-        .unwrap_or(0))
+    Ok((
+        out.failed_code(crate::output::child::Exits::SUCCESS)
+            .unwrap_or(0),
+        out.elapsed,
+    ))
 }
 
 #[cfg(test)]

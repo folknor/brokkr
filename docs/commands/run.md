@@ -24,16 +24,47 @@ brokkr run [NAME] [--debug|--release|--profile NAME] [--features LIST]
             [--with-all-features] [--with-no-default-features]] [-- ARGS...]
 ```
 
-Resolves `NAME` to a discovered target and runs
+Resolves `NAME` to a discovered target, builds it, and runs
 
 ```
-cargo run [--release|--profile NAME] -p <pkg> --bin|--example <NAME> [feature flags] [-- ARGS...]
+cargo run --quiet [--release|--profile NAME] -p <pkg> --bin|--example <NAME> [feature flags] [-- ARGS...]
 ```
 
 from the build root (the working directory). The target is **always named
 explicitly** rather than left to `-p`: a package with several bins is ambiguous
 to cargo, which bails instead of guessing, so naming the target keeps every
 resolution brokkr makes an explicit one.
+
+**The build's output is captured.** Before the run, brokkr runs a `cargo
+build --color=never --message-format=json` of the same selection with its
+output held back, announced by one `[build]` line and closed by a `done in`
+line (both suppressed in quiet mode). A failing build prints its
+diagnostics and a closing `cargo build failed` line and exits 1, as under
+`--commit`. A successful one prints only the warnings the quiet run would not:
+build-script `cargo::warning` lines and cargo's own (an unused `[patch]`).
+Compiler warnings are left to the run, which replays a local crate's warnings
+from cargo's cache, so each prints once.
+
+The run then finds every unit fresh and compiles nothing, as a rule: cargo
+revalidates its inputs, so a file saved during the build makes it rebuild,
+and what that rebuild prints is cargo's quiet output, uncaptured. Launching
+through `cargo run` rather than executing the artifact keeps what cargo sets
+up for the program: a configured `target.<triple>.runner`, the dynamic library
+search path, cargo config `[env]` and the `CARGO_*` runtime variables.
+
+When the run ends with a code, `run` then prints `[run] NAME finished after X
+(exit CODE)`, also in quiet mode: the time from the launch to the end, the
+build and the launch's preparation not counted. On the plain path it times the
+quiet `cargo run`, so it includes cargo's freshness check and any rebuild that
+check starts, and a non-zero code there can be cargo's own; under `--commit`
+and `--with` it times the program alone. A stop accepted once the run is
+launched prints `[run] NAME interrupted`; one accepted during the build prints
+no `[run]` line, and a signal death is reported as an error instead.
+
+**brokkr's own output stays off stdout.** Every line brokkr prints for `run` -
+the lock wait, the build, the target index, the runtime - goes to stderr, so
+`brokkr run NAME > out.json` holds only what the program (or a configured
+runner) wrote. This holds for `--commit` and `--with` too.
 
 Resolution order is `NAME` > `[bin] default` > the workspace's sole runnable >
 an index. A name matching nothing is an error that says so - and says `([bin]
@@ -42,14 +73,14 @@ stale default is otherwise indistinguishable from a typo. A name matching
 **several** targets is also an error, listing them; brokkr does not guess
 between two targets that share a name, and the fix belongs in `Cargo.toml`.
 
-A non-zero exit from the program becomes brokkr's own exit code, silently: the
-program (or cargo, for a build failure) already said what it had to say, so
-brokkr adds no `[error]` line of its own. Under `--commit`, the built program's
-non-zero code propagates silently too; a build failure prints its diagnostics
-and a closing `cargo build failed` line and exits 1. A target
-killed by a signal is reported by cargo and propagates cargo's non-zero code;
-under `--commit`, brokkr reports the signal and exits 1. An accepted interrupt
-or graceful stop exits 130. A failing `cargo install` ends with a one-line `[error]` naming
+A non-zero exit from the program becomes brokkr's own exit code with no
+`[error]` line: the program already said what it had to say. A failed captured
+build exits 1 after its diagnostics, on every path; a rebuild the plain run's
+`cargo run` itself fails propagates cargo's code, as the program's would. A
+target killed by a signal it did not get from brokkr's stop is reported by
+brokkr, which exits 1, on every path: on Unix cargo execs the program (or a
+configured runner) in its own place, so brokkr sees the signal death itself.
+An accepted interrupt or graceful stop exits 130. A failing `cargo install` ends with a one-line `[error]` naming
 the package and cargo's exit code, and exits 1.
 
 `brokkr kill`, run in the holder's own project (or with `--project NAME` or
@@ -59,8 +90,11 @@ brokkr forwards SIGTERM to its direct child and waits up to 1.5 seconds for
 that child to exit before sending it SIGKILL. With `--commit` or `--with`,
 the child is the program itself, so a program that handles SIGTERM has that
 bounded window to shut down gracefully and print its summary. Plain `run`
-launches `cargo run`, so cargo receives the signal; brokkr does not directly
-signal the program beneath cargo. Run children inherit brokkr's process group,
+launches `cargo run`, which on Unix execs the program (or a configured runner)
+in its own place, so the signal reaches that process; a runner must forward
+it for the program beneath to see it. A stop observed by the last check
+before the spawn launches nothing; one landing after it is delivered to the
+launched child. Run children inherit brokkr's process group,
 and brokkr does not signal their descendants on this path. A shutdown summary
 is therefore not guaranteed.
 

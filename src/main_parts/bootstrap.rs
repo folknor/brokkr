@@ -226,9 +226,10 @@ pub(crate) fn main() {
     }
     let (cli, command_id, invocation) = parse_cli(detection.as_ref().map(|d| &d.project));
     cli::set_invocation(command_id);
-    // `build`'s stdout is its value - the snapshot path - so everything else
-    // the run says, from the lock wait on, goes to stderr.
-    if command_id == cli::CommandId::Build
+    // `build`'s stdout is its value - the snapshot path - and `run`'s is the
+    // program's, so everything else the run says, from the lock wait on, goes
+    // to stderr.
+    if matches!(command_id, cli::CommandId::Build | cli::CommandId::Run)
         || matches!(cli.command, Command::Install(cli::InstallCmd { names: true, .. }))
     {
         output::reserve_stdout();
