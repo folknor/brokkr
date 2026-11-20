@@ -145,6 +145,20 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
+### `passthrough --no-build` builds a path without the target triple (2026-11-20)
+
+`build::resolve_existing_binary` joins cargo metadata's `target_directory`,
+the profile dir and the bin name. With a `build.target` configured, cargo
+writes the binary under `<target>/<triple>/<profile>/`, so the path names a
+file cargo did not build: a stale one from an earlier host build, or none.
+
+### `resolve_bin_name` falls back to the first bin (2026-11-20)
+
+When nothing else decides which bin a build means, `resolve_bin_name` takes
+the first bin cargo metadata lists, where the executable selection now
+refuses an undecided choice. One positional fallback is left beside a rule
+that refuses ambiguity.
+
 ### A serve's cleanup after its supervisor dies is best effort (2026-11-15)
 
 `src/serve.rs` retires a generation whose supervisor is gone once a `/proc`

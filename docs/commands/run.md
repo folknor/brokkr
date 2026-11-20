@@ -11,7 +11,7 @@ binaries on `PATH` and runs its post-install steps. Together they close the
 session loop that otherwise reaches for raw cargo.
 
 None of them requires configuration: targets come from `cargo metadata
---no-deps`, so every bin and example in the workspace is reachable by name the
+--no-deps`, so every bin and executable example in the workspace is reachable by name the
 moment it exists. The optional `[bin]` section only curates what discovery
 leaves ambiguous - see `docs/brokkr.toml.md` (`brokkr man config bin`).
 
@@ -243,7 +243,11 @@ exported in your shell is inherited by builds as any other variable is.
 ## Target discovery
 
 `cargo metadata --format-version 1 --no-deps` yields every workspace member;
-brokkr keeps each package's `bin` and `example` targets. The identifier is the
+brokkr keeps each package's `bin` targets and its executable `example` targets.
+An example whose `crate-type` names anything but `bin` is a library example:
+it has no executable, so it is never listed, never the sole runnable and never
+a rival for a shared name, and naming it (or making it `[bin] default`) is
+refused before anything builds. The identifier is the
 **target** name (cargo's `--bin`/`--example` namespace), not the package name -
 they coincide often enough to be confusing when they don't.
 

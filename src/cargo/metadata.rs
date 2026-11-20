@@ -834,7 +834,6 @@ pub(crate) struct CargoTarget {
     #[serde(default, rename = "required-features")]
     pub(crate) required_features: Vec<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub(crate) crate_types: Vec<String>,
     #[serde(default)]
     #[allow(dead_code)]

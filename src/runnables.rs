@@ -2,7 +2,7 @@
 //!
 //! Both commands discover their targets from `cargo metadata --no-deps`
 //! rather than requiring config: every workspace member's bin targets (and,
-//! for `run`, example targets) are runnable by target name. The `[bin]`
+//! for `run`, executable example targets) are runnable by target name. The `[bin]`
 //! section curates what discovery leaves ambiguous - a `default` for bare
 //! `brokkr run`, an `install` package list for multi-bin workspaces, and a
 //! `profile`/`debug` default shared by both commands (release when unset,
@@ -71,26 +71,46 @@ fn bin_profile(
     )
 }
 
-/// Discover every bin and example target in the workspace via
-/// `cargo metadata --no-deps`.
-fn discover(project_root: &Path) -> Result<Vec<Runnable>, DevError> {
-    discover_workspace(project_root).map(|(runnables, _)| runnables)
+/// An example target that builds a library (`crate-type` naming anything but
+/// `bin`): it has no executable, so cargo's `run --example` refuses it and no
+/// command here has anything to run or snapshot. Kept only so naming one is
+/// refused for what it is rather than as an unknown name.
+struct LibraryExample {
+    name: String,
+    package: String,
+    crate_types: Vec<String>,
 }
 
-/// [`discover`], plus metadata's `workspace_root` - the directory cargo reads
+/// One snapshot's discovery: the executable targets, the library examples
+/// set aside, and metadata's `workspace_root` - the directory cargo reads
 /// `Cargo.lock` from for every member, wherever the invocation started.
-fn discover_workspace(project_root: &Path) -> Result<(Vec<Runnable>, PathBuf), DevError> {
+struct Discovered {
+    runnables: Vec<Runnable>,
+    library_examples: Vec<LibraryExample>,
+    workspace_root: PathBuf,
+}
+
+/// Discover every bin and executable example target in the workspace via
+/// `cargo metadata --no-deps`.
+fn discover(project_root: &Path) -> Result<Discovered, DevError> {
     let metadata = metadata::load(project_root, Query::workspace(), &[], None)?;
     runnables_of(&metadata)
 }
 
-/// Every bin and example target, and the workspace root, of one snapshot.
-fn runnables_of(
-    metadata: &crate::cargo::metadata::CargoMetadata,
-) -> Result<(Vec<Runnable>, PathBuf), DevError> {
+/// Whether an example target builds an executable. Cargo classifies an
+/// example as a binary exactly when every declared crate type is `bin`, an
+/// absent declaration included (metadata then reports `["bin"]`).
+fn example_is_executable(crate_types: &[String]) -> bool {
+    crate_types.iter().all(|t| t == "bin")
+}
+
+/// Every bin and executable example target, the library examples, and the
+/// workspace root, of one snapshot.
+fn runnables_of(metadata: &crate::cargo::metadata::CargoMetadata) -> Result<Discovered, DevError> {
     let workspace_root = PathBuf::from(&metadata.workspace_root);
 
     let mut out = Vec::new();
+    let mut library_examples = Vec::new();
     for pkg in &metadata.packages {
         let package_dir = Path::new(&pkg.manifest_path)
             .parent()
@@ -106,6 +126,14 @@ fn runnables_of(
             if !example && !target.kind.iter().any(|kind| kind == "bin") {
                 continue;
             }
+            if example && !example_is_executable(&target.crate_types) {
+                library_examples.push(LibraryExample {
+                    name: target.name.clone(),
+                    package: pkg.name.clone(),
+                    crate_types: target.crate_types.clone(),
+                });
+                continue;
+            }
             out.push(Runnable {
                 name: target.name.clone(),
                 package: pkg.name.clone(),
@@ -114,7 +142,11 @@ fn runnables_of(
             });
         }
     }
-    Ok((out, workspace_root))
+    Ok(Discovered {
+        runnables: out,
+        library_examples,
+        workspace_root,
+    })
 }
 
 /// One index line per runnable: `name (bin, pkg)` / `name (example, pkg)`.
@@ -129,17 +161,16 @@ fn index_line(r: &Runnable) -> String {
 
 /// Resolve `run`'s target: `name` > `[bin] default` > the sole runnable.
 /// `None` means the bare index was printed and there is nothing to run.
+///
+/// Library examples are never candidates: a name matching only library
+/// examples is refused naming them, and one shared with an executable
+/// target resolves to that target.
 fn resolve_target<'a>(
-    runnables: &'a [Runnable],
+    discovered: &'a Discovered,
     cfg: Option<&BinConfig>,
     name: Option<&str>,
 ) -> Result<Option<&'a Runnable>, DevError> {
-    if runnables.is_empty() {
-        return Err(DevError::Refused(
-            "no bin or example targets in this workspace - nothing to run".into(),
-        ));
-    }
-
+    let runnables = discovered.runnables.as_slice();
     let default = cfg.and_then(|c| c.default.as_deref());
     let wanted = name.or(default);
     let target = match wanted {
@@ -152,6 +183,26 @@ fn resolve_target<'a>(
                     } else {
                         ""
                     };
+                    let libs: Vec<&LibraryExample> = discovered
+                        .library_examples
+                        .iter()
+                        .filter(|l| l.name == n)
+                        .collect();
+                    if !libs.is_empty() {
+                        let mut msg = format!(
+                            "'{n}'{origin} names a library example, which has nothing to run:\n"
+                        );
+                        for l in libs {
+                            msg.push_str(&format!(
+                                "  {} (example, {}, crate-type {})\n",
+                                l.name,
+                                l.package,
+                                l.crate_types.join(", ")
+                            ));
+                        }
+                        msg.push_str("only bin targets and examples of crate-type bin run");
+                        return Err(DevError::Refused(msg));
+                    }
                     return Err(DevError::Refused(format!(
                         "no bin or example target named '{n}'{origin}; bare \
                          `brokkr run` lists what exists"
@@ -168,6 +219,11 @@ fn resolve_target<'a>(
                     return Err(DevError::Refused(msg));
                 }
             }
+        }
+        None if runnables.is_empty() => {
+            return Err(DevError::Refused(
+                "no bin or executable example targets in this workspace - nothing to run".into(),
+            ));
         }
         None if runnables.len() == 1 => &runnables[0],
         None => {
@@ -199,8 +255,8 @@ pub fn cmd_run(
     args: &[String],
     lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<(), DevError> {
-    let runnables = discover(project_root)?;
-    let Some(target) = resolve_target(&runnables, cfg, name)? else {
+    let discovered = discover(project_root)?;
+    let Some(target) = resolve_target(&discovered, cfg, name)? else {
         return Ok(());
     };
 
@@ -318,8 +374,8 @@ pub fn cmd_run_built(
     env: &[(&str, &str)],
     lock: &crate::lockfile::LockGuard,
 ) -> Result<(), DevError> {
-    let runnables = discover(worktree)?;
-    let Some(target) = resolve_target(&runnables, cfg, name)? else {
+    let discovered = discover(worktree)?;
+    let Some(target) = resolve_target(&discovered, cfg, name)? else {
         return Ok(());
     };
     let build = crate::build::BuildConfig {
@@ -377,8 +433,8 @@ pub fn cmd_build(
     choice: Option<crate::build::RustProfile>,
     feat: &FeatureArgs<'_>,
 ) -> Result<PathBuf, DevError> {
-    let runnables = discover(build_root)?;
-    let Some(target) = resolve_target(&runnables, cfg, name)? else {
+    let discovered = discover(build_root)?;
+    let Some(target) = resolve_target(&discovered, cfg, name)? else {
         return Err(DevError::Refused(
             "no target chosen: name one (`brokkr build <name>`) or set [bin] default".into(),
         ));
@@ -412,8 +468,8 @@ pub(crate) fn resolve_build_target(
     name: Option<&str>,
 ) -> Result<(String, String, bool), DevError> {
     let metadata = metadata::load_fresh(build_root, &Query::workspace(), &[], None)?;
-    let (runnables, _) = runnables_of(&metadata)?;
-    let Some(target) = resolve_target(&runnables, cfg, name)? else {
+    let discovered = runnables_of(&metadata)?;
+    let Some(target) = resolve_target(&discovered, cfg, name)? else {
         return Err(DevError::Refused(
             "no target chosen: name one in the bench's `target` or set [bin] default".into(),
         ));
@@ -549,7 +605,11 @@ fn select_install_packages(
     cfg: Option<&BinConfig>,
 ) -> Result<(Vec<InstallPackage>, PathBuf), DevError> {
     let metadata = metadata::load(build_root, Query::workspace(), &[], None)?;
-    let (runnables, workspace_root) = runnables_of(&metadata)?;
+    let Discovered {
+        runnables,
+        workspace_root,
+        ..
+    } = runnables_of(&metadata)?;
     let bins: Vec<&Runnable> = runnables.iter().filter(|r| !r.example).collect();
 
     let install = match cfg.map(|c| c.install.as_slice()) {
@@ -810,6 +870,73 @@ fn run_cargo_with_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One package `app` with the given `(name, kind, crate_types)` targets.
+    #[allow(clippy::unwrap_used)]
+    fn discovered(targets: &[(&str, &str, &[&str])]) -> Discovered {
+        let targets: Vec<serde_json::Value> = targets
+            .iter()
+            .map(|(name, kind, crate_types)| {
+                serde_json::json!({ "name": name, "kind": [kind], "crate_types": crate_types })
+            })
+            .collect();
+        let meta = serde_json::json!({
+            "packages": [{
+                "id": "path+file:///x/app#app@0.1.0", "name": "app",
+                "manifest_path": "/x/app/Cargo.toml", "targets": targets,
+            }],
+            "workspace_members": ["path+file:///x/app#app@0.1.0"],
+            "workspace_root": "/x",
+        });
+        let meta: crate::cargo::metadata::CargoMetadata = serde_json::from_value(meta).unwrap();
+        runnables_of(&meta).unwrap()
+    }
+
+    /// A library example has no executable: it is no candidate for the
+    /// index, the sole-runnable shortcut or a shared name, and naming it
+    /// alone refuses at resolution rather than after a build.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_library_example_is_never_a_runnable() {
+        let d = discovered(&[
+            ("app", "bin", &["bin"]),
+            ("plugin", "example", &["cdylib"]),
+            ("app", "example", &["rlib"]),
+            ("mixed", "example", &["bin", "rlib"]),
+            ("demo", "example", &["bin"]),
+        ]);
+        let names: Vec<(&str, bool)> = d
+            .runnables
+            .iter()
+            .map(|r| (r.name.as_str(), r.example))
+            .collect();
+        assert_eq!(names, [("app", false), ("demo", true)]);
+
+        let shared = resolve_target(&d, None, Some("app")).unwrap().unwrap();
+        assert!(
+            !shared.example,
+            "a name shared with a library example is the bin's"
+        );
+        for lib in ["plugin", "mixed"] {
+            let err = resolve_target(&d, None, Some(lib))
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(err.contains("library example"), "{lib}: {err}");
+        }
+
+        let only_lib = discovered(&[("plugin", "example", &["cdylib"])]);
+        let err = resolve_target(&only_lib, None, Some("plugin"))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("library example"), "{err}");
+        let sole = discovered(&[("app", "bin", &["bin"]), ("plugin", "example", &["lib"])]);
+        assert_eq!(
+            resolve_target(&sole, None, None).unwrap().unwrap().name,
+            "app"
+        );
+    }
 
     #[test]
     #[allow(clippy::unwrap_used)]

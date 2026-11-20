@@ -595,7 +595,7 @@ workspace_dep_ignore = ["lychee", "cargo-*", "backtest"]
 
 Shared defaults for `brokkr run` and `brokkr install` (optional). Both
 commands discover their targets from cargo metadata - every workspace bin
-target (and, for `run`, example target) is runnable by name with no config at
+target (and, for `run`, executable example target) is runnable by name with no config at
 all. The section curates what discovery leaves ambiguous:
 
 ```toml
