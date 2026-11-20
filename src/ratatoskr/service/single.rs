@@ -230,7 +230,7 @@ fn run_single(run: &ServiceRun<'_>) -> Result<(), DevError> {
     output::ratatoskr_msg(&format!(
         "running {} against {}",
         run.test_id,
-        run.built.binary.display()
+        output::path(&run.built.binary)
     ));
     let artefacts = ArtefactDir::allocate(run.artefact_parent, run.test_id, run.keep_on_success)?;
     let result = spawn_and_capture(
@@ -273,7 +273,7 @@ fn run_soak(run: &ServiceRun<'_>, repeat: u32, keep_going: bool) -> Result<(), D
     output::ratatoskr_msg(&format!(
         "running {} against {} (-N {repeat}{})",
         run.test_id,
-        run.built.binary.display(),
+        output::path(&run.built.binary),
         if keep_going { ", --keep-going" } else { "" }
     ));
 

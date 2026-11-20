@@ -354,7 +354,7 @@ impl KillScope {
                 "{}/brokkr.toml does not load, so a bare `brokkr kill` cannot know this project's \
                  key; name it with `brokkr kill --project NAME`, or stop every project's commands \
                  with `brokkr kill --all`",
-                dir.display()
+                crate::output::path(&dir)
             )));
         }
         let (root, _) = crate::project::detect_roots()?;
@@ -468,7 +468,7 @@ fn cancel_queued(scope: &KillScope, report: &mut KillReport) -> Result<(), DevEr
     let entries = lockfile::queue::list(&dir).map_err(|e| {
         DevError::Lock(LockError::from(format!(
             "cannot read the lock queue {}: {e}",
-            dir.display()
+            crate::output::path(&dir)
         )))
     })?;
     let mut committed = Vec::new();
@@ -772,7 +772,11 @@ fn hard_kill(info: &lockfile::LockInfo) -> Result<(), DevError> {
                 target.role, target.pid
             ));
         }
-        if matches!(delivery, Ok(false)) {
+        // Undelivered, or delivered to the leader alone (its pgid lookup was
+        // lost, or it leads no group): either way no group signal went out,
+        // so the member sweep covers its group once it is gone. A process
+        // that led no group leaves no members carrying its pid as pgid.
+        if matches!(delivery, Ok(false)) || (matches!(delivery, Ok(true)) && !target.pg_leader) {
             leaderless.push((
                 target.role,
                 target.pid,

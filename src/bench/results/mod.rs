@@ -100,7 +100,7 @@ pub(crate) enum Resolved {
 }
 
 fn named(path: &std::path::Path, error: &store::StoreError) -> DevError {
-    DevError::Database(format!("{}: {error}", path.display()))
+    DevError::Database(format!("{}: {error}", crate::output::path(path)))
 }
 
 /// A remote answer of another kind than the request asked for.
@@ -260,7 +260,7 @@ impl BenchReader {
     /// Where the store is, as an error names it.
     fn shown(&self) -> String {
         match &self.backend {
-            Backend::Local { path, .. } => path.display().to_string(),
+            Backend::Local { path, .. } => crate::output::path(path).to_string(),
             Backend::Remote(client) => format!("results server {}", client.shown()),
         }
     }

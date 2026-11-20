@@ -68,7 +68,7 @@ pub fn build_for_harness(
         .ok_or_else(|| {
             DevError::Build(format!(
                 "binary path {} has no parent directory",
-                artifact.path.display()
+                crate::output::path(&artifact.path)
             ))
         })?
         .to_path_buf();

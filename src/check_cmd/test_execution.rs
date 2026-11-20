@@ -415,7 +415,7 @@ pub(crate) fn serial_shim_fallback_with_config(
         return Some(match &target.origin {
             crate::rustflags::SourceOrigin::Environment(_) => "CARGO_BUILD_TARGET is set".into(),
             crate::rustflags::SourceOrigin::Config(path) => {
-                format!("{} sets build.target", path.display())
+                format!("{} sets build.target", crate::output::path(path))
             }
         });
     }
@@ -425,7 +425,7 @@ pub(crate) fn serial_shim_fallback_with_config(
                 "rustdoc executable is configured".into()
             }
             crate::rustflags::SourceOrigin::Config(path) => {
-                format!("{} sets build.rustdoc", path.display())
+                format!("{} sets build.rustdoc", crate::output::path(path))
             }
         });
     }
@@ -443,7 +443,7 @@ pub(crate) fn serial_shim_fallback_with_config(
                 format!("{} is set", runner.key)
             }
             crate::rustflags::SourceOrigin::Config(path) => {
-                format!("{} configures a target runner", path.display())
+                format!("{} configures a target runner", crate::output::path(path))
             }
         });
     }

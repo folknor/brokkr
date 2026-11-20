@@ -386,7 +386,7 @@ pub(crate) fn snapshot_executable(exe: &Path, store: &Path) -> Result<(PathBuf, 
     let file_name = exe.file_name().ok_or_else(|| {
         DevError::Build(format!(
             "built executable has no file name: {}",
-            exe.display()
+            output::path(exe)
         ))
     })?;
     std::fs::create_dir_all(store)?;
@@ -430,7 +430,7 @@ impl Drop for Staging {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => output::warn(&format!(
                 "could not remove snapshot staging copy {}: {e}",
-                self.0.display()
+                output::path(&self.0)
             )),
         }
     }

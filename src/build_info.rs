@@ -46,13 +46,13 @@ pub(crate) fn sample(package_dir: &Path) -> Result<Option<Stamp>, DevError> {
     if sha.is_empty() || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(DevError::Build(format!(
             "git named HEAD of {} as {sha:?}, not a commit id",
-            toplevel.display()
+            crate::output::path(&toplevel)
         )));
     }
     let state = TreeState::read_for_install(&toplevel).ok_or_else(|| {
         DevError::Build(format!(
             "cannot read git status of {} for the build stamp",
-            toplevel.display()
+            crate::output::path(&toplevel)
         ))
     })?;
     let clean = if state.for_install() { "n" } else { "y" };
@@ -112,7 +112,7 @@ pub(crate) fn install_root(
             if root {
                 return Ok(InstallRoot::Overridden(format!(
                     "install.root is set in {}",
-                    path.display()
+                    crate::output::path(&path)
                 )));
             }
         }
@@ -213,17 +213,17 @@ fn default_closure(features: &HashMap<String, Vec<String>>, implicit: bool) -> H
 pub(crate) fn stamp_file(path: &Path, stamp: &Stamp) -> Result<(), DevError> {
     let dir = path
         .parent()
-        .ok_or_else(|| DevError::Build(format!("{} has no parent", path.display())))?;
+        .ok_or_else(|| DevError::Build(format!("{} has no parent", crate::output::path(path))))?;
     let name = path
         .file_name()
-        .ok_or_else(|| DevError::Build(format!("{} has no file name", path.display())))?
+        .ok_or_else(|| DevError::Build(format!("{} has no file name", crate::output::path(path))))?
         .to_string_lossy()
         .into_owned();
     let scratch = Scratch::new(dir, &name);
     if !stamp_sections(path)?.is_empty() {
         return Err(DevError::Build(format!(
             "{} already carries {SECTION}; cargo installed a file brokkr did not expect",
-            path.display()
+            crate::output::path(path)
         )));
     }
     std::fs::write(&scratch.content, stamp.content.as_bytes())?;
@@ -236,11 +236,11 @@ pub(crate) fn stamp_file(path: &Path, stamp: &Stamp) -> Result<(), DevError> {
             .arg(path)
             .arg(&scratch.stamped),
     )
-    .map_err(|e| DevError::Build(format!("cannot run objcopy to stamp {}: {e}", path.display())))?;
+    .map_err(|e| DevError::Build(format!("cannot run objcopy to stamp {}: {e}", crate::output::path(path))))?;
     if !out.status.success() {
         return Err(DevError::Build(format!(
             "objcopy could not stamp {}: {}",
-            path.display(),
+            crate::output::path(path),
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
@@ -249,7 +249,7 @@ pub(crate) fn stamp_file(path: &Path, stamp: &Stamp) -> Result<(), DevError> {
         _ => {
             return Err(DevError::Build(format!(
                 "the stamped copy of {} does not read back its {SECTION}",
-                path.display()
+                crate::output::path(path)
             )));
         }
     }
@@ -289,7 +289,7 @@ impl Drop for Scratch {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => crate::output::warn(&format!(
                     "could not remove stamp scratch {}: {e}",
-                    path.display()
+                    crate::output::path(path)
                 )),
             }
         }

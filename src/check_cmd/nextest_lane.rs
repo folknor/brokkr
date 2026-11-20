@@ -152,13 +152,13 @@ fn engine_cargo_configs(project_root: &Path, state_root: &Path, env: &[(&str, &s
     // avoids that ambient dependency without changing cwd process-wide.
     for path in crate::rustflags::config_paths_under(project_root, effective)? {
         overrides.push(path.to_str().ok_or_else(||
-            DevError::Config(format!("cargo config path is not UTF-8: {}", path.display())))?.to_owned());
+            DevError::Config(format!("cargo config path is not UTF-8: {}", crate::output::path(&path))))?.to_owned());
     }
     let root = Utf8PathBuf::from_path_buf(project_root.canonicalize()?)
-        .map_err(|p| DevError::Config(format!("build root is not UTF-8: {}", p.display())))?;
+        .map_err(|p| DevError::Config(format!("build root is not UTF-8: {}", crate::output::path(&p))))?;
     let target_paths = effective.get_os("RUST_TARGET_PATH").map(|value|
         std::env::split_paths(&value).map(|path| Utf8PathBuf::from_path_buf(path)
-            .map_err(|p| DevError::Config(format!("target path is not UTF-8: {}", p.display()))))
+            .map_err(|p| DevError::Config(format!("target path is not UTF-8: {}", crate::output::path(&p)))))
             .collect::<Result<Vec<_>, _>>()).transpose()?.unwrap_or_default();
     CargoConfigs::new_with_isolation(overrides, &root, &root, target_paths)
         .map_err(|e| DevError::Config(format!("cargo config discovery failed: {e}")))
@@ -226,7 +226,7 @@ impl GeneratedEngineConfig {
             let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let path = base.with_extension(format!("{}-{sequence}.toml", std::process::id()));
             let path = Utf8PathBuf::from_path_buf(path)
-                .map_err(|p| DevError::Config(format!("state dir is not UTF-8: {}", p.display())))?;
+                .map_err(|p| DevError::Config(format!("state dir is not UTF-8: {}", crate::output::path(&p))))?;
             match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
                 Ok(file) => break (path, file),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,

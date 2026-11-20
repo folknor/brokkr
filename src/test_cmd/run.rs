@@ -589,8 +589,8 @@ impl TestInventory {
                 output::detail(&format!(
                     "test: run {}, plan {}, journal {}",
                     plan.run_id,
-                    paths.plan.display(),
-                    paths.journal.display()
+                    output::path(&paths.plan),
+                    output::path(&paths.journal)
                 ));
                 Some(Self {
                     plan,
@@ -601,7 +601,7 @@ impl TestInventory {
             Err(e) => {
                 output::error(&format!(
                     "test: could not open run accounting at {}: {e}; continuing without an execution record",
-                    record_dir.display()
+                    output::path(&record_dir)
                 ));
                 None
             }

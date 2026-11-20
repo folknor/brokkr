@@ -105,7 +105,7 @@ fn seed_lock(
     let Ok(main_lock) = std::fs::read(main_lock_path) else {
         fail(
             &f.name,
-            &format!("seed_lock: no main lock at {}", main_lock_path.display()),
+            &format!("seed_lock: no main lock at {}", output::path(main_lock_path)),
         );
         return Ok(false);
     };
@@ -204,7 +204,7 @@ fn lint_fixture(
     {
         Ok(m) => m,
         Err(e) => {
-            fail(&f.name, &format!("manifest {}: {e}", f.manifest.display()));
+            fail(&f.name, &format!("manifest {}: {e}", output::path(&f.manifest)));
             return Ok(None);
         }
     };
@@ -248,31 +248,31 @@ fn preflight(project_root: &Path, dir: &Path, f: &FixtureLint) -> Result<(), Str
     // phase rewrites the fixture's lock, and must never do that elsewhere.
     let root = project_root
         .canonicalize()
-        .map_err(|e| format!("{}: {e}", project_root.display()))?;
+        .map_err(|e| format!("{}: {e}", output::path(project_root)))?;
     for (key, p) in [
         ("path", dir.to_path_buf()),
         ("manifest", project_root.join(&f.manifest)),
     ] {
         let canonical = p
             .canonicalize()
-            .map_err(|e| format!("`{key}` {}: {e}", p.display()))?;
+            .map_err(|e| format!("`{key}` {}: {e}", output::path(&p)))?;
         if !canonical.starts_with(&root) || (key == "path" && canonical == root) {
             return Err(format!(
                 "`{key}` {} resolves to {}, outside the project tree (or the root itself)",
-                p.display(),
-                canonical.display()
+                output::path(&p),
+                output::path(&canonical)
             ));
         }
     }
     let manifest_path = dir.join("Cargo.toml");
     let text = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+        .map_err(|e| format!("{}: {e}", output::path(&manifest_path)))?;
     let toml: toml::Table =
-        toml::from_str(&text).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+        toml::from_str(&text).map_err(|e| format!("{}: {e}", output::path(&manifest_path)))?;
     if !toml.contains_key("workspace") || !toml.contains_key("package") {
         return Err(format!(
             "{} must be its own single-package workspace: a [package] with an empty [workspace] table",
-            manifest_path.display()
+            output::path(&manifest_path)
         ));
     }
     if f.seed_lock {
@@ -289,7 +289,7 @@ fn preflight(project_root: &Path, dir: &Path, f: &FixtureLint) -> Result<(), Str
         if !ignored.success() {
             return Err(format!(
                 "seed_lock rewrites {} on every run, so it must be gitignored - add it to .gitignore",
-                lock.display()
+                output::path(&lock)
             ));
         }
     }

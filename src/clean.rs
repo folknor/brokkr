@@ -156,7 +156,7 @@ fn reclaim_launch_leases() {
 fn clean_io_error(action: &str, path: &Path, source: &std::io::Error) -> DevError {
     DevError::Io(std::io::Error::new(
         source.kind(),
-        format!("{action} {}: {source}", path.display()),
+        format!("{action} {}: {source}", crate::output::path(path)),
     ))
 }
 

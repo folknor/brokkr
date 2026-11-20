@@ -70,7 +70,7 @@ pub(crate) fn check_paths(paths: &[(&str, PathBuf)]) -> Result<(), DevError> {
         if is_low(fs.free_bytes, fs.total_bytes) {
             low.push(format!(
                 "{label} ({}) is on {}, which has {} available of {} ({:.1}%)",
-                path.display(),
+                crate::output::path(path),
                 fs.mount_point,
                 crate::output::format_bytes(fs.free_bytes),
                 crate::output::format_bytes(fs.total_bytes),

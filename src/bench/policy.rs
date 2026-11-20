@@ -42,7 +42,7 @@ impl Handles {
             .ok_or_else(|| {
                 Abort::Failed(format!(
                     "{} is not UTF-8, which a script cannot pass on",
-                    handle.path().display()
+                    crate::output::path(handle.path())
                 ))
             })?
             .to_owned();
@@ -211,7 +211,7 @@ impl Calls {
         let access = resources::call_access(&argv_refs, &read_refs, &write_refs, stdin.as_ref())
             .map_err(|e| Abort::Failed(format!("the call was refused: {e}")))?;
         for (at, (mode, handle)) in cache.iter().enumerate() {
-            let shown = handle.path().display().to_string();
+            let shown = crate::output::path(handle.path()).to_string();
             let what = format!("binary_with(): {} {shown}", mode.name());
             handle
                 .preparable()

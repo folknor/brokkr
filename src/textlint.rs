@@ -46,7 +46,7 @@ pub struct TextlintViolation {
 pub fn format_one(v: &TextlintViolation) -> String {
     format!(
         "{}:{}: [{}] {}\n      {}",
-        v.file.display(),
+        crate::output::path(&v.file),
         v.line,
         v.rule,
         v.message,
@@ -657,7 +657,7 @@ fn refuse_unresolved(
     {
         for rel in files {
             if is_rust(rel) && applies(rule, rel) && c.is_unresolved(rel) {
-                sites.push(format!("{} (rule {:?})", rel.display(), rule.name));
+                sites.push(format!("{} (rule {:?})", crate::output::path(rel), rule.name));
                 pairs.entry(index).or_default().insert(rel.clone());
             }
         }
@@ -704,7 +704,7 @@ fn must_scan_violations(
                 file: path.clone(),
                 line: 0,
                 rule: rule.name.clone(),
-                message: format!("must_scan: {} {why}", path.display()),
+                message: format!("must_scan: {} {why}", crate::output::path(path)),
                 content: String::new(),
             });
         }

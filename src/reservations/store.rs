@@ -318,7 +318,7 @@ impl Store {
         if !try_exclusive(&file)? {
             return Err(io::Error::other(format!(
                 "a freshly created lease {} is locked by someone else",
-                pending.display()
+                crate::output::path(&pending)
             )));
         }
         // A scan that removed the pending file meanwhile makes this fail, so
@@ -606,7 +606,7 @@ impl Store {
         if let Err(e) = self.remove_borrow(id) {
             crate::output::warn(&format!(
                 "free borrow lease {id} could not be removed from {} ({e}); a later scan retries",
-                self.root.display()
+                crate::output::path(&self.root)
             ));
         }
     }
@@ -861,7 +861,7 @@ impl Lease {
                 return Err(io::Error::other(format!(
                     "lease {} is still held after its child exited: some process kept its \
                      descriptor, so its private directories are kept",
-                    lock_path.display()
+                    crate::output::path(&lock_path)
                 )));
             }
             wait();
@@ -879,7 +879,7 @@ fn open_lock(path: &Path) -> io::Result<File> {
     if !file.metadata()?.is_file() {
         return Err(io::Error::other(format!(
             "{} is not a regular file",
-            path.display()
+            crate::output::path(path)
         )));
     }
     Ok(file)
@@ -942,7 +942,7 @@ fn remove_private(resource: &Resource) -> io::Result<()> {
             {
                 return Err(io::Error::other(format!(
                     "{} is not the one the lease created",
-                    path.display()
+                    crate::output::path(path)
                 )));
             }
             if meta.is_dir() {
@@ -952,7 +952,7 @@ fn remove_private(resource: &Resource) -> io::Result<()> {
             } else {
                 return Err(io::Error::other(format!(
                     "{} is neither a directory nor a file",
-                    path.display()
+                    crate::output::path(path)
                 )));
             }
         }

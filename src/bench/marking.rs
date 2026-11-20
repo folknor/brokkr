@@ -212,7 +212,7 @@ fn local(
     request: &MarkRequest,
     subject: &Subject<'_>,
 ) -> Result<Marked, DevError> {
-    let place = path.display().to_string();
+    let place = crate::output::path(path).to_string();
     let named_err = |e: &store::StoreError| DevError::Database(format!("{place}: {e}"));
     let Some(mut store) = store::Store::open_existing(path).map_err(|e| named_err(&e))? else {
         return Err(DevError::Database(format!(

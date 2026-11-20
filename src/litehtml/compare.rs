@@ -151,14 +151,14 @@ pub(crate) fn compare_elements(
     policy: ElementComparisonPolicy,
 ) -> Result<ElementMatchResult, DevError> {
     let pipeline_text = std::fs::read_to_string(pipeline_json)
-        .map_err(|e| DevError::Verify(format!("cannot read {}: {e}", pipeline_json.display())))?;
+        .map_err(|e| DevError::Verify(format!("cannot read {}: {e}", crate::output::path(pipeline_json))))?;
     let reference_text = std::fs::read_to_string(reference_json)
-        .map_err(|e| DevError::Verify(format!("cannot read {}: {e}", reference_json.display())))?;
+        .map_err(|e| DevError::Verify(format!("cannot read {}: {e}", crate::output::path(reference_json))))?;
 
     let pipeline_elems: Vec<LayoutElement> = serde_json::from_str(&pipeline_text)
-        .map_err(|e| DevError::Verify(format!("invalid JSON {}: {e}", pipeline_json.display())))?;
+        .map_err(|e| DevError::Verify(format!("invalid JSON {}: {e}", crate::output::path(pipeline_json))))?;
     let reference_elems: Vec<LayoutElement> = serde_json::from_str(&reference_text)
-        .map_err(|e| DevError::Verify(format!("invalid JSON {}: {e}", reference_json.display())))?;
+        .map_err(|e| DevError::Verify(format!("invalid JSON {}: {e}", crate::output::path(reference_json))))?;
 
     Ok(compare_element_sets_with_policy(
         &pipeline_elems,

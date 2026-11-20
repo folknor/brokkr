@@ -113,7 +113,7 @@ fn failed(step: &str, msg: &str) -> DevError {
 }
 
 fn io(step: &str, what: &str, path: &Path, e: &std::io::Error) -> DevError {
-    failed(step, &format!("{what} {}: {e}", path.display()))
+    failed(step, &format!("{what} {}: {e}", crate::output::path(path)))
 }
 
 /// The state of a transaction's container.
@@ -134,7 +134,7 @@ fn inspect(path: &Path, id: DirId) -> std::io::Result<Container> {
     if !meta.is_dir() || dir_id(&meta) != id {
         return Ok(Container::Foreign(format!(
             "{} is not the container brokkr created",
-            path.display()
+            crate::output::path(path)
         )));
     }
     for entry in std::fs::read_dir(path)? {
@@ -142,7 +142,7 @@ fn inspect(path: &Path, id: DirId) -> std::io::Result<Container> {
         if name != PAYLOAD {
             return Ok(Container::Foreign(format!(
                 "{} holds {:?}, which brokkr did not put there",
-                path.display(),
+                crate::output::path(path),
                 name
             )));
         }
@@ -183,7 +183,7 @@ pub(super) fn install(
                 step,
                 &format!(
                     "{err}; {} was replaced, so the staging directory is left for recovery",
-                    target.parent.display()
+                    crate::output::path(target.parent)
                 ),
             );
         }
@@ -219,7 +219,7 @@ pub(super) fn install(
         Ok(_) => {
             return Err(failed(
                 step,
-                &format!("{} was replaced while staging", container_path.display()),
+                &format!("{} was replaced while staging", crate::output::path(&container_path)),
             ));
         }
         Err(e) => {
@@ -253,7 +253,7 @@ pub(super) fn install(
             step,
             &format!(
                 "{} was replaced during publication; the install is left for recovery",
-                target.parent.display()
+                crate::output::path(target.parent)
             ),
         ));
     }
@@ -310,7 +310,7 @@ fn recheck_destination(
             step,
             &format!(
                 "{} changed while the payload was staged",
-                target.path.display()
+                crate::output::path(target.path)
             ),
         )),
         Err(e) => Err(io(step, "cannot fingerprint", target.path, &e)),
@@ -338,10 +338,10 @@ fn verify_displaced(
             "the object displaced from {} is not the one brokkr installed - something changed it \
              during the install. It is preserved at {}; inspect it, then remove {}, that directory \
              and the record {} to install afresh",
-            target.path.display(),
-            payload.display(),
-            target.path.display(),
-            registry.file_for(target.key).display()
+            crate::output::path(target.path),
+            crate::output::path(payload),
+            crate::output::path(target.path),
+            crate::output::path(&registry.file_for(target.key))
         ),
     ))
 }
@@ -402,7 +402,7 @@ fn allocate(
             step,
             &format!(
                 "{} was replaced during the install",
-                target.parent.display()
+                crate::output::path(target.parent)
             ),
         ));
     }
@@ -505,7 +505,7 @@ pub(super) fn recover_all(registry: &Registry) -> Result<(), DevError> {
             output::warn(&format!(
                 "interrupted install of {} left unresolved: {why} (record {})",
                 record.destination,
-                file.display()
+                crate::output::path(&file)
             ));
         }
     }
@@ -529,7 +529,7 @@ fn recover(registry: &Registry, record: &mut Record) -> Result<(), String> {
     if parent_now.is_none() || parent_now != record.parent {
         return Err(format!(
             "{} is missing or is not the directory the install ran in, so its staging directory cannot be found",
-            parent.display()
+            crate::output::path(&parent)
         ));
     }
     let finish = |record: &mut Record, id, owner, retiring| {
@@ -547,13 +547,13 @@ fn recover(registry: &Registry, record: &mut Record) -> Result<(), String> {
                 Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
                     output::warn(&format!(
                         "left {} in place: it is not empty, so brokkr did not create it as it stands",
-                        container_path.display()
+                        crate::output::path(&container_path)
                     ));
                 }
-                Err(e) => return Err(format!("cannot remove {}: {e}", container_path.display())),
+                Err(e) => return Err(format!("cannot remove {}: {e}", crate::output::path(&container_path))),
             }
             tree::fsync_dir(&parent)
-                .map_err(|e| format!("cannot fsync {}: {e}", parent.display()))?;
+                .map_err(|e| format!("cannot fsync {}: {e}", crate::output::path(&parent)))?;
             record.settle(prior);
             registry.store(record).map_err(|e| e.to_string())
         }
@@ -580,14 +580,14 @@ fn recover(registry: &Registry, record: &mut Record) -> Result<(), String> {
                 Container::Absent => {
                     return Err(format!(
                         "{} is gone, so neither outcome can be proven",
-                        container_path.display()
+                        crate::output::path(&container_path)
                     ));
                 }
             }
             tree::fsync_dir(&parent)
-                .map_err(|e| format!("cannot fsync {}: {e}", parent.display()))?;
+                .map_err(|e| format!("cannot fsync {}: {e}", crate::output::path(&parent)))?;
             tree::fsync_dir(&container_path)
-                .map_err(|e| format!("cannot fsync {}: {e}", container_path.display()))?;
+                .map_err(|e| format!("cannot fsync {}: {e}", crate::output::path(&container_path)))?;
             let live = tree::observe(&destination).map_err(|e| e.to_string())?;
             let in_container =
                 tree::observe(&container_path.join(PAYLOAD)).map_err(|e| e.to_string())?;
@@ -600,8 +600,8 @@ fn recover(registry: &Registry, record: &mut Record) -> Result<(), String> {
             } else {
                 Err(format!(
                     "neither the published nor the original state is on disk at {} and {}",
-                    destination.display(),
-                    container_path.display()
+                    crate::output::path(&destination),
+                    crate::output::path(&container_path)
                 ))
             }
         }

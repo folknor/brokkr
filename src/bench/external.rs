@@ -61,7 +61,7 @@ fn resolve_spelled(name: &str, cwd: &Path, path: Option<&str>) -> Result<PathBuf
             Ok(()) => Ok(candidate),
             Err(why) => Err(StartError {
                 operation: "resolve",
-                reason: format!("{}: {why}", candidate.display()),
+                reason: format!("{}: {why}", crate::output::path(&candidate)),
             }),
         };
     }
@@ -82,7 +82,7 @@ fn resolve_spelled(name: &str, cwd: &Path, path: Option<&str>) -> Result<PathBuf
         match executable(&candidate) {
             Ok(()) => return Ok(candidate),
             Err(Refusal::Absent) => {}
-            Err(why) => refused.push(format!("{} {why}", candidate.display())),
+            Err(why) => refused.push(format!("{} {why}", crate::output::path(&candidate))),
         }
     }
     let mut reason = format!("{name} is not on PATH ({path})");

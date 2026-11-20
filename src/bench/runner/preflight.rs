@@ -64,7 +64,7 @@ impl PreflightHost {
         let program_str = program.to_str().map(str::to_owned).ok_or_else(|| {
             Abort::Failed(format!(
                 "cannot start {name}: {} is not UTF-8",
-                program.display()
+                crate::output::path(&program)
             ))
         })?;
         let lease =

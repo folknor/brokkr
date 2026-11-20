@@ -106,7 +106,7 @@ fn run(entry: &Path, fd: RawFd) -> Result<(), String> {
         .append(true)
         .create(true)
         .open(&intent.log)
-        .map_err(|e| format!("cannot open the log {}: {e}", intent.log.display()))?;
+        .map_err(|e| format!("cannot open the log {}: {e}", crate::output::path(&intent.log)))?;
     let log_err = log
         .try_clone()
         .map_err(|e| format!("cannot share the log: {e}"))?;

@@ -350,9 +350,9 @@ pub(crate) fn cmd_list() -> Result<(), DevError> {
                 "    target {}, up {}, root {}",
                 i.target,
                 output::format_duration(Duration::from_secs(now.saturating_sub(i.launched))),
-                i.root.display()
+                crate::output::path(&i.root)
             ));
-            output::serve_msg(&format!("    log {}", i.log.display()));
+            output::serve_msg(&format!("    log {}", crate::output::path(&i.log)));
         }
     }
     Ok(())
@@ -707,7 +707,7 @@ pub(crate) fn start(req: &StartRequest<'_>) -> Result<(), DevError> {
                 "serving {}/{name} [{}], PID {server}; log {}",
                 intent.project,
                 intent.short_id(),
-                log.display()
+                crate::output::path(&log)
             ));
             output::serve_msg(&format!(
                 "stop it with `brokkr serve --stop {name}`; measurements refuse until then"
@@ -862,7 +862,7 @@ fn not_running(intent: &Intent, why: &str) -> DevError {
         "{}/{}: {why}; log {}",
         intent.project,
         intent.name,
-        intent.log.display()
+        crate::output::path(&intent.log)
     );
     if !tail.is_empty() {
         message.push('\n');
@@ -880,7 +880,7 @@ fn sweep_retired_generations(serve_dir: &Path, name: Option<&str>) {
         if let Err(e) = std::fs::remove_dir_all(&dir) {
             output::warn(&format!(
                 "could not remove the ended serve generation {}: {e}",
-                dir.display()
+                crate::output::path(&dir)
             ));
         }
     }

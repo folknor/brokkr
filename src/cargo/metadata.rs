@@ -241,7 +241,7 @@ fn load_uncached(
         let mut message = format!(
             "no Cargo.toml in {} or any parent - brokkr runs cargo in the working \
              directory, and this one is not a Rust tree",
-            root.display()
+            crate::output::path(root)
         );
         if root.join("brokkr.toml").exists() {
             message.push_str(

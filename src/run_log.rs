@@ -122,7 +122,7 @@ fn open_run_log_with(
     if let Err(error) = std::fs::create_dir_all(&dir) {
         crate::output::warn(&format!(
             "could not create run-log directory {}: {error}; continuing without a run log",
-            dir.display()
+            crate::output::path(&dir)
         ));
         return;
     }
@@ -131,7 +131,7 @@ fn open_run_log_with(
         Err(error) => {
             crate::output::warn(&format!(
                 "could not list existing run logs in {}: {error}; this run's name order and retention may be inaccurate",
-                dir.display()
+                crate::output::path(&dir)
             ));
             (Vec::new(), false)
         }
@@ -197,7 +197,7 @@ fn open_run_log_with(
         );
         crate::output::warn(&format!(
             "could not open a unique {kind} run log in {}: {detail}; continuing without a run log",
-            dir.display()
+            crate::output::path(&dir)
         ));
     }
 }
@@ -209,7 +209,7 @@ fn remove_logs(paths: Vec<PathBuf>) -> Vec<String> {
         .into_iter()
         .filter_map(|path| match std::fs::remove_file(&path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                Some(format!("could not prune {}: {e}", path.display()))
+                Some(format!("could not prune {}: {e}", crate::output::path(&path)))
             }
             _ => None,
         })

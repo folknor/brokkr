@@ -140,7 +140,7 @@ pub fn resolve_commit(repo: &Path, rev: &str) -> Result<Commit, DevError> {
     if !output.status.success() {
         return Err(DevError::Config(format!(
             "{rev:?} does not name a commit in {}",
-            repo.display()
+            crate::output::path(repo)
         )));
     }
     String::from_utf8_lossy(&output.stdout)

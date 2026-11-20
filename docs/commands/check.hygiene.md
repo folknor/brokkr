@@ -198,7 +198,9 @@ mock by starttime first and refuses the whole kill on one it cannot verify,
 except that a recorded process that has provably exited (or whose pid now
 names another process) is skipped with a line saying so, so a wedged holder
 whose child already died stays killable. When such a recorded process led a
-process group, its surviving members are SIGKILLed one by one, each only if it
+process group, or a recorded process was killed without a group signal (it
+exited before the signal landed, or was signalled through its pidfd alone),
+its group's surviving members are SIGKILLed one by one, each only if it
 carries the hold's launch cohort (`BROKKR_EXEC`) and still sits in that group:
 a group number is reused once its members are all gone, so a group signal
 could reach a stranger. Against any other SIGKILL (the OOM

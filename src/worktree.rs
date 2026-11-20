@@ -204,7 +204,7 @@ impl Worktree {
         let slot = checkout_dir(git_root)?.join(short.as_str());
         let checkout = checkout_in(git_root, &slot);
         let record_name = record_name(&slot)
-            .ok_or_else(|| DevError::Config(format!("bad worktree slot {}", slot.display())))?;
+            .ok_or_else(|| DevError::Config(format!("bad worktree slot {}", crate::output::path(&slot))))?;
 
         // A run that died while its cargo config was filtered left the
         // checkout in a state only recovery can read; put it back before any
@@ -252,7 +252,7 @@ impl Worktree {
                 "worktree at {} is not a complete checkout of {short} and has uncommitted \
                  work (or git could not read it); refusing to replace it. Commit or move the \
                  work, remove the directory by hand, then rerun",
-                checkout.display()
+                crate::output::path(&checkout)
             )));
         }
 
@@ -261,7 +261,7 @@ impl Worktree {
         before_cut(&slot);
 
         if stale {
-            output::run_msg(&format!("removing stale worktree at {}", slot.display()));
+            output::run_msg(&format!("removing stale worktree at {}", crate::output::path(&slot)));
             remove_one(git_root, &slot)?;
         }
 
@@ -328,7 +328,7 @@ fn admit(
              hand), so a run would measure changed code under {short}'s name; refusing to use \
              it. Remove it with `brokkr clean --worktrees` (or move any work out and delete the \
              directory), then rerun",
-            checkout.display()
+            crate::output::path(checkout)
         )));
     }
     let pointers = crate::worktree_lfs::inspect(checkout)?;
@@ -349,7 +349,7 @@ fn furnish(git_root: &Path, slot: &Path, checkout: &Path) -> Result<(), DevError
         else {
             return Err(DevError::Config(format!(
                 "bad worktree slot {}",
-                slot.display()
+                crate::output::path(slot)
             )));
         };
         let dir = base.join(TARGET_SUBDIR).join(key).join(short);
@@ -409,7 +409,7 @@ fn outside_path_deps(checkout: &Path) -> Result<Vec<String>, DevError> {
                         "{} has a path dependency '{dep}' reaching more than one level above \
                          the repository; a --commit worktree can only provide siblings of \
                          the checkout",
-                        rel.display()
+                        crate::output::path(rel)
                     )));
                 }
             }
@@ -572,7 +572,7 @@ pub fn purge_all(git_root: &Path) -> Result<usize, DevError> {
     for slot in list(git_root)? {
         output::run_msg(&format!(
             "removing worktree {}",
-            record_name(&slot).unwrap_or_else(|| slot.display().to_string())
+            record_name(&slot).unwrap_or_else(|| crate::output::path(&slot).to_string())
         ));
         if kept_if_reserved(remove_one(git_root, &slot), &slot)? {
             removed += 1;
@@ -600,7 +600,7 @@ fn kept_if_reserved(result: Result<(), DevError>, path: &Path) -> Result<bool, D
     match result {
         Ok(()) => Ok(true),
         Err(DevError::Io(e)) if crate::reservations::is_refusal(&e) => {
-            output::warn(&format!("kept worktree {}: {e}", path.display()));
+            output::warn(&format!("kept worktree {}: {e}", crate::output::path(path)));
             Ok(false)
         }
         Err(e) => Err(e),
@@ -642,7 +642,7 @@ pub fn remove_one(git_root: &Path, slot: &Path) -> Result<(), DevError> {
             std::fs::remove_dir_all(dest).map_err(|e| {
                 DevError::Io(std::io::Error::new(
                     e.kind(),
-                    format!("cannot remove worktree target dir {}: {e}", dest.display()),
+                    format!("cannot remove worktree target dir {}: {e}", crate::output::path(dest)),
                 ))
             })?;
         }
@@ -659,7 +659,7 @@ fn remove_slot(git_root: &Path, slot: &Path) -> Result<(), DevError> {
         std::fs::remove_dir_all(slot).map_err(|e| {
             DevError::Io(std::io::Error::new(
                 e.kind(),
-                format!("cannot remove worktree slot {}: {e}", slot.display()),
+                format!("cannot remove worktree slot {}: {e}", crate::output::path(slot)),
             ))
         })?;
     }
@@ -690,7 +690,7 @@ fn remove_checkout(git_root: &Path, path: &Path) -> Result<(), DevError> {
             e.kind(),
             format!(
                 "cannot remove worktree at {}: {e}{git_note}",
-                path.display()
+                crate::output::path(path)
             ),
         )));
     }

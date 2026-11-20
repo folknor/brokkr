@@ -284,7 +284,7 @@ pub(super) fn directory_filter(project_root: &Path, dir: &Path) -> Result<String
     let canon = dir.canonicalize().map_err(|e| {
         DevError::Config(format!(
             "service: failed to canonicalize directory {}: {e}",
-            dir.display()
+            output::path(dir)
         ))
     })?;
     let script_root = project_root.join(SCRIPT_DIR);
@@ -292,14 +292,14 @@ pub(super) fn directory_filter(project_root: &Path, dir: &Path) -> Result<String
         DevError::Config(format!(
             "service: failed to canonicalize script root {}: {e}. \
              Is the harness directory present?",
-            script_root.display()
+            output::path(&script_root)
         ))
     })?;
     let rel = canon.strip_prefix(&script_root_canon).map_err(|_| {
         DevError::Config(format!(
             "service: directory {} is not under {}",
-            dir.display(),
-            script_root.display()
+            output::path(dir),
+            output::path(&script_root)
         ))
     })?;
     let mut filter = rel.to_string_lossy().into_owned();

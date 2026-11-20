@@ -107,7 +107,7 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         if !script.is_file() {
             return Err(DevError::Config(format!(
                 "sync --gate all: gate `{name}` names a script that does not exist: {}",
-                script.display()
+                output::path(&script)
             )));
         }
         resolve_path(&script, &fixtures_dir).map_err(|error| {
@@ -242,15 +242,15 @@ pub(super) fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
         DevError::Config(format!(
             "gate `{}`: failed to resolve configured script {}: {error}",
             ctx.gate_name,
-            configured_script.display()
+            output::path(&configured_script)
         ))
     })?;
     if configured_canon != ctx.script_abs {
         return Err(DevError::Config(format!(
             "gate `{}`: configured script `{}` does not match invocation script `{}`",
             ctx.gate_name,
-            gate.script.display(),
-            ctx.script_abs.display(),
+            output::path(&gate.script),
+            output::path(ctx.script_abs),
         )));
     }
 

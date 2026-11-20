@@ -52,11 +52,11 @@ struct DecodedPng {
 
 fn decode_png(path: &Path) -> Result<DecodedPng, DevError> {
     let file = std::fs::File::open(path)
-        .map_err(|e| DevError::Verify(format!("cannot open {}: {e}", path.display())))?;
+        .map_err(|e| DevError::Verify(format!("cannot open {}: {e}", crate::output::path(path))))?;
     let decoder = png::Decoder::new(std::io::BufReader::new(file));
     let mut reader = decoder
         .read_info()
-        .map_err(|e| DevError::Verify(format!("invalid PNG {}: {e}", path.display())))?;
+        .map_err(|e| DevError::Verify(format!("invalid PNG {}: {e}", crate::output::path(path))))?;
 
     let info = reader.info();
     let width = info.width;
@@ -67,13 +67,13 @@ fn decode_png(path: &Path) -> Result<DecodedPng, DevError> {
     let buf_size = reader.output_buffer_size().ok_or_else(|| {
         DevError::Verify(format!(
             "cannot determine buffer size for {}",
-            path.display()
+            crate::output::path(path)
         ))
     })?;
     let mut buf = vec![0u8; buf_size];
     let output_info = reader
         .next_frame(&mut buf)
-        .map_err(|e| DevError::Verify(format!("PNG decode error {}: {e}", path.display())))?;
+        .map_err(|e| DevError::Verify(format!("PNG decode error {}: {e}", crate::output::path(path))))?;
     buf.truncate(output_info.buffer_size());
 
     Ok(DecodedPng {
@@ -151,7 +151,7 @@ fn pad_to_size(img: &DecodedPng, target_w: u32, target_h: u32) -> Vec<u8> {
 
 fn write_diff_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), DevError> {
     let file = std::fs::File::create(path).map_err(|e| {
-        DevError::Verify(format!("cannot create diff image {}: {e}", path.display()))
+        DevError::Verify(format!("cannot create diff image {}: {e}", crate::output::path(path)))
     })?;
     let w = std::io::BufWriter::new(file);
     let mut encoder = png::Encoder::new(w, width, height);

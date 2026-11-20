@@ -90,7 +90,7 @@ fn present(path: &Path) -> Result<bool, DevError> {
         Ok(meta) if meta.file_type().is_file() => Ok(true),
         Ok(_) => Err(DevError::Refused(format!(
             "{} is not a regular file; refusing to use it as a lockfile",
-            path.display()
+            crate::output::path(path)
         ))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e.into()),
@@ -173,7 +173,7 @@ pub fn digest(root: &Path, managed: bool) -> Option<String> {
         Ok(bytes) => Some(format!("{:032x}", xxhash_rust::xxh3::xxh3_128(&bytes))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
-            crate::output::warn(&format!("lockfile: cannot read {}: {e}", path.display()));
+            crate::output::warn(&format!("lockfile: cannot read {}: {e}", crate::output::path(&path)));
             None
         }
     }

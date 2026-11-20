@@ -82,7 +82,7 @@ fn visit_file(file: &Path, module_dir: &Path, out: &mut Walk) {
         Ok(s) => s,
         Err(e) => {
             out.refusals
-                .push(format!("{}: unreadable: {e}", file.display()));
+                .push(format!("{}: unreadable: {e}", crate::output::path(file)));
             return;
         }
     };
@@ -90,14 +90,14 @@ fn visit_file(file: &Path, module_dir: &Path, out: &mut Walk) {
         Ok(f) => f,
         Err(e) => {
             out.refusals
-                .push(format!("{}: does not parse: {e}", file.display()));
+                .push(format!("{}: does not parse: {e}", crate::output::path(file)));
             return;
         }
     };
     if is_conditional(&parsed.attrs) {
         out.refusals.push(format!(
             "{}: an inner cfg/cfg_attr makes the whole file conditional",
-            file.display()
+            crate::output::path(file)
         ));
         return;
     }
@@ -124,7 +124,7 @@ fn visit_items(
         if is_conditional(&m.attrs) {
             out.refusals.push(format!(
                 "{}: `mod {name}` carries cfg/cfg_attr - a conditional route proves nothing",
-                file.display()
+                crate::output::path(file)
             ));
             continue;
         }
@@ -132,7 +132,7 @@ fn visit_items(
             if path_attr(&m.attrs).is_some() {
                 out.refusals.push(format!(
                     "{}: #[path] on inline `mod {name}` is not followed",
-                    file.display()
+                    crate::output::path(file)
                 ));
                 continue;
             }
@@ -151,7 +151,7 @@ fn visit_items(
                 None => {
                     out.refusals.push(format!(
                         "{}: #[path] on `mod {name}` inside an inline module is not followed",
-                        file.display()
+                        crate::output::path(file)
                     ));
                     None
                 }
@@ -159,7 +159,7 @@ fn visit_items(
             Some(Err(())) => {
                 out.refusals.push(format!(
                     "{}: `mod {name}` has a #[path] that is not a string literal",
-                    file.display()
+                    crate::output::path(file)
                 ));
                 None
             }
@@ -171,8 +171,8 @@ fn visit_items(
             } else {
                 out.refusals.push(format!(
                     "{}: `mod {name}` resolves to {}, which does not exist",
-                    file.display(),
-                    f.display()
+                    crate::output::path(file),
+                    crate::output::path(&f)
                 ));
             }
         }
@@ -195,18 +195,18 @@ fn resolve_module(
         (true, true) => {
             out.refusals.push(format!(
                 "{}: `mod {name}` is ambiguous - both {} and {} exist",
-                file.display(),
-                flat.display(),
-                nested.display()
+                crate::output::path(file),
+                crate::output::path(&flat),
+                crate::output::path(&nested)
             ));
             None
         }
         (false, false) => {
             out.refusals.push(format!(
                 "{}: `mod {name}` has no file ({} or {})",
-                file.display(),
-                flat.display(),
-                nested.display()
+                crate::output::path(file),
+                crate::output::path(&flat),
+                crate::output::path(&nested)
             ));
             None
         }

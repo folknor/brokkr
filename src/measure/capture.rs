@@ -182,7 +182,7 @@ impl BenchHarness {
                 let text = std::fs::read_to_string(report).map_err(|error| {
                     DevError::Config(format!(
                         "cannot read hotpath report {}: {error}",
-                        report.display()
+                        crate::output::path(report)
                     ))
                 })?;
                 let value = serde_json::from_str(&text)

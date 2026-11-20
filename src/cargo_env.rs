@@ -247,7 +247,7 @@ pub fn apply(
                 let guard = entry.if_exists.as_deref().unwrap_or(Path::new(""));
                 output::detail_or_console(&format!(
                     "cargo_env {name} unset: {} does not exist in {} (for cargo {})",
-                    guard.display(),
+                    crate::output::path(guard),
                     output::path(&dir),
                     subcommand(args).unwrap_or("?")
                 ));
@@ -266,7 +266,7 @@ pub fn apply(
                 output::detail(&format!(
                     "cargo_env {name}={value} ({} in {}, for cargo {})",
                     fmt_ms(started.elapsed()),
-                    dir.display(),
+                    crate::output::path(&dir),
                     subcommand(args).unwrap_or("?")
                 ));
                 cmd.env(name, value);
@@ -274,7 +274,7 @@ pub fn apply(
             Err(Failure::Interrupted) => return Err(DevError::Interrupted),
             Err(Failure::Failed(why)) => {
                 return Err(record(
-                    format!("{name}: `{command}` (in {}) {why}", dir.display()),
+                    format!("{name}: `{command}` (in {}) {why}", crate::output::path(&dir)),
                     phase,
                 ));
             }
@@ -297,7 +297,7 @@ fn applies(entry: &Entry, dir: &Path) -> Result<bool, String> {
     };
     dir.join(guard)
         .try_exists()
-        .map_err(|e| format!("{} could not be checked: {e}", guard.display()))
+        .map_err(|e| format!("{} could not be checked: {e}", crate::output::path(guard)))
 }
 
 /// The label every `[cargo_env]` error carries: the detail is printed once,

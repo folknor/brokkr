@@ -88,7 +88,7 @@ pub(crate) fn adopt(dir: &Path, width: u32) -> Result<String, DevError> {
     if judge_meta(&meta, width) != Inspection::Unidentified {
         return Err(DevError::Internal(format!(
             "{} is not an unidentified reference at {width}px",
-            path.display()
+            crate::output::path(&path)
         )));
     }
     let id = crate::db::generate_uuid()?;
@@ -133,7 +133,7 @@ pub(crate) fn publish(staging: &Path, dir: &Path, width: u32) -> Result<String, 
         Err(e) => {
             return Err(DevError::Verify(format!(
                 "cannot retire the published {}: {e}; the old reference is left as it was",
-                published.meta.display()
+                crate::output::path(&published.meta)
             )));
         }
     }

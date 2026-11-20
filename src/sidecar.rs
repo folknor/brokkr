@@ -1246,7 +1246,7 @@ impl SidecarFifo {
             let e = std::io::Error::last_os_error();
             return Err(DevError::Io(std::io::Error::new(
                 e.kind(),
-                format!("cannot create FIFO {}: {e}", path.display()),
+                format!("cannot create FIFO {}: {e}", crate::output::path(&path)),
             )));
         }
         // Ours from here: a failed open removes it before the lock goes.

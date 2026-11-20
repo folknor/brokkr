@@ -27,7 +27,7 @@ fn select_cohort<'a>(
     if scripts.is_empty() {
         return Err(DevError::Config(format!(
             "sync --all: no sync-test scripts found under {}",
-            dir.display()
+            output::path(dir)
         )));
     }
     let selected: Vec<&ScriptInfo> = scripts

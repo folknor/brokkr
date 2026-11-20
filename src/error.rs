@@ -174,18 +174,18 @@ impl fmt::Display for AcquireRefusal {
                 waited.as_secs()
             ),
             Self::LockFileOpen { path, source } => {
-                write!(f, "failed to open lock file {}: {source}", path.display())
+                write!(f, "failed to open lock file {}: {source}", crate::output::path(path))
             }
             Self::LockFlock { source } => write!(f, "flock failed: {source}"),
             Self::CompileLeaseOpen { path, source } => write!(
                 f,
                 "failed to open the compile lease lock {}: {source}",
-                path.display()
+                crate::output::path(path)
             ),
             Self::CompileLeaseFlock { path, source } => write!(
                 f,
                 "could not take the compile lease lock at {}: {source}",
-                path.display()
+                crate::output::path(path)
             ),
             Self::MetadataPublish {
                 stage: MetadataStage::Draining,
@@ -205,7 +205,7 @@ impl fmt::Display for AcquireRefusal {
                 ),
             },
             Self::SocketBind { path, source } => {
-                write!(f, "cannot bind lock socket {}: {source}", path.display())
+                write!(f, "cannot bind lock socket {}: {source}", crate::output::path(path))
             }
             Self::SocketDirectory { reason } => f.write_str(reason),
             Self::ServiceThread { source } => {

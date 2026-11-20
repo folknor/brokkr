@@ -129,7 +129,7 @@ fn resolve(absolute: &Path) -> io::Result<(PathBuf, Vec<PathBuf>)> {
                 if expansions > 40 {
                     return Err(io::Error::other(format!(
                         "too many symbolic links resolving {}",
-                        absolute.display()
+                        crate::output::path(absolute)
                     )));
                 }
                 let target = std::fs::read_link(&candidate)?;

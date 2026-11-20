@@ -529,7 +529,7 @@ fn push_config_document(
     if active.contains(&identity) {
         return Err(crate::error::DevError::Config(format!(
             "Cargo config include cycle reaches {}",
-            path.display()
+            crate::output::path(path)
         )));
     }
     // A file can be found both in the ancestor chain and through an include.
@@ -552,7 +552,7 @@ fn push_config_document(
     let doc = text.parse::<toml::Table>().map_err(|error| {
         crate::error::DevError::Config(format!(
             "could not parse Cargo config {}: {error}",
-            path.display()
+            crate::output::path(path)
         ))
     })?;
 
@@ -564,7 +564,7 @@ fn push_config_document(
         Some(_) => {
             return Err(crate::error::DevError::Config(format!(
                 "Cargo config {} has a non-array `include`; brokkr cannot resolve its launch settings",
-                path.display()
+                crate::output::path(path)
             )));
         }
     };
@@ -582,7 +582,7 @@ fn push_config_document(
                         .ok_or_else(|| {
                             crate::error::DevError::Config(format!(
                                 "Cargo config {} has an include table without a string `path`",
-                                path.display()
+                                crate::output::path(path)
                             ))
                         })?;
                 let optional = match table.get("optional") {
@@ -591,7 +591,7 @@ fn push_config_document(
                     Some(_) => {
                         return Err(crate::error::DevError::Config(format!(
                             "Cargo config {} has a non-boolean include `optional` value",
-                            path.display()
+                            crate::output::path(path)
                         )));
                     }
                 };
@@ -600,14 +600,14 @@ fn push_config_document(
             _ => {
                 return Err(crate::error::DevError::Config(format!(
                     "Cargo config {} has an invalid include entry",
-                    path.display()
+                    crate::output::path(path)
                 )));
             }
         };
         if !include_path.ends_with(".toml") {
             return Err(crate::error::DevError::Config(format!(
                 "Cargo config {} includes `{include_path}`, which does not end in `.toml`",
-                path.display()
+                crate::output::path(path)
             )));
         }
         push_config_document(&anchor.join(include_path), optional, out, loaded, active)?;
@@ -619,7 +619,7 @@ fn push_config_document(
 fn config_read_error(path: &Path, error: &std::io::Error) -> crate::error::DevError {
     crate::error::DevError::Config(format!(
         "could not read Cargo config {}: {error}",
-        path.display()
+        crate::output::path(path)
     ))
 }
 
@@ -693,7 +693,7 @@ fn config_env_entries(
     let entries = value.as_table().ok_or_else(|| {
         crate::error::DevError::Config(format!(
             "Cargo config {} has a non-table `env`; brokkr cannot reconstruct its launch environment",
-            path.display()
+            crate::output::path(path)
         ))
     })?;
     // <dir>/.cargo/config.toml -> <dir>.
@@ -709,7 +709,7 @@ fn config_env_entries(
                     .ok_or_else(|| {
                         crate::error::DevError::Config(format!(
                             "Cargo config {} has an `[env]` table for `{key}` without a string `value`",
-                            path.display()
+                            crate::output::path(path)
                         ))
                     })?;
                 let force = match table.get("force") {
@@ -718,7 +718,7 @@ fn config_env_entries(
                     Some(_) => {
                         return Err(crate::error::DevError::Config(format!(
                             "Cargo config {} has a non-boolean `[env]` force value for `{key}`",
-                            path.display()
+                            crate::output::path(path)
                         )));
                     }
                 };
@@ -728,7 +728,7 @@ fn config_env_entries(
                     Some(_) => {
                         return Err(crate::error::DevError::Config(format!(
                             "Cargo config {} has a non-boolean `[env]` relative value for `{key}`",
-                            path.display()
+                            crate::output::path(path)
                         )));
                     }
                 };
@@ -737,7 +737,7 @@ fn config_env_entries(
             _ => {
                 return Err(crate::error::DevError::Config(format!(
                     "Cargo config {} has an unsupported `[env]` value for `{key}`",
-                    path.display()
+                    crate::output::path(path)
                 )));
             }
         };

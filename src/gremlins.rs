@@ -50,7 +50,7 @@ pub fn format_one(g: &Gremlin) -> String {
     if g.name == INVALID_UTF8 {
         return format!(
             "{}:{}:{} byte 0x{:02X} {}",
-            g.path.display(),
+            crate::output::path(&g.path),
             g.line,
             g.column,
             g.codepoint,
@@ -59,7 +59,7 @@ pub fn format_one(g: &Gremlin) -> String {
     }
     format!(
         "{}:{}:{} U+{:04X} {}",
-        g.path.display(),
+        crate::output::path(&g.path),
         g.line,
         g.column,
         g.codepoint,

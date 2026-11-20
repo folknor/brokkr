@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::DevError;
+use crate::output;
 use crate::ratatoskr::timing::parse_duration;
 
 /// Where service-harness scripts live, relative to the project root.
@@ -271,7 +272,7 @@ fn build_info(
     script_type: ScriptType,
 ) -> Result<ScriptInfo, DevError> {
     let parsed = parse_frontmatter(body)
-        .map_err(|error| DevError::Config(format!("{}: {error}", path.display())))?;
+        .map_err(|error| DevError::Config(format!("{}: {error}", output::path(&path))))?;
     let kind = match script_type {
         ScriptType::Service => ScriptKind::Service {
             fixture: parsed.fixture,
@@ -281,7 +282,7 @@ fn build_info(
             let fixture = parsed.fixture.ok_or_else(|| {
                 DevError::Config(format!(
                     "{}: sync frontmatter requires `fixture: <NAME>`",
-                    path.display()
+                    output::path(&path)
                 ))
             })?;
             ScriptKind::Sync {

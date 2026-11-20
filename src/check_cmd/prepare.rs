@@ -272,7 +272,7 @@ pub(crate) fn refuse_target_runner(
     };
     let at = match &runner.origin {
         rustflags::SourceOrigin::Environment(_) => format!("`{}` is set", runner.key),
-        rustflags::SourceOrigin::Config(path) => format!("{} sets `{}`", path.display(), runner.key),
+        rustflags::SourceOrigin::Config(path) => format!("{} sets `{}`", crate::output::path(path), runner.key),
     };
     Err(DevError::Config(format!(
         "sweep '{}' targets `{}`, and {at}: brokkr runs a target sweep's binaries itself, so a \

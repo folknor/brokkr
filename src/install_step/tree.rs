@@ -145,7 +145,7 @@ fn hash_file(
         if got == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
-                format!("{} shrank while it was read", path.display()),
+                format!("{} shrank while it was read", crate::output::path(path)),
             ));
         }
         hasher.update(&buf[..got]);
@@ -154,7 +154,7 @@ fn hash_file(
     if file.read(&mut buf[..1])? != 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("{} grew while it was read", path.display()),
+            format!("{} grew while it was read", crate::output::path(path)),
         ));
     }
     Ok(None)
@@ -163,7 +163,7 @@ fn hash_file(
 fn io_at(what: &str, path: &Path, e: &std::io::Error) -> DevError {
     DevError::Io(std::io::Error::new(
         e.kind(),
-        format!("{what} {}: {e}", path.display()),
+        format!("{what} {}: {e}", crate::output::path(path)),
     ))
 }
 
@@ -188,7 +188,7 @@ pub(super) fn stage(src: &Path, dst: &Path) -> Result<(), DevError> {
             return Err(DevError::Refused(format!(
                 "{} changed type while it was copied; an install payload holds regular files and \
                  directories only",
-                src.display()
+                crate::output::path(src)
             )));
         }
         let mut output = std::fs::OpenOptions::new()
@@ -210,7 +210,7 @@ pub(super) fn stage(src: &Path, dst: &Path) -> Result<(), DevError> {
         return Err(DevError::Refused(format!(
             "{} is a symlink or special file; an install payload holds regular files and \
              directories only",
-            src.display()
+            crate::output::path(src)
         )));
     }
     std::fs::DirBuilder::new()

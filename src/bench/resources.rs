@@ -86,7 +86,7 @@ impl Handle {
         }
         Err(DevError::Config(format!(
             "{} is {}, not a file",
-            self.path.display(),
+            crate::output::path(&self.path),
             self.origin.named()
         )))
     }
@@ -102,7 +102,7 @@ impl Handle {
         };
         Err(DevError::Config(format!(
             "{} is {}, which is {why}: write() writes an output's file",
-            self.path.display(),
+            crate::output::path(&self.path),
             self.origin.named()
         )))
     }
@@ -115,7 +115,7 @@ impl Handle {
         }
         Err(DevError::Config(format!(
             "{} is {}: only an input is prepared",
-            self.path.display(),
+            crate::output::path(&self.path),
             self.origin.named()
         )))
     }
@@ -214,7 +214,7 @@ impl Resources {
         let cap = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
         file.take(cap)
             .read_to_end(&mut bytes)
-            .map_err(|e| DevError::Config(format!("cannot read {}: {e}", path.display())))?;
+            .map_err(|e| DevError::Config(format!("cannot read {}: {e}", crate::output::path(path))))?;
         Ok((bytes.len() <= limit).then_some(bytes))
     }
 
@@ -226,11 +226,11 @@ impl Resources {
         let cap = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
         file.take(cap)
             .read_to_end(&mut bytes)
-            .map_err(|e| DevError::Config(format!("cannot read {}: {e}", handle.path.display())))?;
+            .map_err(|e| DevError::Config(format!("cannot read {}: {e}", crate::output::path(&handle.path))))?;
         if bytes.len() > limit {
             return Err(DevError::Config(format!(
                 "{} holds more than {limit} bytes, the most a script's string holds",
-                handle.path.display()
+                crate::output::path(&handle.path)
             )));
         }
         Ok(bytes)
@@ -286,13 +286,13 @@ pub(crate) fn call_access(
     if let Some(both) = reads.iter().find(|r| writes.contains(r)) {
         return Err(DevError::Config(format!(
             "{} is in both reads and writes",
-            both.path.display()
+            crate::output::path(&both.path)
         )));
     }
     if let Some(fixed) = writes.iter().find(|w| !w.writable()) {
         return Err(DevError::Config(format!(
             "{} is {} and read-only for the run: it cannot be in writes",
-            fixed.path.display(),
+            crate::output::path(&fixed.path),
             fixed.origin.named()
         )));
     }
@@ -300,13 +300,13 @@ pub(crate) fn call_access(
         if writes.contains(&stdin) {
             return Err(DevError::Config(format!(
                 "{} is the call's stdin, which is read: it cannot be in writes",
-                stdin.path.display()
+                crate::output::path(&stdin.path)
             )));
         }
         if !stdin.is_file() {
             return Err(DevError::Config(format!(
                 "stdin {} is {}, not a file",
-                stdin.path.display(),
+                crate::output::path(&stdin.path),
                 stdin.origin.named()
             )));
         }

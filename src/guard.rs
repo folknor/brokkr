@@ -60,7 +60,7 @@ fn guard_bin_path() -> Result<PathBuf, DevError> {
     let Some(dir) = exe.parent() else {
         return Err(DevError::Config(format!(
             "{} has no parent directory",
-            exe.display()
+            crate::output::path(&exe)
         )));
     };
     Ok(dir.join(GUARD_BIN))
@@ -91,12 +91,12 @@ fn load_doc(path: &std::path::Path) -> Result<toml_edit::DocumentMut, DevError> 
         Err(e) => {
             return Err(DevError::Config(format!(
                 "cannot read {}: {e}",
-                path.display()
+                crate::output::path(path)
             )));
         }
     };
     text.parse()
-        .map_err(|e| DevError::Config(format!("cannot parse {}: {e}", path.display())))
+        .map_err(|e| DevError::Config(format!("cannot parse {}: {e}", crate::output::path(path))))
 }
 
 /// The configured `build.rustc-wrapper`, if any.
@@ -138,7 +138,7 @@ fn do_install(config_path: &std::path::Path) -> Result<(), DevError> {
     if !guard.exists() {
         return Err(DevError::Config(format!(
             "{} not found next to the running brokkr - run `brokkr install` in the brokkr repo first",
-            guard.display()
+            crate::output::path(&guard)
         )));
     }
     let mut doc = load_doc(config_path)?;
@@ -151,14 +151,14 @@ fn do_install(config_path: &std::path::Path) -> Result<(), DevError> {
         Wrapper::OtherBrokkrGuard(other) => {
             return Err(DevError::Config(format!(
                 "{} already sets build.{WRAPPER_KEY} to a brokkr guard from another install ({}) - remove it with `brokkr guard --remove` before installing this one",
-                config_path.display(),
-                other.display()
+                crate::output::path(config_path),
+                crate::output::path(&other)
             )));
         }
         Wrapper::Foreign(existing) => {
             return Err(DevError::Config(format!(
                 "{} already sets build.{WRAPPER_KEY} = \"{existing}\" - refusing to overwrite a wrapper brokkr did not write",
-                config_path.display()
+                crate::output::path(config_path)
             )));
         }
         Wrapper::None => {}
@@ -174,7 +174,7 @@ fn do_install(config_path: &std::path::Path) -> Result<(), DevError> {
     output::guard_msg(&format!(
         "build.{WRAPPER_KEY} = \"{}\" written to {}",
         guard.display(),
-        config_path.display()
+        crate::output::path(config_path)
     ));
     output::guard_msg(
         "every cargo this user runs now routes rustc through the guard; the wrapper change invalidates cargo's fingerprint, so the next build in each target dir is a full rebuild (once)",
@@ -187,7 +187,7 @@ fn do_remove(config_path: &std::path::Path) -> Result<(), DevError> {
     let Some(existing) = configured_wrapper(&doc) else {
         output::guard_msg(&format!(
             "no build.{WRAPPER_KEY} in {} - nothing to remove",
-            config_path.display()
+            crate::output::path(config_path)
         ));
         return Ok(());
     };
@@ -206,7 +206,7 @@ fn do_remove(config_path: &std::path::Path) -> Result<(), DevError> {
         Wrapper::None => {
             return Err(DevError::Config(format!(
                 "{} no longer has a string build.{WRAPPER_KEY} value",
-                config_path.display()
+                crate::output::path(config_path)
             )));
         }
     }
@@ -219,7 +219,7 @@ fn do_remove(config_path: &std::path::Path) -> Result<(), DevError> {
     crate::atomic_write::replace(config_path, doc.to_string().as_bytes())?;
     output::guard_msg(&format!(
         "build.{WRAPPER_KEY} removed from {}",
-        config_path.display()
+        crate::output::path(config_path)
     ));
     Ok(())
 }
@@ -360,7 +360,7 @@ fn status(config_path: &std::path::Path) -> Result<(), DevError> {
         Wrapper::None => {
             output::guard_msg(&format!(
                 "guard not installed (no build.{WRAPPER_KEY} in {}) - `brokkr guard --install` enrolls it",
-                config_path.display()
+                crate::output::path(config_path)
             ));
         }
     }
@@ -370,7 +370,7 @@ fn status(config_path: &std::path::Path) -> Result<(), DevError> {
 fn report_configured_guard(config_path: &Path, wrapper: &str, heading: &str, update: &str) {
     output::guard_msg(&format!(
         "{heading}: build.{WRAPPER_KEY} = \"{wrapper}\" in {}",
-        config_path.display()
+        crate::output::path(config_path)
     ));
     if !PathBuf::from(wrapper).exists() {
         output::warn(

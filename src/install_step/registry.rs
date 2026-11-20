@@ -265,7 +265,7 @@ fn parse(path: &Path, text: &str) -> Result<Record, DevError> {
 }
 
 fn registry_error(path: &Path, msg: &str) -> DevError {
-    DevError::Refused(format!("install registry {}: {msg}", path.display()))
+    DevError::Refused(format!("install registry {}: {msg}", crate::output::path(path)))
 }
 
 #[cfg(test)]

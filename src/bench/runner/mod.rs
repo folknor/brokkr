@@ -348,10 +348,10 @@ fn iteration_container(detection: &Detection, hostname: &str) -> Result<PathBuf,
             "host {hostname}'s scratch {} puts bench iterations at {}, inside brokkr's state \
              root {}, where brokkr removes directories by fixed name: point scratch elsewhere, \
              or at {} itself",
-            scratch.display(),
-            container.display(),
-            state_root.display(),
-            state_root.display()
+            crate::output::path(&scratch),
+            crate::output::path(&container),
+            crate::output::path(&state_root),
+            crate::output::path(&state_root)
         )));
     }
     Ok(container)
@@ -1053,8 +1053,8 @@ fn freeze(bench: &Bench) -> Result<Frozen, DevError> {
                 DevError::Config(format!(
                     "[bench.{}] script_file {} (set in {}) cannot be read: {e}",
                     bench.name,
-                    path.display(),
-                    declared_in.display()
+                    crate::output::path(path),
+                    crate::output::path(declared_in)
                 ))
             })?,
             path.clone(),
@@ -1078,7 +1078,7 @@ fn freeze(bench: &Bench) -> Result<Frozen, DevError> {
         DevError::Config(format!(
             "[bench.{}] {}: {problem}",
             bench.name,
-            origin.display()
+            crate::output::path(&origin)
         ))
     })?;
     if let Some(why) = lines.as_ref().and_then(super::InlineLines::why_not) {
@@ -1636,13 +1636,17 @@ fn lock_source(source: crate::worktree_lock::Source) -> store::LockSource {
     }
 }
 
+/// The stored failure reason: rendered with absolute paths, so it reads the
+/// same whichever directory brokkr was invoked from.
 fn reason_of(error: &DevError) -> String {
-    let shown = error.to_string();
-    if shown.trim().is_empty() {
-        format!("{error:?}")
-    } else {
-        shown
-    }
+    output::with_absolute_paths(|| {
+        let shown = error.to_string();
+        if shown.trim().is_empty() {
+            format!("{error:?}")
+        } else {
+            shown
+        }
+    })
 }
 
 /// Where a run is published: the local bench store, or the results server

@@ -89,7 +89,7 @@ fn restore_dir(dir: &Path) {
         if should_restore && let Err(e) = std::fs::rename(&aside, &orig) {
             output::error_forced(&format!(
                 "disable_toolchain: failed to restore {}: {e}",
-                orig.display()
+                crate::output::path(&orig)
             ));
         }
     }
@@ -101,7 +101,7 @@ fn path_exists(path: &Path) -> Result<bool, DevError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(DevError::Io(std::io::Error::new(
             error.kind(),
-            format!("cannot inspect {}: {error}", path.display()),
+            format!("cannot inspect {}: {error}", crate::output::path(path)),
         ))),
     }
 }
@@ -158,7 +158,7 @@ impl DisabledToolchain {
                                 error.kind(),
                                 format!(
                                     "disable_toolchain: cannot remove stale {}: {error}",
-                                    aside.display()
+                                    crate::output::path(&aside)
                                 ),
                             )));
                         }
@@ -173,7 +173,7 @@ impl DisabledToolchain {
                         e.kind(),
                         format!(
                             "disable_toolchain: cannot move {} aside: {e}",
-                            orig.display()
+                            crate::output::path(&orig)
                         ),
                     ))
                 })?;
@@ -205,7 +205,7 @@ impl Drop for DisabledToolchain {
                 // `activate` will re-adopt the sidecar and try again.
                 output::warn(&format!(
                     "disable_toolchain: failed to restore {}: {e}",
-                    orig.display()
+                    crate::output::path(orig)
                 ));
             }
         }

@@ -64,8 +64,8 @@ impl LaunchSpec {
         if cwd != self.cwd {
             return Err(DevError::Internal(format!(
                 "a launch declared for {} was run in {}",
-                self.cwd.display(),
-                cwd.display()
+                crate::output::path(&self.cwd),
+                crate::output::path(cwd)
             )));
         }
         let store = super::store().ok_or_else(|| {
@@ -75,7 +75,7 @@ impl LaunchSpec {
         let scan = store.scan();
         let spell = |path: &Path| {
             Spelled::of(path, &self.cwd)
-                .map_err(|e| io_error(&format!("cannot resolve launch path {}", path.display()), e))
+                .map_err(|e| io_error(&format!("cannot resolve launch path {}", crate::output::path(path)), e))
         };
         let mut resources: Vec<Resource> = Vec::new();
         for (path, access) in self
@@ -211,7 +211,7 @@ pub(super) fn make_private_dir(
             let forgotten = lease.forget(index);
             let released = lease.release();
             Err(io_error(
-                &format!("cannot create the private directory {}", dir.display()),
+                &format!("cannot create the private directory {}", crate::output::path(dir)),
                 forgotten.and(released).err().unwrap_or(e),
             ))
         }
@@ -222,7 +222,7 @@ pub(super) fn make_private_dir(
                 // removes it with the lease, or a later scan does.
                 let released = lease.release();
                 Err(io_error(
-                    &format!("cannot record the private directory {}", dir.display()),
+                    &format!("cannot record the private directory {}", crate::output::path(dir)),
                     released.err().unwrap_or(e),
                 ))
             }
@@ -259,8 +259,8 @@ pub(super) fn conflict(scan: &super::store::Scan, ours: &[Resource]) -> Option<S
                 {
                     return Some(format!(
                         "{} overlaps {} of lease {}, still {}",
-                        mine.lexical.display(),
-                        theirs.lexical.display(),
+                        crate::output::path(&mine.lexical),
+                        crate::output::path(&theirs.lexical),
                         reservation.id,
                         if reservation.retained.is_some() {
                             "kept after a failed cleanup"
@@ -301,7 +301,7 @@ pub(crate) fn hold_reads(paths: &[&Path]) -> Result<ReadHold, DevError> {
         .map(|path| {
             Spelled::of(path, &cwd)
                 .map(|s| Resource::new(&s, Access::Read, Disposition::Reserve))
-                .map_err(|e| io_error(&format!("cannot resolve {}", path.display()), e))
+                .map_err(|e| io_error(&format!("cannot resolve {}", crate::output::path(path)), e))
         })
         .collect::<Result<Vec<_>, _>>()?;
     refuse_conflicts(&scan, &resources)?;
@@ -335,7 +335,7 @@ impl Drop for ReadHold {
 fn check_placement(location: &Path, writes: &[PathBuf], cwd: &Path) -> Result<(), DevError> {
     let here = mount_identity(location).map_err(|e| {
         io_error(
-            &format!("cannot place a private directory in {}", location.display()),
+            &format!("cannot place a private directory in {}", crate::output::path(location)),
             e,
         )
     })?;
@@ -348,7 +348,7 @@ fn check_placement(location: &Path, writes: &[PathBuf], cwd: &Path) -> Result<()
             io_error(
                 &format!(
                     "cannot inspect the directory of output {}",
-                    output.display()
+                    crate::output::path(output)
                 ),
                 e,
             )
@@ -357,8 +357,8 @@ fn check_placement(location: &Path, writes: &[PathBuf], cwd: &Path) -> Result<()
             return Err(DevError::Config(format!(
                 "output {} is on another mount than {}, where its private directory would go; \
                  publication uses rename, so one launch cannot write across mounts",
-                output.display(),
-                location.display()
+                crate::output::path(output),
+                crate::output::path(location)
             )));
         }
     }
@@ -395,7 +395,7 @@ fn mount_identity(path: &Path) -> io::Result<MountIdentity> {
     if !meta.is_dir() {
         return Err(io::Error::other(format!(
             "{} is not a directory",
-            path.display()
+            crate::output::path(path)
         )));
     }
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other)?;

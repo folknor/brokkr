@@ -102,15 +102,15 @@ pub(super) fn refuse(targets: &[&Path], trees: &[&Path]) -> io::Result<()> {
         let backup = find_backup(tree).map_err(|e| {
             busy(format!(
                 "refusing to remove {}: it could not be searched for a pbfhogg backup: {e}",
-                tree.display()
+                crate::output::path(tree)
             ))
         })?;
         if let Some(backup) = backup {
             return Err(busy(format!(
                 "refusing to remove {}: it holds {}, which pbfhogg kept as the previous copy of \
                  an output; look at it and remove it by hand",
-                tree.display(),
-                backup.display()
+                crate::output::path(tree),
+                crate::output::path(&backup)
             )));
         }
     }
@@ -131,7 +131,7 @@ pub(crate) fn refuse_overlaps(scan: &super::store::Scan, targets: &[&Path]) -> i
         let target = Spelled::of(target, &cwd).map_err(|e| {
             busy(format!(
                 "refusing to change {}: its identity cannot be resolved: {e}",
-                target.display()
+                crate::output::path(target)
             ))
         })?;
         for reservation in &scan.reservations {
@@ -146,8 +146,8 @@ pub(crate) fn refuse_overlaps(scan: &super::store::Scan, targets: &[&Path]) -> i
                 };
                 return Err(busy(format!(
                     "refusing to change {}: it overlaps {}, which lease {} {state}",
-                    target.lexical.display(),
-                    resource.lexical.display(),
+                    crate::output::path(&target.lexical),
+                    crate::output::path(&resource.lexical),
                     reservation.id
                 )));
             }

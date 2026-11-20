@@ -80,14 +80,14 @@ impl MockPaths {
         if !binary.is_file() {
             return Err(DevError::Config(format!(
                 "sæhrimnir binary is not a file: {}",
-                binary.display()
+                output::path(&binary)
             )));
         }
         let fixtures_dir = require_path(&cfg.fixtures_dir, project_root, "fixtures_dir")?;
         if !fixtures_dir.is_dir() {
             return Err(DevError::Config(format!(
                 "fixtures_dir is not a directory: {}",
-                fixtures_dir.display()
+                output::path(&fixtures_dir)
             )));
         }
         Ok(Self {
@@ -544,7 +544,7 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
     let fixture_str = fixture_path.display().to_string();
     output::ratatoskr_msg(&format!(
         "spawning {} (fixture: {})",
-        binary.display(),
+        output::path(&binary),
         fixture_str
     ));
 
@@ -668,7 +668,7 @@ pub fn resolve_fixture(fixtures_dir: &Path, name: &str) -> Result<PathBuf, DevEr
         } else {
             Err(DevError::Config(format!(
                 "fixture {name:?} not found - looked for {}.",
-                path.display()
+                output::path(&path)
             )))
         };
     }
@@ -682,15 +682,15 @@ pub fn resolve_fixture(fixtures_dir: &Path, name: &str) -> Result<PathBuf, DevEr
             "fixture {name:?} ambiguous - both {} and {} exist. \
              Disambiguate by writing the fixture name with its extension \
              (e.g. {name:?}.toml or {name:?}.lua).",
-            toml_path.display(),
-            lua_path.display()
+            output::path(&toml_path),
+            output::path(&lua_path)
         ))),
         (true, false) => Ok(toml_path),
         (false, true) => Ok(lua_path),
         (false, false) => Err(DevError::Config(format!(
             "fixture {name:?} not found - looked for {} and {}.",
-            toml_path.display(),
-            lua_path.display()
+            output::path(&toml_path),
+            output::path(&lua_path)
         ))),
     }
 }
@@ -721,8 +721,8 @@ fn fixture_is_inside(fixtures_dir: &Path, candidate: &Path) -> Result<bool, DevE
     if !resolved.starts_with(&root) {
         return Err(DevError::Config(format!(
             "fixture path {} resolves outside the configured fixtures directory {}",
-            candidate.display(),
-            fixtures_dir.display()
+            output::path(candidate),
+            output::path(fixtures_dir)
         )));
     }
     Ok(true)
@@ -753,7 +753,7 @@ pub fn wait_for_endpoints(
                 ending: ProcessEnding::from_status(&status),
                 stderr: format!(
                     "exited before writing the readiness sentinel; see {}",
-                    stderr_path.display()
+                    output::path(&stderr_path)
                 ),
             });
         }

@@ -88,7 +88,7 @@ impl std::fmt::Display for ScriptFinding {
             FindingOwner::Registry => f.write_str("bench_scripts ")?,
             FindingOwner::Test => f.write_str("bench_tests ")?,
         }
-        write!(f, "{}: {}", self.file.display(), self.problem)
+        write!(f, "{}: {}", crate::output::path(&self.file), self.problem)
     }
 }
 
@@ -261,7 +261,7 @@ pub(crate) fn check_script(bench: &Bench) -> ScriptCheck {
                         path,
                         format!(
                             "script_file (set in {}) cannot be read: {e}",
-                            declared_in.display()
+                            crate::output::path(declared_in)
                         ),
                     )],
                     unchecked: None,

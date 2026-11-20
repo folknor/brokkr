@@ -252,7 +252,7 @@ impl VirtualIteration {
         if let Some(bytes) = self.files.get(handle.path()) {
             return Ok(bytes.clone());
         }
-        let shown = handle.path().display().to_string();
+        let shown = crate::output::path(handle.path()).to_string();
         if handle.origin() == Origin::Input {
             return Err(self.shared.fault(format!(
                 "{function} read the input {shown}, and the spec's files gives no contents for \
@@ -493,7 +493,7 @@ impl lua::Host for VirtualIteration {
         if bytes.len() > lua::MAX_STRING_BYTES {
             return Err(Abort::Failed(format!(
                 "read(): {} holds more than {} bytes, the most a script's string holds",
-                handle.path().display(),
+                crate::output::path(handle.path()),
                 lua::MAX_STRING_BYTES
             )));
         }

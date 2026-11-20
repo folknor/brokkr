@@ -157,7 +157,7 @@ impl TargetRoots {
             "cannot tell whether the test binaries under {} were built for `{}` or for the host: \
              the directory is not exactly one of the artifact roots cargo reports, so brokkr will \
              not run them with a guessed loader path",
-            root.display(),
+            output::path(root),
             self.triple
         ))
     }
@@ -513,7 +513,7 @@ pub(crate) fn refuse_configured_runner_with_config(
                 format!("CARGO_BUILD_TARGET={} is set", value.to_string_lossy())
             }
             rustflags::SourceOrigin::Config(path) => {
-                format!("{} sets `build.target`", path.display())
+                format!("{} sets `build.target`", output::path(path))
             }
         };
         return Err(DevError::Config(format!(
@@ -535,7 +535,7 @@ pub(crate) fn refuse_configured_runner_with_config(
                      through it, and direct execution would bypass it. Remove the runner for \
                      this host, or drop `parallel` or `isolation = \"process\"` from the \
                      [[check]] entry.",
-                    path.display()
+                    output::path(path)
                 )));
             }
         };

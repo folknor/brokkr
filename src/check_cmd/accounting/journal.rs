@@ -386,7 +386,7 @@ pub(super) fn runs_to_prune(names: &[String], opening: &str, keep: usize) -> Vec
 pub(super) fn prune_accounting_runs(base: &Path, opening: &str, keep: usize) -> Vec<String> {
     let entries = match std::fs::read_dir(base) {
         Ok(entries) => entries,
-        Err(e) => return vec![format!("could not list {}: {e}", base.display())],
+        Err(e) => return vec![format!("could not list {}: {e}", output::path(base))],
     };
     let names: Vec<String> = entries
         .filter_map(Result::ok)
@@ -400,7 +400,7 @@ pub(super) fn prune_accounting_runs(base: &Path, opening: &str, keep: usize) -> 
             let path = base.join(name);
             match std::fs::remove_dir_all(&path) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    Some(format!("could not prune {}: {e}", path.display()))
+                    Some(format!("could not prune {}: {e}", output::path(&path)))
                 }
                 _ => None,
             }
@@ -457,7 +457,7 @@ pub(crate) fn journal_close() {
 /// half-written record as evidence.
 pub(crate) fn read_journal(path: &Path) -> (Vec<JournalRecord>, bool, Vec<String>) {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return (Vec::new(), false, vec![format!("{} could not be read", path.display())]);
+        return (Vec::new(), false, vec![format!("{} could not be read", output::path(path))]);
     };
     let mut records = Vec::new();
     let mut errors = Vec::new();

@@ -94,7 +94,7 @@ impl NamespaceLock {
         if !regular {
             return Err(DevError::Config(format!(
                 "{} is not a regular file",
-                path.display()
+                crate::output::path(&path)
             )));
         }
         let operation = match access {
@@ -153,7 +153,7 @@ fn has_no_reader(path: &Path) -> bool {
 fn io_error(action: &str, path: &Path, source: &io::Error) -> DevError {
     DevError::Io(io::Error::new(
         source.kind(),
-        format!("{action} {}: {source}", path.display()),
+        format!("{action} {}: {source}", crate::output::path(path)),
     ))
 }
 

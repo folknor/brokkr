@@ -85,7 +85,7 @@ fn exists(path: &Path) -> Result<bool, DevError> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(io_error(&format!("cannot inspect {}", path.display()), &e)),
+        Err(e) => Err(io_error(&format!("cannot inspect {}", crate::output::path(path)), &e)),
     }
 }
 
@@ -118,8 +118,8 @@ fn mv(from: &Path, to: &Path) -> Result<(), DevError> {
         io_error(
             &format!(
                 "cargo config strip: cannot move {} to {}",
-                from.display(),
-                to.display()
+                crate::output::path(from),
+                crate::output::path(to)
             ),
             &e,
         )
@@ -131,7 +131,7 @@ fn remove(path: &Path) -> Result<(), DevError> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(io_error(
-            &format!("cargo config strip: cannot remove {}", path.display()),
+            &format!("cargo config strip: cannot remove {}", crate::output::path(path)),
             &e,
         )),
     }
@@ -150,13 +150,13 @@ fn regular(path: &Path) -> Result<Option<(Vec<u8>, u32)>, DevError> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(io_error(&format!("cannot inspect {}", path.display()), &e)),
+        Err(e) => return Err(io_error(&format!("cannot inspect {}", crate::output::path(path)), &e)),
     };
     if !meta.file_type().is_file() {
         return Ok(None);
     }
     let bytes = std::fs::read(path)
-        .map_err(|e| io_error(&format!("cannot read {}", path.display()), &e))?;
+        .map_err(|e| io_error(&format!("cannot read {}", crate::output::path(path)), &e))?;
     Ok(Some((bytes, meta.permissions().mode() & 0o7777)))
 }
 
@@ -200,15 +200,15 @@ fn conflict(cargo_dir: &Path, base: &str) -> DevError {
     ]
     .iter()
     .filter(|(path, _)| exists(path).unwrap_or(true))
-    .map(|(path, role)| format!("{} ({role})", path.display()))
+    .map(|(path, role)| format!("{} ({role})", crate::output::path(path)))
     .collect();
     DevError::Refused(format!(
         "strip_rustflags: {} is in a state brokkr will not resolve on its own, so \
          nothing was changed. Present: {}. Keep the content you want at {}, delete the other \
          brokkr-reserved files, then rerun",
-        n.live.display(),
+        crate::output::path(&n.live),
         present.join(", "),
-        n.live.display(),
+        crate::output::path(&n.live),
     ))
 }
 
@@ -388,11 +388,11 @@ pub fn install(
 ) -> Result<Option<Installed>, DevError> {
     let cargo_dir = live
         .parent()
-        .ok_or_else(|| DevError::Internal(format!("{} has no parent", live.display())))?;
+        .ok_or_else(|| DevError::Internal(format!("{} has no parent", crate::output::path(live))))?;
     let base = live
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| DevError::Internal(format!("{} has no file name", live.display())))?;
+        .ok_or_else(|| DevError::Internal(format!("{} has no file name", crate::output::path(live))))?;
     let n = names(cargo_dir, base);
     let Some(_guard) = txn() else {
         return Err(DevError::Interrupted);
@@ -402,7 +402,7 @@ pub fn install(
             conflict(cargo_dir, base)
         } else {
             io_error(
-                &format!("cargo config strip: cannot move {} aside", n.live.display()),
+                &format!("cargo config strip: cannot move {} aside", crate::output::path(&n.live)),
                 &e,
             )
         }
@@ -424,7 +424,7 @@ pub fn install(
         Err(_) => {
             return Err(put_back(DevError::Config(format!(
                 "Cargo config {} is not UTF-8",
-                n.live.display()
+                crate::output::path(&n.live)
             ))));
         }
     };
@@ -457,7 +457,7 @@ pub fn install(
         return Err(put_back(io_error(
             &format!(
                 "cargo config strip: cannot write {}",
-                n.installing.display()
+                crate::output::path(&n.installing)
             ),
             &e,
         )));
@@ -469,7 +469,7 @@ pub fn install(
             return Err(conflict(cargo_dir, base));
         }
         return Err(put_back(io_error(
-            &format!("cargo config strip: cannot install {}", n.live.display()),
+            &format!("cargo config strip: cannot install {}", crate::output::path(&n.live)),
             &e,
         )));
     }
@@ -479,7 +479,7 @@ pub fn install(
     {
         output::warn(&format!(
             "cargo config strip: cannot sync {}: {e}",
-            cargo_dir.display()
+            crate::output::path(cargo_dir)
         ));
     }
     crate::build_provenance::forget_host_cache();

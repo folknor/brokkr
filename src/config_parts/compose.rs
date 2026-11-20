@@ -164,7 +164,7 @@ fn compose_layers_with(
     let mut user_base = None;
     if let Some((path, _)) = &user_layer {
         let canonical = std::fs::canonicalize(path)
-            .map_err(|e| DevError::Config(format!("{}: {e}", path.display())))?;
+            .map_err(|e| DevError::Config(format!("{}: {e}", crate::output::path(path))))?;
         user_base = Some(canonical.parent().map(Path::to_path_buf).unwrap_or_default());
         seen.insert(canonical);
     }
@@ -332,8 +332,12 @@ impl Walk<'_> {
     /// `from` is the file whose `include` named `path`; `None` for the root.
     fn visit(&mut self, path: &Path, from: Option<&Path>) -> Result<(), DevError> {
         let named_by = |msg: String| match from {
-            Some(f) => DevError::Config(format!("{}: include {}: {msg}", f.display(), path.display())),
-            None => DevError::Config(format!("{}: {msg}", path.display())),
+            Some(f) => DevError::Config(format!(
+                "{}: include {}: {msg}",
+                crate::output::path(f),
+                crate::output::path(path)
+            )),
+            None => DevError::Config(format!("{}: {msg}", crate::output::path(path))),
         };
 
         let text = std::fs::read_to_string(path).map_err(|e| named_by(e.to_string()))?;
@@ -342,8 +346,8 @@ impl Walk<'_> {
         let canonical = std::fs::canonicalize(path).map_err(|e| named_by(e.to_string()))?;
         if self.stack.contains(&canonical) {
             let mut chain: Vec<String> =
-                self.stack.iter().map(|p| p.display().to_string()).collect();
-            chain.push(canonical.display().to_string());
+                self.stack.iter().map(|p| crate::output::path(p).to_string()).collect();
+            chain.push(crate::output::path(&canonical).to_string());
             return Err(named_by(format!("include cycle: {}", chain.join(" -> "))));
         }
         if !self.seen.insert(canonical.clone()) {
@@ -357,10 +361,10 @@ impl Walk<'_> {
         let mut table: toml::Table = if from.is_none() {
             toml::from_str(&text)?
         } else {
-            toml::from_str(&text).map_err(|e| DevError::Config(format!("{}: {e}", canonical.display())))?
+            toml::from_str(&text).map_err(|e| DevError::Config(format!("{}: {e}", crate::output::path(&canonical))))?
         };
         let shown = if from.is_none() { path.to_path_buf() } else { canonical.clone() };
-        let at = |msg: &str| DevError::Config(format!("{}: {msg}", shown.display()));
+        let at = |msg: &str| DevError::Config(format!("{}: {msg}", crate::output::path(&shown)));
 
         if from.is_some() && table.contains_key("project") {
             return Err(at(

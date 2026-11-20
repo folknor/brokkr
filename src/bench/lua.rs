@@ -1317,7 +1317,7 @@ fn find_module<H: Host>(state: &mut State, name: &str) -> Result<Found, String> 
     let Some(module) = library.modules.get(name) else {
         return Err(format!(
             "require({name:?}): bench_lib {} holds no module {name}",
-            library.dir.display()
+            crate::output::path(&library.dir)
         ));
     };
     modules.attempted.insert(name.to_owned());
@@ -1328,7 +1328,7 @@ fn find_module<H: Host>(state: &mut State, name: &str) -> Result<Found, String> 
         }
         Err(error) => Err(format!(
             "require({name:?}): {} does not compile: {error}",
-            module.path.display()
+            crate::output::path(&module.path)
         )),
     }
 }

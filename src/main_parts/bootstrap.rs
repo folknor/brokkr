@@ -296,7 +296,7 @@ pub(super) fn require_detection(
             })?;
             Err(DevError::Config(format!(
                 "no brokkr.toml found in {} or its parent directory",
-                cwd.display()
+                output::path(&cwd)
             )))
         }
     }

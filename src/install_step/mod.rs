@@ -154,7 +154,7 @@ fn preflight_with<'a>(
                 &step.name,
                 &format!(
                     "{} overlaps the destination of step '{other}'",
-                    resolved.path.display()
+                    crate::output::path(&resolved.path)
                 ),
             ));
         }
@@ -274,7 +274,7 @@ impl Plan<'_> {
             Ok(Observed::Absent) => {
                 return Err(refused(
                     step,
-                    &format!("copy.from {} does not exist", source.display()),
+                    &format!("copy.from {} does not exist", crate::output::path(&source)),
                 ));
             }
             Ok(Observed::Foreign(path)) => {
@@ -282,14 +282,14 @@ impl Plan<'_> {
                     step,
                     &format!(
                         "{} is a symlink or special file; a copy payload holds regular files and directories only",
-                        path.display()
+                        crate::output::path(&path)
                     ),
                 ));
             }
             Err(e) => {
                 return Err(refused(
                     step,
-                    &format!("cannot read {}: {e}", source.display()),
+                    &format!("cannot read {}: {e}", crate::output::path(&source)),
                 ));
             }
         };
@@ -333,8 +333,8 @@ impl Plan<'_> {
                 step,
                 &format!(
                     "an interrupted install of {} is unresolved (see the warning above, and the record {})",
-                    dest.path.display(),
-                    record_file.display()
+                    crate::output::path(&dest.path),
+                    crate::output::path(&record_file)
                 ),
             ));
         }
@@ -346,7 +346,7 @@ impl Plan<'_> {
             Err(e) => {
                 return Err(refused(
                     step,
-                    &format!("cannot inspect {}: {e}", dest.path.display()),
+                    &format!("cannot inspect {}: {e}", crate::output::path(&dest.path)),
                 ));
             }
             Ok(_) => {}
@@ -359,7 +359,7 @@ impl Plan<'_> {
                     &format!(
                         "{} was installed by project {} step '{}', and brokkr replaces only what this step \
                          installed",
-                        dest.path.display(),
+                        crate::output::path(&dest.path),
                         other.project,
                         other.step
                     ),
@@ -372,7 +372,7 @@ impl Plan<'_> {
                         "{} exists and brokkr did not install it; brokkr replaces only what this step \
                          installed, so give copy.to a path of its own (or, if that path is an old copy of \
                          this artifact, remove it)",
-                        dest.path.display()
+                        crate::output::path(&dest.path)
                     ),
                 ));
             }
@@ -389,12 +389,12 @@ impl Plan<'_> {
                 step,
                 &format!(
                     "{} was changed since brokkr installed it; remove it (or undo the change) to reinstall",
-                    dest.path.display()
+                    crate::output::path(&dest.path)
                 ),
             )),
             Err(e) => Err(refused(
                 step,
-                &format!("cannot read {}: {e}", dest.path.display()),
+                &format!("cannot read {}: {e}", crate::output::path(&dest.path)),
             )),
         }
     }
@@ -417,8 +417,8 @@ impl Plan<'_> {
                     step,
                     &format!(
                         "{} contains {what} ({})",
-                        dest.path.display(),
-                        path.display()
+                        crate::output::path(&dest.path),
+                        crate::output::path(path)
                     ),
                 ));
             }
@@ -426,7 +426,7 @@ impl Plan<'_> {
         if dest.path.starts_with(&home.state_dir) {
             return Err(refused(
                 step,
-                &format!("{} is inside brokkr's state directory", dest.path.display()),
+                &format!("{} is inside brokkr's state directory", crate::output::path(&dest.path)),
             ));
         }
         if dest.path.starts_with(source) || source.starts_with(&dest.path) {
@@ -434,8 +434,8 @@ impl Plan<'_> {
                 step,
                 &format!(
                     "{} overlaps its own source {}",
-                    dest.path.display(),
-                    source.display()
+                    crate::output::path(&dest.path),
+                    crate::output::path(source)
                 ),
             ));
         }
@@ -469,7 +469,7 @@ impl Plan<'_> {
                         Err(e) => {
                             return Err(refused(
                                 step,
-                                &format!("cannot inspect {}: {e}", other.display()),
+                                &format!("cannot inspect {}: {e}", crate::output::path(other)),
                             ));
                         }
                     });
@@ -481,8 +481,8 @@ impl Plan<'_> {
                     step,
                     &format!(
                         "{} nests with the managed destination {}{by}",
-                        dest.path.display(),
-                        other.display()
+                        crate::output::path(&dest.path),
+                        crate::output::path(other)
                     ),
                 ));
             }
@@ -516,21 +516,21 @@ fn resolve(to: &str, home: &Path, create: bool) -> Result<Resolved, String> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let component = base
                     .file_name()
-                    .ok_or_else(|| format!("{} does not exist", base.display()))?
+                    .ok_or_else(|| format!("{} does not exist", crate::output::path(&base)))?
                     .to_owned();
                 missing.push(component);
                 base = base
                     .parent()
-                    .ok_or_else(|| format!("{} does not exist", base.display()))?
+                    .ok_or_else(|| format!("{} does not exist", crate::output::path(&base)))?
                     .to_path_buf();
             }
-            Err(e) => return Err(format!("cannot inspect {}: {e}", base.display())),
+            Err(e) => return Err(format!("cannot inspect {}: {e}", crate::output::path(&base))),
         }
     }
     let mut parent = std::fs::canonicalize(&base)
-        .map_err(|e| format!("cannot resolve {}: {e}", base.display()))?;
+        .map_err(|e| format!("cannot resolve {}: {e}", crate::output::path(&base)))?;
     if !parent.is_dir() {
-        return Err(format!("{} is not a directory", parent.display()));
+        return Err(format!("{} is not a directory", crate::output::path(&parent)));
     }
     // Below the home, every directory from it down to the parent is created
     // and synced on each creating call, so one an earlier install created and
@@ -547,20 +547,20 @@ fn resolve(to: &str, home: &Path, create: bool) -> Result<Resolved, String> {
         if create && !anchored {
             match std::fs::create_dir(&next) {
                 Ok(()) => tree::fsync_dir(&parent)
-                    .map_err(|e| format!("cannot fsync {}: {e}", parent.display()))?,
+                    .map_err(|e| format!("cannot fsync {}: {e}", crate::output::path(&parent)))?,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(format!("cannot create {}: {e}", next.display())),
+                Err(e) => return Err(format!("cannot create {}: {e}", crate::output::path(&next))),
             }
         }
         parent = next;
     }
     if anchored {
         crate::atomic_write::create_dir_all_durable(home, &parent)
-            .map_err(|e| format!("cannot create {} durably: {e}", parent.display()))?;
+            .map_err(|e| format!("cannot create {} durably: {e}", crate::output::path(&parent)))?;
     }
     if create {
         parent = std::fs::canonicalize(&parent)
-            .map_err(|e| format!("cannot resolve {}: {e}", parent.display()))?;
+            .map_err(|e| format!("cannot resolve {}: {e}", crate::output::path(&parent)))?;
     }
     let path = parent.join(&name);
     let key = path
@@ -568,7 +568,7 @@ fn resolve(to: &str, home: &Path, create: bool) -> Result<Resolved, String> {
         .ok_or_else(|| {
             format!(
                 "{} is not UTF-8, which the install registry cannot record",
-                path.display()
+                crate::output::path(&path)
             )
         })?
         .to_owned();

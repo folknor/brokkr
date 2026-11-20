@@ -48,7 +48,12 @@ and a leading `-` or `~` gains `./`. The printers never rewrite rendered text,
 because a tagged line can carry captured child output or opaque values that
 only look like paths; a caller that holds a `Path` it means as a location is
 the one that asks. Argv, stored values, JSON and other data keep the absolute
-spelling. The anchor is fixed once at startup; before that, and in unit tests,
+spelling. `DevError` text is operator text and uses `output::path`, so where
+an error's text becomes a stored value (a script-bench run's failure reason,
+a capture's or stderr tail's unreadable reason) it is rendered inside
+`output::with_absolute_paths`, which ignores the anchor for that thread while
+it runs. A new store of error text must do the same. The anchor is fixed once
+at startup; before that, and in unit tests,
 every path prints absolute. The run log's own header records the absolute
 invocation cwd, so its relative lines stay resolvable.
 

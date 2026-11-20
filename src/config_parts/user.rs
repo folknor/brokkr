@@ -128,7 +128,7 @@ fn take_results_server(
     let Some(value) = table.remove(RESULTS_SERVER_KEY) else {
         return Ok(None);
     };
-    let at = |msg: String| DevError::Config(format!("{}: {RESULTS_SERVER_KEY}: {msg}", path.display()));
+    let at = |msg: String| DevError::Config(format!("{}: {RESULTS_SERVER_KEY}: {msg}", crate::output::path(path)));
     let text = value
         .as_str()
         .ok_or_else(|| at("must be a URL string".into()))?;
@@ -144,7 +144,7 @@ fn refuse_project_results_server(layers: &[(PathBuf, toml::Table)]) -> Result<()
             return Err(DevError::Config(format!(
                 "{}: '{RESULTS_SERVER_KEY}' belongs to the user, not to a project: set it in the \
                  user-wide brokkr.toml, where it applies to every project",
-                path.display()
+                crate::output::path(path)
             )));
         }
     }
@@ -164,14 +164,14 @@ fn load_user_table() -> Result<Option<(PathBuf, toml::Table)>, DevError> {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
-            return Err(DevError::Config(format!("{}: {e}", path.display())));
+            return Err(DevError::Config(format!("{}: {e}", crate::output::path(&path))));
         }
     };
     parse_user_table(&text, &path).map(|table| Some((path, table)))
 }
 
 fn parse_user_table(text: &str, path: &Path) -> Result<toml::Table, DevError> {
-    let at = |msg: String| DevError::Config(format!("{}: {msg}", path.display()));
+    let at = |msg: String| DevError::Config(format!("{}: {msg}", crate::output::path(path)));
 
     let root: toml::Value = toml::from_str(text).map_err(|e| at(e.to_string()))?;
     let table = root

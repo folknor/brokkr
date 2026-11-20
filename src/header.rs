@@ -34,7 +34,7 @@ pub(crate) struct HeaderScan {
 pub fn format_one(v: &HeaderViolation, expected: &str) -> String {
     format!(
         "{}: missing or stale header (expected `{expected}`)",
-        v.file.display()
+        crate::output::path(&v.file)
     )
 }
 

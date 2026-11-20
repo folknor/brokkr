@@ -164,7 +164,7 @@ fn run_pipeline(
     if !fixture_html.exists() {
         return Err(DevError::Config(format!(
             "fixture HTML not found: {}",
-            fixture_html.display(),
+            output::path(&fixture_html),
         )));
     }
 
@@ -778,7 +778,7 @@ fn capture_fixture(
     if !fixture_html.exists() {
         return Err(DevError::Config(format!(
             "fixture HTML not found: {}",
-            fixture_html.display(),
+            output::path(&fixture_html),
         )));
     }
 
@@ -825,7 +825,7 @@ fn capture_fixture(
             if let Some(cache_dir) = capture_script.parent() {
                 output::litehtml_msg(&format!(
                     "  from {}, run `PUPPETEER_CACHE_DIR=puppeteer pnpm exec puppeteer browsers install chrome`",
-                    cache_dir.display()
+                    output::path(cache_dir)
                 ));
             }
         }
@@ -1280,7 +1280,7 @@ pub(crate) fn prepare(
     if !input_path.exists() {
         return Err(DevError::Config(format!(
             "input file not found: {}",
-            input_path.display(),
+            output::path(&input_path),
         )));
     }
 
@@ -1299,7 +1299,7 @@ pub(crate) fn prepare(
     if !ahem_path.exists() {
         return Err(DevError::Config(format!(
             "Ahem font not found: {}",
-            ahem_path.display(),
+            output::path(&ahem_path),
         )));
     }
 
@@ -1357,7 +1357,7 @@ pub(crate) fn extract(
     if !input_path.exists() {
         return Err(DevError::Config(format!(
             "input file not found: {}",
-            input_path.display(),
+            output::path(&input_path),
         )));
     }
 
@@ -1420,7 +1420,7 @@ pub(crate) fn outline(
     if !input_path.exists() {
         return Err(DevError::Config(format!(
             "input file not found: {}",
-            input_path.display(),
+            output::path(&input_path),
         )));
     }
 

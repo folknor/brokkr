@@ -215,12 +215,12 @@ fn print_header(info: &EnvInfo) {
         let summary = if uc.present {
             format!(
                 "{} ({} textlint, {} script_check)",
-                uc.path.display(),
+                crate::output::path(&uc.path),
                 uc.textlint,
                 uc.script_checks
             )
         } else {
-            format!("{} (absent)", uc.path.display())
+            format!("{} (absent)", crate::output::path(&uc.path))
         };
         println!("{:<12} {}", "user cfg:", summary);
         if let Some(server) = &uc.results_server {

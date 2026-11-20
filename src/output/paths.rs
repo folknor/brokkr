@@ -65,9 +65,25 @@ pub struct PathDisplay<'a> {
     path: &'a Path,
 }
 
+thread_local! {
+    static ABSOLUTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with every [`path`] it renders printed absolute. For text that
+/// becomes a stored value (a run's failure reason, a capture's unreadable
+/// reason): `DevError` messages use [`path`] for the operator, but a stored
+/// reason must not depend on the directory brokkr happened to be invoked from.
+pub fn with_absolute_paths<T>(f: impl FnOnce() -> T) -> T {
+    let prior = ABSOLUTE.replace(true);
+    let out = f();
+    ABSOLUTE.set(prior);
+    out
+}
+
 impl fmt::Display for PathDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match ANCHOR.get().and_then(|anchor| relative(anchor, self.path)) {
+        let anchor = if ABSOLUTE.get() { None } else { ANCHOR.get() };
+        match anchor.and_then(|anchor| relative(anchor, self.path)) {
             Some(rel) => write!(f, "{}", rel.display()),
             None => write!(f, "{}", self.path.display()),
         }
@@ -138,6 +154,19 @@ mod tests {
         assert_eq!(show("/p", "/p", "/p/-report"), "./-report");
         assert_eq!(show("/p", "/p", "/p/~u/file"), "./~u/file");
         assert_eq!(show("/p/sub", "/p", "/p/-report"), "../-report");
+    }
+
+    /// Inside `with_absolute_paths` the anchor is ignored, and it applies
+    /// again after.
+    #[test]
+    fn stored_text_renders_absolute() {
+        let anchor = anchor_for(Path::new("/p"), Path::new("/p")).unwrap();
+        let p = Path::new("/p/state/run-1");
+        assert!(relative(&anchor, p).is_some());
+        assert!(!ABSOLUTE.get());
+        let inside = with_absolute_paths(|| ABSOLUTE.get());
+        assert!(inside);
+        assert!(!ABSOLUTE.get());
     }
 
     #[test]

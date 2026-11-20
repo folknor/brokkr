@@ -6,7 +6,7 @@ use crate::error::DevError;
 
 pub(crate) fn path_str(path: &Path) -> Result<&str, DevError> {
     path.to_str()
-        .ok_or_else(|| DevError::Config(format!("path is not valid UTF-8: {}", path.display())))
+        .ok_or_else(|| DevError::Config(format!("path is not valid UTF-8: {}", crate::output::path(path))))
 }
 
 pub(crate) fn path_string(path: &Path) -> Result<String, DevError> {

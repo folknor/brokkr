@@ -831,7 +831,7 @@ fn path_to_cstring(path: &std::path::Path) -> Result<std::ffi::CString, DevError
     std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
         DevError::Lock(LockError::from(format!(
             "lock path contains nul byte: {}",
-            path.display()
+            crate::output::path(path)
         )))
     })
 }

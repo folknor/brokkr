@@ -29,4 +29,4 @@ pub(crate) use child::{
     run_cargo_unsetting, run_passthrough_in, run_passthrough_timed,
 };
 pub(crate) use console::*;
-pub(crate) use paths::{path, set_path_anchor};
+pub(crate) use paths::{path, set_path_anchor, with_absolute_paths};

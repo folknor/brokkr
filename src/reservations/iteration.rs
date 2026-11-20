@@ -218,7 +218,7 @@ impl Iteration {
                 // The directory is the lease's: the release removes it.
                 let released = lease.release();
                 Err(io_error(
-                    &format!("cannot lay out the iteration directory {}", dir.display()),
+                    &format!("cannot lay out the iteration directory {}", crate::output::path(&dir)),
                     released.err().unwrap_or(e),
                 ))
             }
@@ -310,7 +310,7 @@ impl Iteration {
                 {
                     return Err(DevError::Internal(format!(
                         "stdin {} is not declared read by its call",
-                        path.display()
+                        crate::output::path(path)
                     )));
                 }
                 Some((path, spell(path)?))
@@ -362,7 +362,7 @@ impl Iteration {
                 &name,
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
             )
-            .map_err(|e| io_error(&format!("cannot make report {}", path.display()), e))?;
+            .map_err(|e| io_error(&format!("cannot make report {}", crate::output::path(path)), e))?;
             names_inode(path, &made)?;
         }
         let borrow = store
@@ -395,10 +395,10 @@ impl Iteration {
             name,
             libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
         )
-        .map_err(|e| io_error(&format!("cannot make spool {}", path.display()), e))?;
+        .map_err(|e| io_error(&format!("cannot make spool {}", crate::output::path(path)), e))?;
         let pin = file
             .try_clone()
-            .map_err(|e| io_error(&format!("cannot pin spool {}", path.display()), e))?;
+            .map_err(|e| io_error(&format!("cannot pin spool {}", crate::output::path(path)), e))?;
         self.spools.push(PinnedSpool {
             path: path.to_path_buf(),
             file: pin,
@@ -437,7 +437,7 @@ impl Iteration {
             _ => {
                 return Err(DevError::Config(format!(
                     "{} is not an output of this iteration: only an output's file is written",
-                    path.display()
+                    crate::output::path(path)
                 )));
             }
         };
@@ -454,14 +454,14 @@ impl Iteration {
             )],
         )?;
         let area = self.verified(Area::Out)?;
-        let failed = |e: io::Error| io_error(&format!("cannot write {}", path.display()), e);
+        let failed = |e: io::Error| io_error(&format!("cannot write {}", crate::output::path(path)), e);
         match unlink_at(&area.file, &name) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) if e.raw_os_error() == Some(libc::EISDIR) => {
                 return Err(DevError::Config(format!(
                     "{} is a directory: write() writes a file",
-                    path.display()
+                    crate::output::path(path)
                 )));
             }
             Err(e) => return Err(failed(e)),
@@ -498,10 +498,10 @@ impl Iteration {
             if e.raw_os_error() == Some(libc::ELOOP) {
                 DevError::Config(format!(
                     "{} is a link, which brokkr does not follow",
-                    path.display()
+                    crate::output::path(path)
                 ))
             } else {
-                io_error(&format!("cannot open {}", path.display()), e)
+                io_error(&format!("cannot open {}", crate::output::path(path)), e)
             }
         };
         let flags = libc::O_RDONLY | libc::O_NONBLOCK;
@@ -509,7 +509,7 @@ impl Iteration {
             Some((Area::Scratch, _)) => {
                 return Err(DevError::Config(format!(
                     "{} is a scratch directory, not a file",
-                    path.display()
+                    crate::output::path(path)
                 )));
             }
             Some((area, name)) => {
@@ -534,7 +534,7 @@ impl Iteration {
         if !meta.is_file() {
             return Err(DevError::Config(format!(
                 "{} is not a regular file",
-                path.display()
+                crate::output::path(path)
             )));
         }
         Ok(file)
@@ -544,7 +544,7 @@ impl Iteration {
     /// this iteration made there.
     fn check_spool(&self, path: &Path, file: &File) -> Result<(), DevError> {
         let pinned = self.spools.iter().find(|s| s.path == path).ok_or_else(|| {
-            DevError::Config(format!("{} is no spool of this iteration", path.display()))
+            DevError::Config(format!("{} is no spool of this iteration", crate::output::path(path)))
         })?;
         let (a, b) = (file.metadata()?, pinned.file.metadata()?);
         if (a.dev(), a.ino()) == (b.dev(), b.ino()) {
@@ -552,7 +552,7 @@ impl Iteration {
         } else {
             Err(DevError::Config(format!(
                 "{} is no longer the spool its call wrote: something replaced it",
-                path.display()
+                crate::output::path(path)
             )))
         }
     }
@@ -636,7 +636,7 @@ impl Iteration {
             if !found {
                 return Err(DevError::Config(format!(
                     "{} is no longer the directory this iteration made: something replaced it",
-                    path.display()
+                    crate::output::path(path)
                 )));
             }
         }
@@ -851,17 +851,17 @@ pub(crate) fn open_input(path: &Path) -> Result<File, DevError> {
             if e.raw_os_error() == Some(libc::ELOOP) {
                 DevError::Config(format!(
                     "{} is a link, which brokkr does not follow",
-                    path.display()
+                    crate::output::path(path)
                 ))
             } else {
-                io_error(&format!("cannot open {}", path.display()), e)
+                io_error(&format!("cannot open {}", crate::output::path(path)), e)
             }
         })?;
     still_names(&spelled.resolved, &file)?;
     if !file.metadata()?.is_file() {
         return Err(DevError::Config(format!(
             "{} is not a regular file",
-            path.display()
+            crate::output::path(path)
         )));
     }
     Ok(file)
@@ -872,11 +872,11 @@ fn spell(path: &Path) -> Result<Spelled, DevError> {
     if !path.is_absolute() {
         return Err(DevError::Internal(format!(
             "an iteration resource must be absolute: {}",
-            path.display()
+            crate::output::path(path)
         )));
     }
     Spelled::of(path, Path::new("/"))
-        .map_err(|e| io_error(&format!("cannot resolve {}", path.display()), e))
+        .map_err(|e| io_error(&format!("cannot resolve {}", crate::output::path(path)), e))
 }
 
 /// A call's declared resources against its owner's: no write overlapping an
@@ -908,8 +908,8 @@ fn authorize(
         {
             return Err(DevError::Config(format!(
                 "a call may not write {}: it overlaps {}, which is read-only for the run",
-                resource.lexical.display(),
-                what.display()
+                crate::output::path(&resource.lexical),
+                crate::output::path(what)
             )));
         }
         let authorized = owner.iter().any(|o| {
@@ -919,8 +919,8 @@ fn authorize(
         if !authorized {
             return Err(DevError::Config(format!(
                 "{} ({}) is not within what the iteration holds for {}",
-                resource.lexical.display(),
-                resource.resolved.display(),
+                crate::output::path(&resource.lexical),
+                crate::output::path(&resource.resolved),
                 match resource.access {
                     Access::Read => "reading",
                     Access::Write => "writing",
@@ -968,7 +968,7 @@ fn names_inode(path: &Path, made: &File) -> Result<(), DevError> {
     } else {
         Err(DevError::Config(format!(
             "{} does not name what this iteration just made there: something replaced it",
-            path.display()
+            crate::output::path(path)
         )))
     }
 }
@@ -985,7 +985,7 @@ fn still_names(path: &Path, opened: &File) -> Result<(), DevError> {
     } else {
         Err(DevError::Config(format!(
             "{} no longer names the file brokkr opened there: something replaced it",
-            path.display()
+            crate::output::path(path)
         )))
     }
 }

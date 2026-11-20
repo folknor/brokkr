@@ -33,7 +33,7 @@ pub(crate) struct ManifestScan {
 
 /// `file:line-less: [rule] message` - manifests are reported at file scope.
 pub fn format_one(v: &ManifestViolation) -> String {
-    format!("{}: [{}] {}", v.file.display(), v.rule, v.message)
+    format!("{}: [{}] {}", crate::output::path(&v.file), v.rule, v.message)
 }
 
 /// Cargo dependency table spellings and their shared kind. The underscore
@@ -175,8 +175,8 @@ pub(crate) fn parse_manifest_bytes(bytes: &[u8]) -> Result<DocumentMut, String> 
 }
 
 pub(crate) fn read_manifest(path: &Path) -> Result<DocumentMut, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    parse_manifest_bytes(&bytes).map_err(|e| format!("cannot parse {}: {e}", path.display()))
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", crate::output::path(path)))?;
+    parse_manifest_bytes(&bytes).map_err(|e| format!("cannot parse {}: {e}", crate::output::path(path)))
 }
 
 /// Whether the leading decoration of a key contains a blank line - i.e. the key

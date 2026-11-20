@@ -39,7 +39,7 @@ pub fn activate(dir: &Path, specs: &[StripSpec]) -> Result<Option<Installed>, De
     let Some(live) = crate::rustflags::selected_config_file(&cargo_dir)? else {
         output::warn(&format!(
             "strip_rustflags: {} has no cargo config, so nothing was stripped",
-            cargo_dir.display()
+            crate::output::path(&cargo_dir)
         ));
         return Ok(None);
     };

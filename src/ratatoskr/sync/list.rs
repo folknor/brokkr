@@ -18,7 +18,7 @@ pub const DEFAULT_SYNC_SCRIPT_DIR: &str = "crates/app/tests/sync-harness";
 pub fn run_sync_list(project_root: &Path, ratatoskr: &RatatoskrConfig) -> Result<(), DevError> {
     let dir = sync_script_dir(project_root, Some(ratatoskr));
     let scripts = discover::discover_sync_at(&dir)?;
-    let display_dir = dir.display();
+    let display_dir = output::path(&dir);
 
     if scripts.is_empty() {
         output::ratatoskr_msg(&format!("no sync-test scripts found under {display_dir}"));

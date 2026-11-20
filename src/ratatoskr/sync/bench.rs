@@ -143,7 +143,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     output::ratatoskr_msg(&format!(
         "harness build ok (features={}, binary={})",
         built.features_label,
-        built.binary.display(),
+        output::path(&built.binary),
     ));
 
     let state = ProjectState::new(req.project_root.as_path());
@@ -192,7 +192,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
             artefacts.finalize_failure();
             output::ratatoskr_msg(&format!(
                 "FAIL: {e} (artefacts preserved at {})",
-                path.display()
+                output::path(&path)
             ));
             artefacts::emit_clean_hint(output::ratatoskr_msg);
             Err(e)
@@ -493,12 +493,12 @@ pub(super) fn read_summary_json(
     }
     let text = fs::read_to_string(&path).map_err(DevError::Io)?;
     let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| DevError::Verify(format!("sync: parse {}: {e}", path.display())))?;
+        .map_err(|e| DevError::Verify(format!("sync: parse {}: {e}", output::path(&path))))?;
     match value {
         serde_json::Value::Object(map) => Ok(map),
         other => Err(DevError::Verify(format!(
             "sync: {} root must be a JSON object, got {}",
-            path.display(),
+            output::path(&path),
             crate::ratatoskr::gate::kind_of(&other)
         ))),
     }

@@ -442,7 +442,7 @@ pub fn cached_path_digest(path: &Path, project_root: &Path) -> Result<PathDigest
         // `/dev/zero`): no content a pin can describe.
         return Err(DevError::Preflight(vec![format!(
             "{} is neither a regular file nor a directory: no digest can cover it",
-            path.display()
+            crate::output::path(path)
         )]));
     }
     let mut cache = HashCache::load(project_root);
@@ -499,7 +499,7 @@ fn hash_file_stable(path: &Path) -> Result<(Xxh128, FileStamp), DevError> {
         return Err(DevError::Preflight(vec![format!(
             "{} changed while it was hashed: something wrote or replaced it during the read, \
              so no digest describes it; run again once nothing writes it",
-            path.display()
+            crate::output::path(path)
         )]));
     }
     Ok((Xxh128(hasher.digest128().to_be_bytes()), after))
@@ -561,7 +561,7 @@ pub fn compute_tree_digest(root: &Path, project_root: &Path) -> Result<TreeDiges
             "{} is an empty directory - nothing to digest.\n  \
              A directory with no files is a wrong path more often than it is \
              an input, and a digest over nothing would verify forever.",
-            root.display()
+            crate::output::path(root)
         )]));
     }
 
@@ -616,7 +616,7 @@ fn collect_tree_entries(
             return Err(DevError::Preflight(vec![format!(
                 "{} is neither a regular file, a directory nor a link: a tree digest cannot \
                  cover it",
-                path.display()
+                crate::output::path(&path)
             )]));
         }
     }
@@ -787,7 +787,7 @@ impl HashCache {
         if let Err(error) = self.try_save() {
             crate::output::warn(&format!(
                 "hash cache not saved under {}: {error}",
-                self.state.root().display()
+                crate::output::path(self.state.root())
             ));
         }
     }

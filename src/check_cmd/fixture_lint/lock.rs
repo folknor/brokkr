@@ -101,7 +101,7 @@ pub(super) fn path_failures(
                 "path package {} {} ({}) is not a path package of the main resolve",
                 p.name,
                 p.version,
-                key.2.display()
+                crate::output::path(&key.2)
             ));
         }
     }
@@ -126,7 +126,7 @@ pub(super) fn path_failures(
                 p.source
                     .as_deref()
                     .unwrap_or_else(|| got.to_str().unwrap_or("?")),
-                member.display()
+                crate::output::path(member)
             ));
         }
     }

@@ -77,7 +77,7 @@ pub(super) fn resolve_info(
         .ok_or_else(|| {
             DevError::Config(format!(
                 "sync: script has no stem: {}",
-                script_abs.display()
+                output::path(&script_abs)
             ))
         })?
         .to_owned();
@@ -116,7 +116,7 @@ pub(super) fn resolve_path(
     if !script_path.is_file() {
         return Err(DevError::Config(format!(
             "sync: script not found or not a file: {}",
-            script_path.display()
+            output::path(script_path)
         )));
     }
     let stem = script_path
@@ -125,7 +125,7 @@ pub(super) fn resolve_path(
         .ok_or_else(|| {
             DevError::Config(format!(
                 "sync: script has no stem: {}",
-                script_path.display()
+                output::path(script_path)
             ))
         })?;
     let parsed = discover::parse_sync_script(script_path, stem)

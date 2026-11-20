@@ -761,7 +761,7 @@ fn resolve(
         {
             return Err(format!(
                 "names {}, which is not UTF-8 and a script cannot pass on",
-                file.path.display()
+                crate::output::path(&file.path)
             )
             .into());
         }
@@ -1199,7 +1199,7 @@ fn digest_one(
     let meta = std::fs::metadata(&file.path).map_err(|e| {
         DevError::Preflight(vec![format!(
             "{what}: {} cannot be read: {e}",
-            file.path.display()
+            crate::output::path(&file.path)
         )])
     })?;
     // A FIFO, a device or a socket is no content a digest describes (and
@@ -1207,7 +1207,7 @@ fn digest_one(
     if !(meta.is_file() || file.tree && meta.is_dir()) {
         return Err(DevError::Preflight(vec![format!(
             "{what}: {} is not a regular file{}",
-            file.path.display(),
+            crate::output::path(&file.path),
             if file.tree {
                 " or a directory, which a dataset's `path` names"
             } else {
@@ -1241,12 +1241,12 @@ fn digest_one(
         let segments: Vec<&str> = file.pin_at.iter().map(String::as_str).collect();
         let set_in = sources
             .value_origin(&segments)
-            .map(|origin| format!(" in {}", origin.file.display()))
+            .map(|origin| format!(" in {}", crate::output::path(origin.file)))
             .unwrap_or_default();
         return Err(DevError::Preflight(vec![format!(
             "{what}: hash mismatch for {}\n  expected: {expected}\n  actual:   {digest}\n  pin: \
              {pin_at}{set_in}",
-            file.path.display()
+            crate::output::path(&file.path)
         )]));
     }
     Ok(Some(digest.to_string()))

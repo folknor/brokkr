@@ -118,12 +118,12 @@ pub(crate) fn eligibility(binaries: &[TestBinary]) -> Result<Eligibility<'_>, De
             let text = std::fs::read_to_string(&path).map_err(|e| {
                 DevError::Config(format!(
                     "cannot read {} to tell whether `{}` is a libtest harness: {e}",
-                    path.display(),
+                    crate::output::path(&path),
                     b.label()
                 ))
             })?;
             let parsed = ManifestHarness::parse(&text)
-                .map_err(|e| DevError::Config(format!("cannot parse {}: {e}", path.display())))?;
+                .map_err(|e| DevError::Config(format!("cannot parse {}: {e}", crate::output::path(&path))))?;
             manifests.insert(path.clone(), parsed);
         }
         if manifests.get(&path).is_some_and(|m| m.excludes(b)) {

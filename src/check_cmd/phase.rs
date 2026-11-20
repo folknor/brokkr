@@ -1023,8 +1023,8 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
             output::detail(&format!(
                 "prepare: run {}, plan {}, journal {}",
                 prep.plan.run_id,
-                p.plan.display(),
-                p.journal.display()
+                output::path(&p.plan),
+                output::path(&p.journal)
             ));
             Some(p)
         }

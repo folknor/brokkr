@@ -496,7 +496,7 @@ fn is_dirty(build_root: &Path, included_config_files: &[PathBuf]) -> Result<bool
         .ok_or_else(|| {
             DevError::Preflight(vec![format!(
                 "could not determine git status for {}",
-                build_root.display()
+                crate::output::path(build_root)
             )])
         })
 }

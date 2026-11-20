@@ -395,7 +395,7 @@ impl IterationHost {
         };
         let outcome = match read {
             Err(error) => store::CaptureOutcome::Unreadable {
-                reason: error.to_string(),
+                reason: crate::output::with_absolute_paths(|| error.to_string()),
             },
             Ok(None) => store::CaptureOutcome::OverBudget,
             Ok(Some(bytes)) if bytes.is_empty() => store::CaptureOutcome::Missing,
@@ -658,7 +658,7 @@ impl IterationHost {
                 released,
                 bytes: spool.size().ok(),
                 tail: store::StderrTail::Unreadable {
-                    reason: error.to_string(),
+                    reason: crate::output::with_absolute_paths(|| error.to_string()),
                 },
             },
             Ok(tail) => {
@@ -836,7 +836,7 @@ fn no_written_alias(
                 return Err(Abort::Failed(format!(
                     "binary_with(): cannot inspect {}, which the call writes, against the files \
                      it prepares: {e}",
-                    path.display()
+                    crate::output::path(path)
                 )));
             }
         };
@@ -848,7 +848,7 @@ fn no_written_alias(
             return Err(Abort::Failed(format!(
                 "binary_with(): {}, which the call writes, is the same file as {}, which it \
                  prepares {}",
-                path.display(),
+                crate::output::path(path),
                 target.paths.join(", "),
                 target.mode.name()
             )));
@@ -937,7 +937,7 @@ pub(super) fn external_program(
     let shown = resolved.to_str().ok_or_else(|| {
         Abort::Failed(format!(
             "cannot start {name}: {} is not UTF-8",
-            resolved.display()
+            crate::output::path(&resolved)
         ))
     })?;
     let executable = store::Executable {
@@ -956,7 +956,7 @@ fn stored_len(report: &serde_json::Value) -> usize {
 fn utf8_report(path: &Path) -> Result<String, Abort> {
     path.to_str()
         .map(str::to_owned)
-        .ok_or_else(|| Abort::Failed(format!("the report path {} is not UTF-8", path.display())))
+        .ok_or_else(|| Abort::Failed(format!("the report path {} is not UTF-8", crate::output::path(path))))
 }
 
 /// The variables a marked call's child gets, whatever the build: an

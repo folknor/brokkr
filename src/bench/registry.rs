@@ -231,7 +231,7 @@ pub(super) fn check(
                 format!(
                     "script is inline, but bench_scripts is set: every bench script is a \
                      script_file under {}",
-                    shown_root.display()
+                    crate::output::path(shown_root)
                 ),
             )),
             BenchScript::File { path, declared_in } => {
@@ -246,8 +246,8 @@ pub(super) fn check(
                         format!(
                             "script_file (set in {}) lies outside bench_scripts {}: every bench \
                              script lives under it",
-                            declared_in.display(),
-                            shown_root.display()
+                            crate::output::path(declared_in),
+                            crate::output::path(shown_root)
                         ),
                     ));
                 }

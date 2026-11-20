@@ -135,8 +135,8 @@ fn read_pointer(file: &Path, rel: &Path) -> Result<Option<String>, DevError> {
             return Err(DevError::Refused(format!(
                 "{} is tracked at this commit but missing from the worktree at {}; a --commit \
                  worktree must be a full checkout (is sparse checkout configured for the repo?)",
-                rel.display(),
-                file.display()
+                crate::output::path(rel),
+                crate::output::path(file)
             )));
         }
         // A symlink where the tree has a regular file is not a pointer.
@@ -146,7 +146,7 @@ fn read_pointer(file: &Path, rel: &Path) -> Result<Option<String>, DevError> {
                 e.kind(),
                 format!(
                     "cannot read {} to look for an LFS pointer: {e}",
-                    file.display()
+                    crate::output::path(file)
                 ),
             )));
         }

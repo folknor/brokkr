@@ -655,7 +655,7 @@ fn cargo_build_inner(
     output::build_msg(&format!(
         "done in {} -> {}",
         output::format_duration(elapsed),
-        built.path.display(),
+        crate::output::path(&built.path),
     ));
 
     Ok(built)
@@ -682,7 +682,7 @@ pub fn resolve_existing_binary(
     if !path.exists() {
         return Err(DevError::Build(format!(
             "binary not found at {} (build first or omit --no-build)",
-            path.display()
+            crate::output::path(&path)
         )));
     }
 

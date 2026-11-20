@@ -110,14 +110,14 @@ impl Store {
             Err(e) => {
                 return Err(DevError::Config(format!(
                     "cannot read {}: {e}",
-                    path.display()
+                    crate::output::path(&path)
                 )));
             }
         };
         Self::parse(&text).map_err(|e| {
             DevError::Config(format!(
                 "{} does not parse ({e}); it is safe to delete",
-                path.display()
+                crate::output::path(&path)
             ))
         })
     }
