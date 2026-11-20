@@ -395,7 +395,8 @@ includes changed while it waited for the lock, so a moved checkout cannot
 pair one commit's stamp with another's plan.
 
 To know where the bins land, brokkr passes `--root` itself: the cargo home
-(`CARGO_HOME`, else `~/.cargo`), which is where cargo would install anyway.
+(`CARGO_HOME`, else `.cargo` under the home directory, as cargo resolves it),
+which is where cargo would install anyway.
 When `CARGO_INSTALL_ROOT` is set, or a cargo config `install` reads (from
 the package directory or the directory install runs in) sets
 `install.root`, brokkr leaves the root to cargo and warns that the bins

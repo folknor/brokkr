@@ -94,7 +94,7 @@ impl Stamp {
         // - a `--commit` worktree's parents are not the live tree's - so they
         // stay one-sided when absent.
         if !fields.contains_key("repo_cargo_config_d0")
-            && crate::user_dirs::cargo_config_file(&build_root.join(".cargo")).is_none()
+            && no_config_candidate(&build_root.join(".cargo"))
         {
             fields.insert("repo_cargo_config_d0".into(), ABSENT.into());
         }
@@ -149,17 +149,32 @@ const UNSET: &str = "(unset)";
 /// The value of a config file that does not exist.
 const ABSENT: &str = "(absent)";
 
+/// Whether `dir` holds nothing at either cargo config spelling, not even a
+/// dangling symlink: only then is the config absent. Something there that
+/// cargo's probe passes over is a file whose contents are unknown, not an
+/// absence.
+fn no_config_candidate(dir: &Path) -> bool {
+    ["config", "config.toml"].iter().all(|name| {
+        matches!(
+            std::fs::symlink_metadata(dir.join(name)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        )
+    })
+}
+
 /// Digest of the user's cargo config, the usual home of standing rustflags.
 ///
 /// Digests the file cargo actually reads, which is the extensionless legacy
-/// `config` when both spellings exist (`user_dirs::cargo_config_file`). No
-/// file is [`ABSENT`], a value like any other; a file that exists but cannot
-/// be digested, or no cargo home at all, is no reading.
+/// `config` when cargo's probe selects it (`rustflags::selected_config_file`).
+/// No file at either spelling is [`ABSENT`], a value like any other; a file
+/// that exists but cannot be selected or digested, or no cargo home at all,
+/// is no reading.
 fn cargo_config_digest() -> Option<String> {
     let home = crate::user_dirs::cargo_home()?;
-    let Some(path) = crate::user_dirs::cargo_config_file(&home) else {
+    if no_config_candidate(&home) {
         return Some(ABSENT.into());
-    };
+    }
+    let path = crate::rustflags::selected_config_file(&home)?;
     preflight::compute_file_digest(&path)
         .map(|d| d.to_string())
         .ok()
@@ -177,7 +192,7 @@ fn cargo_config_digest() -> Option<String> {
 fn repo_config_digests(build_root: &Path) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     for (depth, dir) in build_root.ancestors().enumerate() {
-        if let Some(path) = crate::user_dirs::cargo_config_file(&dir.join(".cargo"))
+        if let Some(path) = crate::rustflags::selected_config_file(&dir.join(".cargo"))
             && let Ok(d) = preflight::compute_file_digest(&path).map(|d| d.to_string())
         {
             out.push((depth, d));

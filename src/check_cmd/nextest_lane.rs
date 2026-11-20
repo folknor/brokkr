@@ -150,6 +150,17 @@ fn engine_cargo_configs(project_root: &Path, state_root: &Path, env: &[(&str, &s
     // the sweep's CARGO_HOME. The engine's ordinary constructor discovers from
     // process cwd, which need not be the build root. Its isolated constructor
     // avoids that ambient dependency without changing cwd process-wide.
+    //
+    // Where the engine still differs from cargo is nextest-runner's own
+    // loader, not this handoff: it canonicalizes every file it loads, so a
+    // `relative = true` `[env]` value or a relative runner in a symlinked
+    // config anchors under the link's target, and it requires `value` in
+    // each file's `[env]` table, so an entry cargo merges from two files
+    // (one setting only `force`) fails discovery. Projecting the merged env
+    // into the generated file was sparred and refused: the engine parses the
+    // original files first and fails on the split entry anyway, the runner is
+    // not covered, and a projected entry would reorder sweep-versus-config
+    // precedence.
     for path in crate::rustflags::config_paths_under(project_root, effective)? {
         overrides.push(path.to_str().ok_or_else(||
             DevError::Config(format!("cargo config path is not UTF-8: {}", crate::output::path(&path))))?.to_owned());

@@ -972,7 +972,7 @@ pub(super) fn sweep_env(
         facts,
         rustflags::EffectiveEnv::new(&sweep_refs),
         allow_flags,
-    );
+    )?;
     let project_env =
         check_cmd::sweep_runtime_env(sweep, Some(project), target_dir, profile_dir, env_allows)?;
     let mut env = check_cmd::merged_env(&sweep.env, project_env.as_slice());

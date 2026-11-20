@@ -1201,7 +1201,9 @@ the deps dirs; the toolchain libdir; then the inherited value (used alone when
 it already starts with cargo's entries). A link-search dir outside the output
 tree is left out, as cargo leaves it out, because it is likely to shadow a
 system library. Then `[env]` from the cargo config chain with `force`/`relative`
-semantics, `CARGO_PKG_*` / `CARGO_MANIFEST_DIR` / `CARGO_MANIFEST_PATH` from
+semantics, merged per key across the chain as cargo merges it (a higher table
+setting only `force` keeps a lower `value`, and `relative` anchors at the file
+that supplied `value`), `CARGO_PKG_*` / `CARGO_MANIFEST_DIR` / `CARGO_MANIFEST_PATH` from
 cargo metadata (absent manifest fields export as empty, matching cargo),
 build-script `rustc-env` values from the prebuild's `build-script-executed`
 messages, runtime `CARGO_BIN_EXE_<name>` for the package's own bins, and
@@ -1920,10 +1922,18 @@ Instead brokkr finds the layer already live and adds to *that* one, where
 cargo's own array merging applies and its entry lands last - which is what a
 lint allow needs, since rustc resolves conflicting lint levels last-wins. A
 config layer is reached with `--config`, the highest-precedence config source,
-so the project's `.cargo/config.toml` is left untouched.
+so the project's `.cargo/config.toml` is left untouched. Cargo refuses to merge
+an array with a string even from `--config`, so when a config file sets the
+chosen key as a string (`build.rustflags = "-Dwarnings"`) the placement is
+refused, naming the file, rather than emitting an invocation cargo would fail;
+writing a string instead would reorder the project's flags against env
+contributions to the key. A string and an array for one key across files, or
+for `build.target`, is a merge cargo refuses too, and leaves the decision
+undecided on the inert side.
 
 The chain inspected is the whole chain cargo reads: every `.cargo/config.toml`
-from the build root upwards, plus the cargo home's, and every file they
+from the build root's physical path upwards (cargo's `current_dir()`, so a
+symlinked build root walks its target's ancestors), plus the cargo home's, and every file they
 include, walked as cargo's loader walks it (an include is the path it was
 reached through, so two symlinked spellings of one file are two documents with
 their own relative children). A user-level

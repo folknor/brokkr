@@ -221,14 +221,9 @@ impl DirectRuntime {
         let effective_env = rustflags::EffectiveEnv::new(env_refs);
 
         // Cargo config [env]: force overrides, plain entries only fill holes -
-        // cargo's own rule. First occurrence in the chain wins, and the chain
-        // is ordered highest-precedence first, so skip a key already applied.
-        let mut applied: Vec<&str> = Vec::new();
+        // cargo's own rule. The entries are already merged per key across
+        // the chain, as cargo merges them, so each key appears once.
         for entry in &self.launch_config.env {
-            if applied.iter().any(|k| *k == entry.key) {
-                continue;
-            }
-            applied.push(&entry.key);
             if entry.force || !effective_env.contains(&entry.key) {
                 env.push((entry.key.clone(), entry.value.clone()));
             }
@@ -795,13 +790,11 @@ mod direct_runtime_tests {
             rustflags::ConfigEnvEntry {
                 key: "FIXTURE_ROOT".into(),
                 value: "/cfg/fixtures".into(),
-                source: PathBuf::from("/workspace/.cargo/config.toml"),
                 force: false,
             },
             rustflags::ConfigEnvEntry {
                 key: "FORCED".into(),
                 value: "cfg".into(),
-                source: PathBuf::from("/workspace/.cargo/config.toml"),
                 force: true,
             },
         ];

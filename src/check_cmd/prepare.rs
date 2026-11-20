@@ -132,7 +132,7 @@ pub(crate) fn lane_env(inputs: &LaneInputs<'_>, sweep: &PlannedSweep) -> Result<
         facts,
         rustflags::EffectiveEnv::new(&sweep_env_refs),
         inputs.allow_flags,
-    );
+    )?;
     // Dev unless the sweep pinned a profile: BROKKR_TEST_BIN_DIR must name the
     // directory this sweep's own pre-build wrote into.
     let profile_dir = sweep.cargo_profile().target_subdir();

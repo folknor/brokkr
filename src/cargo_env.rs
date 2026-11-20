@@ -401,18 +401,25 @@ fn config_conflict(
             .find(|n| table.contains_key(**n))
             .map(|n| (*n).to_owned())
     };
-    let launch = crate::rustflags::CargoLaunchConfig::discover(
-        cwd,
-        crate::rustflags::EffectiveEnv::new(env),
-    )?;
-    for entry in launch.env {
-        if names.contains(&entry.key.as_str()) {
+    // Presence is the question, not the launch environment, so the raw
+    // documents are scanned: a definition cargo would merge into a complete
+    // entry counts wherever it sits. One physical cwd serves the ambient walk,
+    // file-argument classification and inline includes, as cargo's one
+    // `current_dir()` does.
+    let cwd = &crate::rustflags::physical_cwd(cwd)?;
+    for (config_path, doc) in
+        crate::rustflags::read_config_files_under(cwd, crate::rustflags::EffectiveEnv::new(env))?
+    {
+        if let Some(name) = names_in(&doc) {
             return Ok(Some(conflict_message(
-                &entry.key,
-                &entry.source.display().to_string(),
+                &name,
+                &config_path.display().to_string(),
             )));
         }
     }
+    // File-valued arguments and their includes share one include set, as in
+    // cargo; each inline argument walks its includes with a fresh one.
+    let mut file_seen = std::collections::HashSet::new();
     let mut i = 0;
     while let Some(&a) = args.get(i) {
         if a == "--" {
@@ -424,27 +431,79 @@ fn config_conflict(
         } else {
             a.strip_prefix("--config=")
         };
-        if let Some(v) = value {
+        if let Some(v) = value.filter(|v| !v.is_empty()) {
+            // Cargo's classification: a path that exists is a file argument,
+            // a directory included (whose read then fails).
             let file = cwd.join(v);
-            if file.is_file() {
-                for (config_path, doc) in crate::rustflags::read_config_file(&file)? {
-                    if let Some(name) = names_in(&doc) {
-                        return Ok(Some(conflict_message(
-                            &name,
-                            &config_path.display().to_string(),
-                        )));
-                    }
+            let docs = if file.exists() {
+                let mut docs = Vec::new();
+                crate::rustflags::read_config_file_into(&file, &mut docs, &mut file_seen)?;
+                docs
+            } else {
+                if let Some(name) = names.iter().find(|n| inline_defines(v, n)) {
+                    return Ok(Some(conflict_message(name, &format!("--config {v}"))));
                 }
-            } else if let Some(name) = names
-                .iter()
-                .find(|n| v.trim_start().starts_with(&format!("env.{n}")))
-            {
-                return Ok(Some(conflict_message(name, &format!("--config {v}"))));
+                match inline_include_doc(v) {
+                    Some(doc) => crate::rustflags::read_inline_includes(
+                        Path::new(&format!("--config {v}")),
+                        &doc,
+                        cwd,
+                    )?,
+                    None => Vec::new(),
+                }
+            };
+            for (config_path, doc) in docs {
+                if let Some(name) = names_in(&doc) {
+                    return Ok(Some(conflict_message(
+                        &name,
+                        &config_path.display().to_string(),
+                    )));
+                }
             }
         }
         i += 1;
     }
     Ok(None)
+}
+
+/// An inline `--config` value in cargo's accepted grammar - one dotted-key
+/// assignment whose value is not an inline table - as its decoded key path.
+/// `None` for anything else, which cargo refuses itself.
+fn inline_assignment(value: &str) -> Option<Vec<String>> {
+    let doc: toml_edit::DocumentMut = value.parse().ok()?;
+    let mut table = doc.as_table();
+    let mut path = Vec::new();
+    let mut root = true;
+    loop {
+        if !(root || table.is_dotted()) || table.len() != 1 {
+            return None;
+        }
+        root = false;
+        let (key, item) = table.iter().next()?;
+        path.push(key.to_owned());
+        match item {
+            toml_edit::Item::Table(inner) => table = inner,
+            toml_edit::Item::Value(v) if !v.is_inline_table() => return Some(path),
+            _ => return None,
+        }
+    }
+}
+
+/// Whether inline `--config` `value` defines `[env]` `name`: its second
+/// decoded key segment is exactly `name` (`env."FOO".value=...` counts,
+/// `env.FOOBAR` does not).
+fn inline_defines(value: &str, name: &str) -> bool {
+    inline_assignment(value).is_some_and(|path| {
+        path.first().is_some_and(|k| k == "env") && path.get(1).is_some_and(|k| k == name)
+    })
+}
+
+/// The document of an inline `--config` that sets `include`, whose files
+/// cargo loads relative to its cwd.
+fn inline_include_doc(value: &str) -> Option<toml::Table> {
+    inline_assignment(value)
+        .filter(|path| path.len() == 1 && path.first().is_some_and(|k| k == "include"))
+        .and_then(|_| value.parse::<toml::Table>().ok())
 }
 
 fn conflict_message(name: &str, source: &str) -> String {

@@ -188,25 +188,6 @@ pub(crate) fn account_home() -> Option<PathBuf> {
     (!bytes.is_empty()).then(|| PathBuf::from(OsString::from_vec(bytes)))
 }
 
-/// The cargo config file cargo reads from `dir` (a `.cargo` directory or the
-/// cargo home), if any.
-///
-/// Cargo accepts two spellings and reads exactly one per directory. When both
-/// exist it reads the extensionless legacy `config` and warns that it is
-/// ignoring `config.toml` - so that is the one whose contents matter, whether
-/// the question is "what flags apply" or "which file do I edit".
-pub(crate) fn cargo_config_file(dir: &Path) -> Option<PathBuf> {
-    let legacy = dir.join("config");
-    if legacy.is_file() {
-        return Some(legacy);
-    }
-    let modern = dir.join("config.toml");
-    if modern.is_file() {
-        return Some(modern);
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -214,7 +195,7 @@ mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;
 
-    use super::{cargo_config_file, resolve_xdg};
+    use super::resolve_xdg;
 
     #[test]
     fn xdg_empty_or_relative_value_falls_back_to_home() {
@@ -235,27 +216,5 @@ mod tests {
             Some(PathBuf::from("/xdg/data"))
         );
         assert_eq!(resolve_xdg(Some(OsString::new()), None, &fallback), None);
-    }
-
-    #[test]
-    fn cargo_config_file_prefers_legacy_when_both_exist() {
-        let dir = crate::test_scratch::scratch("user_dirs", "both_exist");
-        std::fs::write(dir.join("config"), "").unwrap();
-        std::fs::write(dir.join("config.toml"), "").unwrap();
-        assert_eq!(cargo_config_file(&dir), Some(dir.join("config")));
-    }
-
-    #[test]
-    fn cargo_config_file_finds_either_spelling_alone() {
-        let modern = crate::test_scratch::scratch("user_dirs", "modern_only");
-        std::fs::write(modern.join("config.toml"), "").unwrap();
-        assert_eq!(cargo_config_file(&modern), Some(modern.join("config.toml")));
-
-        let legacy = crate::test_scratch::scratch("user_dirs", "legacy_only");
-        std::fs::write(legacy.join("config"), "").unwrap();
-        assert_eq!(cargo_config_file(&legacy), Some(legacy.join("config")));
-
-        let neither = crate::test_scratch::scratch("user_dirs", "neither");
-        assert_eq!(cargo_config_file(&neither), None);
     }
 }

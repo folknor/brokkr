@@ -4,10 +4,11 @@ mod serial_shim_tests {
 
     #[test]
     fn forwarded_target_and_config_force_first_failure_mode() {
-        let root = std::path::Path::new("/nonexistent");
+        // Discovery resolves the physical cwd, so the root must exist.
+        let root = crate::test_scratch::scratch("serial_shim", "forwarded");
         for arg in ["--target", "--target=other", "--config", "--config=target.x.runner=tool"] {
             let reason =
-                serial_shim_fallback(root, &ForwardedArgs::parse(&[arg.into()]), &[], &Default::default(), false)
+                serial_shim_fallback(&root, &ForwardedArgs::parse(&[arg.into()]), &[], &Default::default(), false)
                     .expect("forwarded override must disable shim");
             assert!(reason.contains("forwarded"));
         }
@@ -15,8 +16,9 @@ mod serial_shim_tests {
 
     #[test]
     fn explicit_target_env_forces_first_failure_mode() {
+        let root = crate::test_scratch::scratch("serial_shim", "target_env");
         let reason = serial_shim_fallback(
-            std::path::Path::new("/nonexistent"),
+            &root,
             &ForwardedArgs::parse(&[]),
             &[("CARGO_BUILD_TARGET".into(), "other".into())],
             &Default::default(),

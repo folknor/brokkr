@@ -432,8 +432,9 @@ the project's `-Dwarnings` with the flag you meant. Moving the whole file aside
 would drop those too, so local gates would run laxer than CI.
 
 While brokkr holds the global lock, the one file cargo reads in
-`<tree>/.cargo` (the legacy extensionless `config` when it exists, else
-`config.toml`) is replaced by a copy with the listed flags removed, and the
+`<tree>/.cargo` (the legacy extensionless `config` when it can be opened, else
+`config.toml`, by cargo's own probe; a selected path that is not a regular file
+is refused) is replaced by a copy with the listed flags removed, and the
 original is put back before the lock is released. It follows
 `disable_toolchain`'s lifecycle exactly: the build root on every locked
 command, the checkout itself under `--commit`, restored on exit, error,

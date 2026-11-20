@@ -684,7 +684,7 @@ fn run_member_check_phase(
         None,
         rustflags::EffectiveEnv::new(&[]),
         allow_flags,
-    );
+    )?;
     let target_dir = member_target_dir(&build::project_info(Some(project_root))?.target_dir);
     let mut env_pairs = rustflags::RustflagsEnv::process()
         .compose(env_allows)?

@@ -41,6 +41,9 @@ pub fn cmd_guard(install: bool, remove: bool) -> Result<(), DevError> {
         ));
     }
     let config_path = cargo_config_path()?;
+    if install || remove {
+        writable_destination(&config_path)?;
+    }
     if install {
         return do_install(&config_path);
     }
@@ -71,7 +74,8 @@ fn guard_bin_path() -> Result<PathBuf, DevError> {
 /// When BOTH files exist cargo reads the extensionless one (with a warning),
 /// so brokkr must edit and inspect that one too - editing `config.toml`
 /// while cargo obeys `config` would report a guard that is not actually
-/// enrolled. The legacy file therefore wins whenever it exists; `config.toml`
+/// enrolled. The legacy file therefore wins whenever cargo's probe selects it
+/// (`rustflags::selected_config_file`); `config.toml`
 /// is the path only when it is the only candidate (including the
 /// neither-exists case, where a fresh install should create the modern name).
 fn cargo_config_path() -> Result<PathBuf, DevError> {
@@ -80,8 +84,51 @@ fn cargo_config_path() -> Result<PathBuf, DevError> {
             "neither $CARGO_HOME nor $HOME is set - cannot locate the cargo config".into(),
         )
     })?;
-    Ok(crate::user_dirs::cargo_config_file(&cargo_home)
+    Ok(crate::rustflags::selected_config_file(&cargo_home)
         .unwrap_or_else(|| cargo_home.join("config.toml")))
+}
+
+/// Refuse to edit a cargo home config brokkr cannot safely write: a legacy
+/// `config` that exists but cargo's probe passed over (it could not be
+/// opened, so the wrapper written to `config.toml` would be shadowed once it
+/// can), or a destination that exists and is not a regular file once
+/// symlinks are followed. A symlink to a regular file is edited through.
+fn writable_destination(path: &std::path::Path) -> Result<(), DevError> {
+    if let Some(dir) = path.parent() {
+        let legacy = dir.join("config");
+        if legacy != path {
+            match std::fs::symlink_metadata(&legacy) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                _ => {
+                    return Err(DevError::Refused(format!(
+                        "{} exists but cannot be read; cargo would read it instead of {} once it can - fix or remove it first",
+                        crate::output::path(&legacy),
+                        crate::output::path(path)
+                    )));
+                }
+            }
+        }
+    }
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                _ => Err(DevError::Refused(format!(
+                    "{} is a dangling symlink; brokkr will not replace it",
+                    crate::output::path(path)
+                ))),
+            }
+        }
+        Ok(_) => Err(DevError::Refused(format!(
+            "{} is not a regular file; brokkr only edits a regular file",
+            crate::output::path(path)
+        ))),
+        Err(e) => Err(DevError::Config(format!(
+            "cannot inspect {}: {e}",
+            crate::output::path(path)
+        ))),
+    }
 }
 
 fn load_doc(path: &std::path::Path) -> Result<toml_edit::DocumentMut, DevError> {

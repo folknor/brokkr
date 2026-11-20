@@ -145,28 +145,40 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
-### Cargo config snapshot residues after the loader mirror (2026-11-20)
+### The nextest lane inherits nextest-runner's cargo config loader (2026-11-20)
 
-The include walk in `src/rustflags.rs` now follows cargo's merged loader. What
-still diverges from cargo, each independent of the walk:
+`src/check_cmd/nextest_lane.rs` hands the cargo config chain to nextest-runner
+as explicit files, and nextest-runner's own loader differs from cargo's: it
+canonicalizes every file, so a `relative = true` `[env]` value or a relative
+runner in a symlinked `.cargo/config.toml` anchors under the link's target, and
+it requires `value` in each file's `[env]` table, so a valid entry cargo merges
+from two files (one setting only `force`) fails lane assembly. Projecting the
+merged env into the generated file was refused (the engine still parses the
+originals, the runner is not covered, and it would reorder sweep-versus-config
+precedence). The fix is an input boundary in nextest-runner for a resolved
+environment and runner.
 
-- `selected_config_file` takes only a regular file; cargo selects a legacy
-  `config` any handle opens and a `config.toml` that merely exists, so a
-  directory there makes cargo fail while brokkr skips it. Shared with
-  `cargo_config_strip`.
-- `cargo_env`'s `--config` scan reads each file with its own include set;
-  cargo shares one set across all file-valued `--config` arguments, and the
-  scan misses `[env]` reached through a dotted CLI include
-  (`--config 'include.path="x.toml"'`).
-- The bundled nextest lane hands the flattened paths to nextest as explicit
-  files; nextest anchors `relative = true` values at the canonical file, so a
-  symlinked `.cargo/config.toml` anchors elsewhere than cargo does.
-- Consumers take the first whole value where cargo merges per key: the direct
-  lane's `[env]` entry (a lower table's `force` is lost), the rustflags sink's
-  `build.target` array, and `effective_rustflags` folding a mixed string/array
-  definition cargo rejects.
-- The ancestor walk starts at the build root as spelled; cargo starts at its
-  child's `current_dir()`, which differs through a symlinked build root.
+### Cargo config consumers: residues after the per-key merge (2026-11-20)
+
+Laterals from the config-snapshot spar, each unverified against a failing case:
+
+- `[env]` values are `String`s (`display()`), so a relative value anchored
+  under a non-UTF-8 path is corrupted; launch paths should carry `OsString`.
+- Cargo refuses `[env]` entries for `CARGO_HOME`, `RUSTUP_HOME` and
+  `RUSTUP_TOOLCHAIN`; the direct lane applies them.
+- `cargo_env`'s conflict scan reads the cwd's chain only; `cargo install
+  --path` reloads config from the package directory, where an `[env]` entry
+  escapes the scan.
+- `triple_source_live` returns live on one proven selector even when another
+  selector's merge is one cargo refuses.
+- A relative `HOME` is joined to the cwd for the cargo home; the `home` crate
+  leaves `HOME/.cargo` relative, which changes the definition path cargo
+  reports for a relative `[env]` value.
+- `build_info::install_root` resolves its own cwd and package search root and
+  does not take the physical-cwd walk.
+- A config sink whose key a file sets as a string is refused; an env route
+  (`CARGO_BUILD_RUSTFLAGS` appends to a string value) would place the flags
+  instead, given a per-triple proof that the build key is the live one.
 
 ### A serve's cleanup after its supervisor dies is best effort (2026-11-15)
 

@@ -36,7 +36,7 @@ pub fn activate(dir: &Path, specs: &[StripSpec]) -> Result<Option<Installed>, De
         return Ok(None);
     }
     let cargo_dir = dir.join(".cargo");
-    let Some(live) = crate::rustflags::selected_config_file(&cargo_dir)? else {
+    let Some(live) = crate::rustflags::selected_config_file(&cargo_dir) else {
         output::warn(&format!(
             "strip_rustflags: {} has no cargo config, so nothing was stripped",
             crate::output::path(&cargo_dir)
@@ -48,6 +48,13 @@ pub fn activate(dir: &Path, specs: &[StripSpec]) -> Result<Option<Installed>, De
     if meta.file_type().is_symlink() {
         return Err(DevError::Refused(format!(
             "strip_rustflags: {file} is a symlink; brokkr only edits a regular file"
+        )));
+    }
+    // Selection is cargo's probe, which also picks a directory or other
+    // non-regular file cargo would then fail to read.
+    if !meta.is_file() {
+        return Err(DevError::Refused(format!(
+            "strip_rustflags: {file} is not a regular file; brokkr only edits a regular file"
         )));
     }
     let text = std::fs::read_to_string(&live).map_err(|e| {

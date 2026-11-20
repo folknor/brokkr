@@ -217,11 +217,19 @@ impl RustflagsEnv {
         let mut notes = self.invocation_notes();
         match read_config_files_under(build_root, EffectiveEnv::new(&[])) {
             Ok(files) => {
-                for triple in target_triples_for_sink(build_root, &files, EffectiveEnv::new(&[])) {
-                    let key = target_rustflags_env_var(&triple);
-                    if std::env::var_os(&key).is_some() {
-                        notes.push(format!("{key} is set for target {triple}"));
+                match target_triples_for_sink(build_root, &files, EffectiveEnv::new(&[])) {
+                    Some(triples) => {
+                        for triple in triples {
+                            let key = target_rustflags_env_var(&triple);
+                            if std::env::var_os(&key).is_some() {
+                                notes.push(format!("{key} is set for target {triple}"));
+                            }
+                        }
                     }
+                    None => notes.push(
+                        "Cargo config's build.target could not be modelled for rustflags sources"
+                            .into(),
+                    ),
                 }
             }
             Err(_) => {
@@ -362,7 +370,6 @@ pub(crate) enum SourceOrigin {
 pub(crate) struct ConfigEnvEntry {
     pub(crate) key: String,
     pub(crate) value: String,
-    pub(crate) source: PathBuf,
     /// `force = true`: overrides an inherited environment value; without it
     /// the entry only fills a hole.
     pub(crate) force: bool,
@@ -429,10 +436,7 @@ impl CargoLaunchConfig {
                     .and_then(toml::Value::as_table)
                     .is_some_and(|build| build.contains_key("build-dir"))
             });
-        let mut config_env = Vec::new();
-        for (path, doc) in &files {
-            config_env.extend(config_env_entries(path, doc)?);
-        }
+        let config_env = merged_config_env(&files)?;
 
         Ok(Self {
             runner,
@@ -452,6 +456,9 @@ impl CargoLaunchConfig {
 /// The walk mirrors cargo's merged loader (1.97 and later), so the snapshot
 /// holds what cargo merges, repeats included:
 ///
+/// - the walk starts at the physical path of `build_root` ([`physical_cwd`]),
+///   the directory cargo's `current_dir()` reports, and a relative
+///   `CARGO_HOME` resolves against it;
 /// - every ancestor `.cargo` contributes its selected file; the cargo home is
 ///   skipped only when its directory, canonical or as spelled, is one of the
 ///   ancestor `.cargo` directories (cargo compares directories, not files);
@@ -471,8 +478,22 @@ pub(crate) fn read_config_files_under(
     build_root: &Path,
     env: EffectiveEnv<'_>,
 ) -> Result<Vec<(PathBuf, toml::Table)>, crate::error::DevError> {
-    let home = cargo_home(build_root, env)?;
-    read_config_files_from(build_root, &home)
+    let cwd = physical_cwd(build_root)?;
+    let home = cargo_home(&cwd, env)?;
+    read_config_files_from(&cwd, &home)
+}
+
+/// The working directory a cargo child launched in `dir` sees: cargo reads
+/// `current_dir()`, which is the kernel's physical path, so a symlinked build
+/// root walks the ancestors of its target, not of its spelling. A directory
+/// that cannot be resolved is one cargo cannot be launched in.
+pub(crate) fn physical_cwd(dir: &Path) -> Result<PathBuf, crate::error::DevError> {
+    dir.canonicalize().map_err(|error| {
+        crate::error::DevError::Config(format!(
+            "could not resolve the cargo working directory {}: {error}",
+            crate::output::path(dir)
+        ))
+    })
 }
 
 /// The cargo home a cargo child rooted at `cwd` uses: a nonempty
@@ -513,7 +534,7 @@ pub(crate) fn read_config_files_from(
     let mut seen_dirs = HashSet::new();
     for dir in search_root.ancestors() {
         let config_root = dir.join(".cargo");
-        if let Some(path) = selected_config_file(&config_root)? {
+        if let Some(path) = selected_config_file(&config_root) {
             roots.push(path);
         }
         seen_dirs.insert(config_root.canonicalize().unwrap_or(config_root));
@@ -521,7 +542,7 @@ pub(crate) fn read_config_files_from(
     let canonical_home = home.canonicalize().unwrap_or_else(|_| home.to_owned());
     if !seen_dirs.contains(&canonical_home)
         && !seen_dirs.contains(home)
-        && let Some(path) = selected_config_file(home)?
+        && let Some(path) = selected_config_file(home)
     {
         roots.push(path);
     }
@@ -534,32 +555,44 @@ pub(crate) fn read_config_files_from(
 }
 
 /// Read a cargo config file passed explicitly through `--config`, including
-/// every config file it includes. Cargo shares one include set across all
-/// file-valued `--config` arguments; this reads one file with its own set,
-/// which is enough for a scan of what the files define.
-pub(crate) fn read_config_file(
+/// every config file it includes, into `out`. `seen` is the include set:
+/// cargo shares one across all file-valued `--config` arguments and their
+/// descendants, so the caller passes the same set for each.
+pub(crate) fn read_config_file_into(
     path: &Path,
-) -> Result<Vec<(PathBuf, toml::Table)>, crate::error::DevError> {
-    let mut files = Vec::new();
-    push_config_document(path, &mut files, &mut HashSet::new())?;
-    Ok(files)
+    out: &mut Vec<(PathBuf, toml::Table)>,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<(), crate::error::DevError> {
+    push_config_document(path, out, seen)
 }
 
-/// The config file cargo reads in one `.cargo`-shaped directory: the
-/// extensionless legacy `config` when it exists, else `config.toml`.
-pub(crate) fn selected_config_file(dir: &Path) -> Result<Option<PathBuf>, crate::error::DevError> {
-    for path in [dir.join("config"), dir.join("config.toml")] {
-        match std::fs::metadata(&path) {
-            Ok(metadata) if metadata.is_file() => return Ok(Some(path)),
-            Ok(_) => {}
-            // No file at one of Cargo's search locations is ordinary; an
-            // inaccessible location could hide the selected legacy file and
-            // must not be treated as that ordinary absence.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(config_read_error(&path, &error)),
-        }
+/// The files an inline `--config` assignment includes (`include=[...]`),
+/// anchored at cargo's `cwd` and walked with a fresh include set, as cargo
+/// walks each inline argument. `label` names the argument in errors.
+pub(crate) fn read_inline_includes(
+    label: &Path,
+    doc: &toml::Table,
+    cwd: &Path,
+) -> Result<Vec<(PathBuf, toml::Table)>, crate::error::DevError> {
+    let mut out = Vec::new();
+    push_includes(label, doc, cwd, &mut out, &mut HashSet::new())?;
+    Ok(out)
+}
+
+/// The config file cargo reads in one `.cargo`-shaped directory, by cargo's
+/// own probe (`get_file_path`): the extensionless legacy `config` when it can
+/// be opened, else `config.toml` when it exists. The probe is cargo's, not a
+/// regular-file test: a directory at either spelling is selected and then
+/// fails to read, as cargo fails; an unopenable legacy file is passed over,
+/// as cargo passes over it; and opening a FIFO at `config` blocks, as it
+/// blocks cargo. Callers that write the file apply their own checks.
+pub(crate) fn selected_config_file(dir: &Path) -> Option<PathBuf> {
+    let legacy = dir.join("config");
+    if std::fs::File::open(&legacy).is_ok() {
+        return Some(legacy);
     }
-    Ok(None)
+    let modern = dir.join("config.toml");
+    modern.exists().then_some(modern)
 }
 
 /// Load `path` (as reached, never canonicalized) and its includes into `out`,
@@ -586,6 +619,19 @@ fn push_config_document(
     })?;
 
     out.push((path.to_owned(), doc.clone()));
+    let anchor = path.parent().unwrap_or_else(|| Path::new("."));
+    push_includes(path, &doc, anchor, out, seen)
+}
+
+/// Load the files `doc` (reached as `path`) includes, resolved against
+/// `anchor`, into `out`, later includes first.
+fn push_includes(
+    path: &Path,
+    doc: &toml::Table,
+    anchor: &Path,
+    out: &mut Vec<(PathBuf, toml::Table)>,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<(), crate::error::DevError> {
     let includes = match doc.get("include") {
         None => &[][..],
         Some(toml::Value::Array(includes)) => includes.as_slice(),
@@ -598,7 +644,6 @@ fn push_config_document(
     };
     // Later includes override earlier ones, so visit them first while keeping
     // this high-precedence file at the front of the resulting snapshot.
-    let anchor = path.parent().unwrap_or_else(|| Path::new("."));
     for include in includes.iter().rev() {
         let (include_path, optional) = match include {
             toml::Value::String(include_path) => (include_path.as_str(), false),
@@ -739,23 +784,104 @@ fn config_runner_source(
     })
 }
 
-fn config_env_entries(
+/// Merge cargo's merge rules for one config node: tables merge key by key,
+/// arrays append the higher layer after the lower, scalars replace, and a
+/// table or array meeting another kind is an error, as cargo's merge refuses
+/// it. These are the rules brokkr's `[env]` projection needs; cargo's own
+/// refusal of TOML types it does not model (floats, datetimes) is not
+/// reproduced.
+fn merge_config_value(
+    lower: &mut toml::Value,
+    higher: toml::Value,
+    key: &str,
     path: &Path,
-    doc: &toml::Table,
+) -> Result<(), crate::error::DevError> {
+    match (lower, higher) {
+        (toml::Value::Table(lower), toml::Value::Table(higher)) => {
+            for (k, v) in higher {
+                let child = format!("{key}.{k}");
+                match lower.get_mut(&k) {
+                    Some(existing) => merge_config_value(existing, v, &child, path)?,
+                    None => {
+                        lower.insert(k, v);
+                    }
+                }
+            }
+        }
+        (toml::Value::Array(lower), toml::Value::Array(higher)) => lower.extend(higher),
+        (lower @ (toml::Value::Table(_) | toml::Value::Array(_)), higher)
+        | (lower, higher @ (toml::Value::Table(_) | toml::Value::Array(_))) => {
+            return Err(crate::error::DevError::Config(format!(
+                "Cargo config {} sets `{key}` as a {}, which a lower config sets as a {}; cargo refuses to merge them",
+                crate::output::path(path),
+                higher.type_str(),
+                lower.type_str()
+            )));
+        }
+        (lower, higher) => *lower = higher,
+    }
+    Ok(())
+}
+
+/// The `[env]` table cargo applies: every document's `[env]` merged lowest
+/// precedence first by cargo's merge rules, so a higher table that only sets
+/// `force` keeps a lower `value`, then decoded. A `relative` value anchors at
+/// the document that supplied `value` (cargo 1.98 and later; 1.97 anchored at
+/// the entry's table).
+fn merged_config_env(
+    files: &[(PathBuf, toml::Table)],
 ) -> Result<Vec<ConfigEnvEntry>, crate::error::DevError> {
-    let Some(value) = doc.get("env") else {
-        return Ok(Vec::new());
-    };
-    let entries = value.as_table().ok_or_else(|| {
-        crate::error::DevError::Config(format!(
-            "Cargo config {} has a non-table `env`; brokkr cannot reconstruct its launch environment",
-            crate::output::path(path)
-        ))
-    })?;
+    let mut merged = toml::Table::new();
+    let mut origin: std::collections::BTreeMap<String, PathBuf> = std::collections::BTreeMap::new();
+    for (path, doc) in files.iter().rev() {
+        let Some(value) = doc.get("env") else {
+            continue;
+        };
+        let entries = value.as_table().ok_or_else(|| {
+            crate::error::DevError::Config(format!(
+                "Cargo config {} has a non-table `env`; brokkr cannot reconstruct its launch environment",
+                crate::output::path(path)
+            ))
+        })?;
+        for (key, value) in entries {
+            let supplies_value = match value {
+                toml::Value::Table(table) => table.contains_key("value"),
+                _ => true,
+            };
+            match merged.get_mut(key) {
+                Some(existing) => {
+                    merge_config_value(existing, value.clone(), &format!("env.{key}"), path)?;
+                }
+                None => {
+                    merged.insert(key.clone(), value.clone());
+                }
+            }
+            if supplies_value {
+                origin.insert(key.clone(), path.clone());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (key, value) in &merged {
+        let Some(path) = origin.get(key) else {
+            return Err(crate::error::DevError::Config(format!(
+                "Cargo config sets `[env]` `{key}` without a `value` anywhere in the chain"
+            )));
+        };
+        out.push(config_env_entry(path, key, value)?);
+    }
+    Ok(out)
+}
+
+/// One merged `[env]` entry, its `value` supplied by `path`.
+fn config_env_entry(
+    path: &Path,
+    key: &str,
+    value: &toml::Value,
+) -> Result<ConfigEnvEntry, crate::error::DevError> {
     // <dir>/.cargo/config.toml -> <dir>.
     let anchor = path.parent().and_then(Path::parent);
-    let mut out = Vec::new();
-    for (key, value) in entries {
+    {
         let (value, force, relative) = match value {
             toml::Value::String(value) => (value.clone(), false, false),
             toml::Value::Table(table) => {
@@ -801,14 +927,12 @@ fn config_env_entries(
             (true, Some(dir)) => dir.join(value).display().to_string(),
             _ => value,
         };
-        out.push(ConfigEnvEntry {
-            key: key.clone(),
+        Ok(ConfigEnvEntry {
+            key: key.to_owned(),
             value,
-            source: path.to_owned(),
             force,
-        });
+        })
     }
-    Ok(out)
 }
 
 /// The one place brokkr can add flags for this invocation without displacing
@@ -867,9 +991,14 @@ pub(crate) fn sink(
 }
 
 /// Where brokkr's flags of one kind go, and whether that answer is proven.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SinkDecision {
     pub(crate) sink: Sink,
+    /// A config file that sets the sink's `--config` key as a string. Cargo
+    /// refuses to merge brokkr's array into it, so placing flags there is
+    /// refused ([`SinkDecision::refuse_string_destination`]). Only set for
+    /// a config sink over a chain that was read.
+    pub(crate) string_destination: Option<PathBuf>,
     /// False when the layer was chosen on a guess: some flagged target table
     /// could not be judged (an unmodelled `cfg(...)`, a bare triple with no
     /// host triple, a value of an unexpected shape), the configured triples
@@ -877,6 +1006,36 @@ pub(crate) struct SinkDecision {
     /// The guess is always [`Sink::BuildConfig`], the direction that can be
     /// inert but never demotes the project's own flags.
     pub(crate) certain: bool,
+}
+
+impl SinkDecision {
+    /// Refuse placing nonempty `flags` of `kind` at a config key a file sets
+    /// as a string: cargo fails to merge `--config key=[...]` over it, so the
+    /// invocation could not have run. Writing a string instead would take
+    /// `--config` precedence over env contributions to the key and reorder
+    /// the project's own flags.
+    pub(crate) fn refuse_string_destination(
+        &self,
+        kind: FlagKind,
+        flags: &[String],
+    ) -> Result<(), crate::error::DevError> {
+        let Some(path) = self
+            .string_destination
+            .as_ref()
+            .filter(|_| !flags.is_empty())
+        else {
+            return Ok(());
+        };
+        let key = match self.sink {
+            Sink::TargetConfig => format!("target.\"cfg(all())\".{}", kind.key()),
+            _ => format!("build.{}", kind.key()),
+        };
+        Err(crate::error::DevError::Refused(format!(
+            "{} sets `{key}` as a string; brokkr adds its flags there as `--config {key}=[...]`, \
+             which cargo refuses to merge with a string - write it as an array",
+            crate::output::path(path)
+        )))
+    }
 }
 
 /// Decide the sink for flags of `kind` on a cargo invocation rooted at
@@ -928,6 +1087,7 @@ pub(crate) fn decide(
         return SinkDecision {
             sink,
             certain: true,
+            string_destination: None,
         };
     }
     let files = match read_config_files_under(build_root, cargo_env) {
@@ -940,20 +1100,67 @@ pub(crate) fn decide(
             return SinkDecision {
                 sink: Sink::BuildConfig,
                 certain: false,
+                string_destination: None,
             };
         }
     };
+    let decided = decide_config_layer(kind, build_root, target, cargo_env, &files);
+    SinkDecision {
+        string_destination: string_destination(kind, decided.sink, &files),
+        ..decided
+    }
+}
+
+/// The file holding a string at the `--config` key `sink` writes, which
+/// brokkr's array value cannot merge with: cargo refuses a string meeting an
+/// array even from `--config`, so emitting it fails the invocation.
+fn string_destination(
+    kind: FlagKind,
+    sink: Sink,
+    files: &[(PathBuf, toml::Table)],
+) -> Option<PathBuf> {
+    files.iter().find_map(|(path, doc)| {
+        let table = match sink {
+            Sink::TargetConfig => doc
+                .get("target")?
+                .as_table()?
+                .get("cfg(all())")?
+                .as_table()?,
+            Sink::BuildConfig => doc.get("build")?.as_table()?,
+            Sink::EncodedEnv | Sink::Env => return None,
+        };
+        matches!(table.get(kind.key()), Some(toml::Value::String(_))).then(|| path.clone())
+    })
+}
+
+/// [`decide`]'s config-layer half, over an already read chain.
+fn decide_config_layer(
+    kind: FlagKind,
+    build_root: &Path,
+    target: Option<&crate::target_platform::TargetFacts>,
+    cargo_env: EffectiveEnv<'_>,
+    files: &[(PathBuf, toml::Table)],
+) -> SinkDecision {
     let host = host_triple_for(build_root);
     let triples = match target {
         Some(t) => vec![t.triple().to_owned()],
-        None => target_triples_for_sink(build_root, &files, cargo_env),
+        None => match target_triples_for_sink(build_root, files, cargo_env) {
+            Some(triples) => triples,
+            None => {
+                return SinkDecision {
+                    sink: Sink::BuildConfig,
+                    certain: false,
+                    string_destination: None,
+                };
+            }
+        },
     };
     let answers: Vec<Option<bool>> = if triples.is_empty() {
         // No host triple could be read: the host's cfg values still decide
         // `cfg(...)` tables, but no bare triple table can be confirmed.
         vec![triple_source_live(
             kind,
-            &files,
+            files,
             None,
             Platform::Host(None),
             cargo_env,
@@ -969,7 +1176,7 @@ pub(crate) fn decide(
                     }
                     None => Platform::Unknown(triple),
                 };
-                triple_source_live(kind, &files, Some(triple), platform, cargo_env)
+                triple_source_live(kind, files, Some(triple), platform, cargo_env)
             })
             .collect()
     };
@@ -977,11 +1184,13 @@ pub(crate) fn decide(
         SinkDecision {
             sink: Sink::TargetConfig,
             certain: true,
+            string_destination: None,
         }
     } else {
         SinkDecision {
             sink: Sink::BuildConfig,
             certain: answers.iter().all(|a| *a == Some(false)),
+            string_destination: None,
         }
     }
 }
@@ -1098,6 +1307,7 @@ pub(crate) fn place(
             certain: decision.certain,
         });
     }
+    decision.refuse_string_destination(kind, additions)?;
     Ok(Placement {
         env: None,
         args: config_args_for(kind, decision.sink, additions),
@@ -1158,7 +1368,9 @@ pub(crate) fn effective_rustflags(build_root: &Path, env: EffectiveEnv<'_>) -> E
         return undecided;
     };
     let host = host_triple_for(build_root);
-    let triples = target_triples_for_sink(build_root, &files, env);
+    let Some(triples) = target_triples_for_sink(build_root, &files, env) else {
+        return undecided;
+    };
     let [triple] = triples.as_slice() else {
         // Several configured targets build several ways; no one answer.
         return undecided;
@@ -1257,17 +1469,24 @@ fn build_table_flags(
 
 /// One rustflags key merged across the config chain as cargo merges config
 /// values: lowest precedence first, an array appending to what lies below, a
-/// string replacing it. `None` is undecided (a value of another shape);
+/// string replacing it. `None` is undecided: a value of another shape, or a
+/// string and an array for one key, which cargo refuses to merge.
 /// `Some(None)` is a key no file sets.
 fn merged_config_flags(
     files: &[(PathBuf, toml::Table)],
     get: impl Fn(&toml::Table) -> Option<toml::Value>,
 ) -> Option<Option<Vec<String>>> {
     let mut merged: Option<Vec<String>> = None;
+    let mut was_string: Option<bool> = None;
     for (_, doc) in files.iter().rev() {
         let Some(value) = get(doc) else {
             continue;
         };
+        let is_string = matches!(value, toml::Value::String(_));
+        if was_string.is_some_and(|was| was != is_string) {
+            return None;
+        }
+        was_string = Some(is_string);
         match value {
             toml::Value::String(s) => {
                 merged = Some(s.split_whitespace().map(str::to_owned).collect());
@@ -1297,12 +1516,19 @@ pub(crate) fn plumbing<'a>(
     target: Option<&crate::target_platform::TargetFacts>,
     cargo_env: EffectiveEnv<'_>,
     allow_flags: &'a [String],
-) -> (&'a [String], Vec<String>) {
-    let sink = sink(build_root, sweep_sets_rustflags, target, cargo_env);
-    if sink.is_env() {
-        (allow_flags, Vec::new())
+) -> Result<(&'a [String], Vec<String>), crate::error::DevError> {
+    let decision = decide(
+        FlagKind::Rustc,
+        build_root,
+        sweep_sets_rustflags,
+        target,
+        cargo_env,
+    );
+    if decision.sink.is_env() {
+        Ok((allow_flags, Vec::new()))
     } else {
-        (&[], config_args(sink, allow_flags))
+        decision.refuse_string_destination(FlagKind::Rustc, allow_flags)?;
+        Ok((&[], config_args(decision.sink, allow_flags)))
     }
 }
 
@@ -1340,36 +1566,62 @@ fn target_rustflags_env_var(triple: &str) -> String {
 
 /// Cargo's configured target names drive `CARGO_TARGET_<triple>_RUSTFLAGS`.
 /// Respect `CARGO_BUILD_TARGET` or `build.target`; if neither is present,
-/// Cargo builds for the host.
+/// Cargo builds for the host. `build.target` merges across the chain as cargo
+/// merges it (an array appends, a string replaces); `None` is a definition
+/// brokkr cannot model - a string and an array for the key, which cargo
+/// refuses, or a value of another shape - and callers take their uncertain
+/// side rather than guess the host.
 fn target_triples_for_sink(
     build_root: &Path,
     files: &[(PathBuf, toml::Table)],
     cargo_env: EffectiveEnv<'_>,
-) -> Vec<String> {
+) -> Option<Vec<String>> {
     let host = host_triple_for(build_root);
-    let configured = cargo_env
+    if let Some(targets) = cargo_env
         .get_os("CARGO_BUILD_TARGET")
         .and_then(|value| value.into_string().ok())
         .and_then(|value| parse_target_values(&value, host.as_deref()))
-        .or_else(|| {
-            files.iter().find_map(|(_, doc)| {
-                let value = doc.get("build")?.as_table()?.get("target")?;
-                match value {
-                    toml::Value::String(value) => parse_target_values(value, host.as_deref()),
-                    toml::Value::Array(values) => {
-                        let targets: Vec<String> = values
-                            .iter()
-                            .filter_map(toml::Value::as_str)
-                            .filter_map(|value| target_key_triple(value, host.as_deref()))
-                            .collect();
-                        (!targets.is_empty()).then_some(targets)
-                    }
-                    _ => None,
-                }
-            })
-        });
-
-    configured.unwrap_or_else(|| host.into_iter().collect())
+    {
+        return Some(targets);
+    }
+    let mut merged: Option<Vec<String>> = None;
+    let mut was_string: Option<bool> = None;
+    for (_, doc) in files.iter().rev() {
+        let Some(value) = doc
+            .get("build")
+            .and_then(toml::Value::as_table)
+            .and_then(|build| build.get("target"))
+        else {
+            continue;
+        };
+        let is_string = matches!(value, toml::Value::String(_));
+        if was_string.is_some_and(|was| was != is_string) {
+            return None;
+        }
+        was_string = Some(is_string);
+        match value {
+            toml::Value::String(value) => {
+                merged = Some(parse_target_values(value, host.as_deref()).unwrap_or_default());
+            }
+            toml::Value::Array(values) => {
+                let targets = values
+                    .iter()
+                    .map(|value| value.as_str())
+                    .collect::<Option<Vec<_>>>()?;
+                merged.get_or_insert_with(Vec::new).extend(
+                    targets
+                        .into_iter()
+                        .filter_map(|value| target_key_triple(value, host.as_deref())),
+                );
+            }
+            _ => return None,
+        }
+    }
+    Some(
+        merged
+            .filter(|targets| !targets.is_empty())
+            .unwrap_or_else(|| host.into_iter().collect()),
+    )
 }
 
 fn parse_target_values(value: &str, host: Option<&str>) -> Option<Vec<String>> {
@@ -1684,7 +1936,9 @@ mod tests {
 
     #[test]
     fn config_snapshot_includes_cargo_documents_in_precedence_order() {
-        let root = crate::test_scratch::scratch("rustflags", "cargo_config_includes");
+        let root = crate::test_scratch::scratch("rustflags", "cargo_config_includes")
+            .canonicalize()
+            .unwrap();
         let cargo_dir = root.join(".cargo");
         std::fs::create_dir_all(&cargo_dir).unwrap();
         std::fs::write(
@@ -1703,12 +1957,165 @@ mod tests {
         assert_eq!(paths.get(2), Some(&cargo_dir.join("first.toml")));
     }
 
+    /// Cargo's probe: the legacy file when it opens, else `config.toml` when
+    /// it exists, a directory at either spelling included.
+    #[test]
+    fn config_selection_follows_cargos_probe() {
+        let both = crate::test_scratch::scratch("rustflags", "select_both");
+        std::fs::write(both.join("config"), "").unwrap();
+        std::fs::write(both.join("config.toml"), "").unwrap();
+        assert_eq!(selected_config_file(&both), Some(both.join("config")));
+
+        let modern = crate::test_scratch::scratch("rustflags", "select_modern");
+        std::fs::write(modern.join("config.toml"), "").unwrap();
+        assert_eq!(
+            selected_config_file(&modern),
+            Some(modern.join("config.toml"))
+        );
+
+        let neither = crate::test_scratch::scratch("rustflags", "select_neither");
+        assert_eq!(selected_config_file(&neither), None);
+
+        // A directory is selected and then fails to read, as cargo fails.
+        let root = crate::test_scratch::scratch("rustflags", "select_directory");
+        std::fs::create_dir_all(root.join(".cargo/config.toml")).unwrap();
+        assert_eq!(
+            selected_config_file(&root.join(".cargo")),
+            Some(root.join(".cargo/config.toml"))
+        );
+        let cargo_home = [("CARGO_HOME", "empty-cargo-home")];
+        assert!(read_config_files_under(&root, EffectiveEnv::new(&cargo_home)).is_err());
+    }
+
+    /// `[env]` merges per key across the chain: a higher table that only
+    /// sets `force` keeps the lower `value`, which anchors `relative` at the
+    /// file that supplied it; a string meeting a table refuses.
+    #[test]
+    fn config_env_merges_per_key_as_cargo_merges() {
+        let root = crate::test_scratch::scratch("rustflags", "env_merge");
+        let inner = root.join("inner");
+        std::fs::create_dir_all(inner.join(".cargo")).unwrap();
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::write(
+            root.join(".cargo/config.toml"),
+            "[env]\nFOO = { value = \"data\", relative = true }\nBAR = \"low\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            inner.join(".cargo/config.toml"),
+            "[env]\nFOO = { force = true }\nBAR = \"high\"\n",
+        )
+        .unwrap();
+        let files =
+            read_config_files_under(&inner, EffectiveEnv::new(&[("CARGO_HOME", "h")])).unwrap();
+        let env = merged_config_env(&files).unwrap();
+        let foo = env.iter().find(|e| e.key == "FOO").unwrap();
+        assert!(foo.force);
+        let physical = root.canonicalize().unwrap();
+        assert_eq!(foo.value, physical.join("data").display().to_string());
+        let bar = env.iter().find(|e| e.key == "BAR").unwrap();
+        assert_eq!(bar.value, "high");
+        assert_eq!(env.len(), 2);
+
+        std::fs::write(inner.join(".cargo/config.toml"), "[env]\nFOO = \"plain\"\n").unwrap();
+        let files =
+            read_config_files_under(&inner, EffectiveEnv::new(&[("CARGO_HOME", "h")])).unwrap();
+        assert!(merged_config_env(&files).is_err());
+    }
+
+    /// A string at the key brokkr's `--config` array would merge into is
+    /// refused when flags would be placed there, and a string/array mix for
+    /// one rustflags key is undecided.
+    #[test]
+    fn a_string_destination_refuses_config_placement() {
+        let files = vec![(
+            PathBuf::from("/p/.cargo/config.toml"),
+            doc("[build]\nrustflags = \"-Dwarnings\"\n"),
+        )];
+        let found = string_destination(FlagKind::Rustc, Sink::BuildConfig, &files);
+        assert_eq!(found, Some(PathBuf::from("/p/.cargo/config.toml")));
+        assert_eq!(
+            string_destination(FlagKind::Rustc, Sink::TargetConfig, &files),
+            None
+        );
+        let decision = SinkDecision {
+            sink: Sink::BuildConfig,
+            certain: true,
+            string_destination: found,
+        };
+        assert!(
+            decision
+                .refuse_string_destination(FlagKind::Rustc, &[])
+                .is_ok()
+        );
+        assert!(
+            decision
+                .refuse_string_destination(FlagKind::Rustc, &["-Aunused".into()])
+                .is_err()
+        );
+
+        let mixed = vec![
+            (
+                PathBuf::from("/p/a/.cargo/config.toml"),
+                doc("[build]\nrustflags = [\"-Dx\"]\n"),
+            ),
+            (
+                PathBuf::from("/p/.cargo/config.toml"),
+                doc("[build]\nrustflags = \"-Dy\"\n"),
+            ),
+        ];
+        assert_eq!(
+            merged_config_flags(&mixed, |d: &toml::Table| {
+                d.get("build")?.as_table()?.get("rustflags").cloned()
+            }),
+            None
+        );
+    }
+
+    /// `build.target` merges across the chain; a string/array mix is
+    /// unmodelled rather than the host.
+    #[test]
+    fn build_target_merges_across_the_chain() {
+        let root = crate::test_scratch::scratch("rustflags", "build_target_merge");
+        let none = EffectiveEnv::new(&[]);
+        let arrays = vec![
+            (
+                PathBuf::from("/a"),
+                doc("[build]\ntarget = [\"x86_64-unknown-none\"]\n"),
+            ),
+            (
+                PathBuf::from("/b"),
+                doc("[build]\ntarget = [\"wasm32-unknown-unknown\"]\n"),
+            ),
+        ];
+        assert_eq!(
+            target_triples_for_sink(&root, &arrays, none),
+            Some(vec![
+                "wasm32-unknown-unknown".into(),
+                "x86_64-unknown-none".into()
+            ])
+        );
+        let mixed = vec![
+            (
+                PathBuf::from("/a"),
+                doc("[build]\ntarget = \"x86_64-unknown-none\"\n"),
+            ),
+            (
+                PathBuf::from("/b"),
+                doc("[build]\ntarget = [\"wasm32-unknown-unknown\"]\n"),
+            ),
+        ];
+        assert_eq!(target_triples_for_sink(&root, &mixed, none), None);
+    }
+
     /// Two symlinked spellings of one file are two documents, each resolving
     /// its relative include against the directory it was reached through.
     #[cfg(unix)]
     #[test]
     fn symlinked_includes_resolve_children_against_the_reached_path() {
-        let root = crate::test_scratch::scratch("rustflags", "symlinked_includes");
+        let root = crate::test_scratch::scratch("rustflags", "symlinked_includes")
+            .canonicalize()
+            .unwrap();
         let cargo_dir = root.join(".cargo");
         let shared = root.join("shared");
         for dir in [
@@ -1760,7 +2167,9 @@ mod tests {
     /// read once per root.
     #[test]
     fn include_repeats_refuse_within_a_root_and_repeat_across_roots() {
-        let root = crate::test_scratch::scratch("rustflags", "include_repeats");
+        let root = crate::test_scratch::scratch("rustflags", "include_repeats")
+            .canonicalize()
+            .unwrap();
         let inner = root.join("inner");
         std::fs::create_dir_all(inner.join(".cargo")).unwrap();
         std::fs::create_dir_all(root.join(".cargo")).unwrap();
@@ -1849,15 +2258,21 @@ mod tests {
             Some(Some(vec!["-Clow".into(), "-Chigh".into()]))
         );
         assert_eq!(target_table_flags(&files, triple, host, env), Some(None));
-        // ...while a string replaces whatever lies below it.
+        // ...while a string replaces a string below it...
         let files = chain(&[
             "[build]\nrustflags = \"-Ctarget-cpu=x86-64\"\n",
-            "[build]\nrustflags = [\"-Ctarget-cpu=native\"]\n",
+            "[build]\nrustflags = \"-Ctarget-cpu=native\"\n",
         ]);
         assert_eq!(
             build_table_flags(&files, env),
             Some(Some(vec!["-Ctarget-cpu=x86-64".into()]))
         );
+        // ...and a string over an array is a merge cargo refuses: undecided.
+        let files = chain(&[
+            "[build]\nrustflags = \"-Ctarget-cpu=x86-64\"\n",
+            "[build]\nrustflags = [\"-Ctarget-cpu=native\"]\n",
+        ]);
+        assert_eq!(build_table_flags(&files, env), None);
         // The triple key comes first, merged across files, then the matching
         // cfg keys; a bare triple must equal the platform's.
         let files = chain(&[
