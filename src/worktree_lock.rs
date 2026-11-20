@@ -173,7 +173,10 @@ pub fn digest(root: &Path, managed: bool) -> Option<String> {
         Ok(bytes) => Some(format!("{:032x}", xxhash_rust::xxh3::xxh3_128(&bytes))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
-            crate::output::warn(&format!("lockfile: cannot read {}: {e}", crate::output::path(&path)));
+            crate::output::warn(&format!(
+                "lockfile: cannot read {}: {e}",
+                crate::output::path(&path)
+            ));
             None
         }
     }

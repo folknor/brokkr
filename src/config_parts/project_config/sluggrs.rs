@@ -37,7 +37,11 @@ impl SluggrsConfig {
     /// are not selected by the current command.
     fn validate(&self) -> Result<(), DevError> {
         if let Some(tolerance) = self.regression_tolerance {
-            crate::visual::status::validate_tolerance("sluggrs", "regression_tolerance", tolerance)?;
+            crate::visual::status::validate_tolerance(
+                "sluggrs",
+                "regression_tolerance",
+                tolerance,
+            )?;
         }
         if let Some(fuzz) = self.pixel_fuzz_percent {
             crate::visual::compare::validate_fuzz_percent("sluggrs", fuzz)?;

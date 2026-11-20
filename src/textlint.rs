@@ -657,7 +657,11 @@ fn refuse_unresolved(
     {
         for rel in files {
             if is_rust(rel) && applies(rule, rel) && c.is_unresolved(rel) {
-                sites.push(format!("{} (rule {:?})", crate::output::path(rel), rule.name));
+                sites.push(format!(
+                    "{} (rule {:?})",
+                    crate::output::path(rel),
+                    rule.name
+                ));
                 pairs.entry(index).or_default().insert(rel.clone());
             }
         }

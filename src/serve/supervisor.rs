@@ -102,11 +102,12 @@ fn run(entry: &Path, fd: RawFd) -> Result<(), String> {
     }
 
     // 3. The server.
+    let shown = crate::output::path(&intent.log);
     let log = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(&intent.log)
-        .map_err(|e| format!("cannot open the log {}: {e}", crate::output::path(&intent.log)))?;
+        .map_err(|e| format!("cannot open the log {shown}: {e}"))?;
     let log_err = log
         .try_clone()
         .map_err(|e| format!("cannot share the log: {e}"))?;

@@ -129,7 +129,10 @@ impl TreeSnapshot {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(crate::error::DevError::Io(std::io::Error::new(
                 error.kind(),
-                format!("cannot tell whether {} exists: {error}", crate::output::path(rel)),
+                format!(
+                    "cannot tell whether {} exists: {error}",
+                    crate::output::path(rel)
+                ),
             ))),
         }
     }

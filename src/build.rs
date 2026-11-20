@@ -631,17 +631,14 @@ fn cargo_build_inner(
         return Err(DevError::Reported("cargo build failed".into()));
     }
 
-    // An `--example` build names its target as surely as `--bin` does, and
-    // cargo emits the example's executable under that name. Without it here
-    // the example path fell through to `find_executable_artifact`'s "exactly one
-    // executable" fallback - correct in practice, but by luck rather than by
-    // the name we already know.
-    let expected = config
-        .bin
-        .as_deref()
-        .or(config.example.as_deref())
-        .or(config.package.as_deref());
-    let executable = find_executable_artifact(&captured.stdout, expected)?;
+    let executable = crate::executable_artifact::find(
+        &captured.stdout,
+        &crate::executable_artifact::Selector {
+            package: config.package.as_deref(),
+            bin: config.bin.as_deref(),
+            example: config.example.as_deref(),
+        },
+    )?;
     let built = BuiltArtifact {
         path: executable.path,
         profile,
@@ -711,7 +708,10 @@ pub(crate) fn cargo_captured(
         if !warnings.is_empty() {
             output::warn(&warnings);
         }
-        output::build_msg(&format!("done in {}", output::format_duration(start.elapsed())));
+        output::build_msg(&format!(
+            "done in {}",
+            output::format_duration(start.elapsed())
+        ));
         Ok(())
     })
 }
@@ -927,128 +927,6 @@ fn resolve_bin_name(metadata: &CargoMetadata, config: &BuildConfig) -> Result<St
     Ok(bins[0].name.clone())
 }
 
-#[derive(Clone)]
-pub(crate) struct CargoExecutableArtifact {
-    pub(crate) path: PathBuf,
-    target: String,
-    /// The record's `profile` object, as [`crate::build_provenance::unit_pairs`].
-    pub(crate) unit_profile: Vec<(String, String)>,
-    /// The record's `features`: what cargo resolved for this unit.
-    pub(crate) features: Vec<String>,
-}
-
-/// Scan cargo's JSON output for the compiled executable, keeping the target
-/// name and resolved profile from the same compiler-artifact message.
-///
-/// Prefer the executable whose file stem matches `expected_name`. When there
-/// is no exact match, require cargo to have reported exactly one executable;
-/// cargo does not guarantee JSON ordering, so selecting the last is unsafe.
-/// The same single-executable rule applies when no name was supplied.
-pub(crate) fn find_executable_artifact(
-    stdout: &[u8],
-    expected_name: Option<&str>,
-) -> Result<CargoExecutableArtifact, DevError> {
-    let text = String::from_utf8_lossy(stdout);
-    let mut all_exes: Vec<CargoExecutableArtifact> = Vec::new();
-    let mut last_exe: Option<CargoExecutableArtifact> = None;
-    let mut matched_exe: Option<CargoExecutableArtifact> = None;
-
-    for (line_index, line) in text.lines().enumerate() {
-        let line_number = line_index + 1;
-        let val =
-            crate::cargo_json::parse_cargo_json_line(line, line_number).map_err(DevError::Build)?;
-        let Some(val) = val else {
-            continue;
-        };
-        let Some(reason) = val.get("reason").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        if reason != "compiler-artifact" {
-            if val
-                .get("executable")
-                .is_some_and(|executable| !executable.is_null())
-            {
-                return Err(DevError::Build(format!(
-                    "unexpected cargo JSON record `{reason}` with an executable on stdout line {line_number}"
-                )));
-            }
-            continue;
-        }
-        let Some(executable) = val.get("executable") else {
-            return Err(DevError::Build(format!(
-                "malformed compiler-artifact on cargo stdout line {line_number}: missing `executable`"
-            )));
-        };
-        if executable.is_null() {
-            continue;
-        }
-        let Some(exe) = executable.as_str() else {
-            return Err(DevError::Build(format!(
-                "malformed compiler-artifact on cargo stdout line {line_number}: `executable` is not a string or null"
-            )));
-        };
-        if exe.is_empty() {
-            return Err(DevError::Build(format!(
-                "malformed compiler-artifact on cargo stdout line {line_number}: empty `executable`"
-            )));
-        }
-        let path = PathBuf::from(exe);
-        let target = val
-            .get("target")
-            .and_then(|target| target.get("name"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
-            .ok_or_else(|| {
-                DevError::Build("cargo executable artifact missing target name".into())
-            })?;
-        let unit_profile = val
-            .get("profile")
-            .map(crate::build_provenance::unit_pairs)
-            .unwrap_or_default();
-        let features = val
-            .get("features")
-            .and_then(serde_json::Value::as_array)
-            .map(|features| {
-                features
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let artifact = CargoExecutableArtifact {
-            path,
-            target,
-            unit_profile,
-            features,
-        };
-        if expected_name.is_some()
-            && artifact.path.file_stem().and_then(|s| s.to_str()) == expected_name
-        {
-            matched_exe = Some(artifact.clone());
-        }
-        all_exes.push(artifact.clone());
-        last_exe = Some(artifact);
-    }
-
-    if let Some(exe) = matched_exe {
-        return Ok(exe);
-    }
-
-    // No name to match - require exactly one executable to avoid
-    // order-dependent behaviour (cargo doesn't guarantee JSON ordering).
-    match last_exe {
-        Some(exe) if all_exes.len() == 1 => Ok(exe),
-        Some(_) => Err(DevError::Build(format!(
-            "found {} executables in cargo output but no expected name to disambiguate; \
-             specify --bin or -p",
-            all_exes.len()
-        ))),
-        None => Err(DevError::Build("no executable in cargo output".into())),
-    }
-}
-
 /// Extract compiler diagnostics from `--message-format=json` stdout and print
 /// the rendered messages.  With JSON message format, cargo sends the actual
 /// error details (file, line, message) as JSON to stdout - stderr only contains
@@ -1242,7 +1120,10 @@ mod failure_report_tests {
              warning: Patch `x v1.0.0` was not used in the crate graph.\n\
              Running `cargo update` may fix it."
         );
-        assert_eq!(prebuild_warnings(b"   Compiling a v0.1.0\n    Finished dev\n"), "");
+        assert_eq!(
+            prebuild_warnings(b"   Compiling a v0.1.0\n    Finished dev\n"),
+            ""
+        );
         assert_eq!(
             prebuild_warnings(b"warning: `foo` generated a warning file\n"),
             "warning: `foo` generated a warning file"
@@ -1252,7 +1133,10 @@ mod failure_report_tests {
             "warning: w"
         );
         assert_eq!(prebuild_warnings(b"    Building [==>  ] 3/9: a\r\n"), "");
-        assert_eq!(prebuild_warnings(b"warning: keep\nerror: drop\n"), "warning: keep");
+        assert_eq!(
+            prebuild_warnings(b"warning: keep\nerror: drop\n"),
+            "warning: keep"
+        );
         assert_eq!(
             prebuild_warnings(b"warning: `foo` generated 2 warning files\n"),
             "warning: `foo` generated 2 warning files"

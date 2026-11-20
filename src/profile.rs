@@ -971,7 +971,12 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> Result<SweepDecl, DevError>
         None,
     )?;
 
-    Ok(sweep_decl_from_entry(entry, filters, entry.env.clone(), lane_exec))
+    Ok(sweep_decl_from_entry(
+        entry,
+        filters,
+        entry.env.clone(),
+        lane_exec,
+    ))
 }
 
 /// The `[[check]]` entry's shared sweep fields, with profile resolution
@@ -1838,7 +1843,8 @@ skip = [{ package = "a", pattern = "slow" }]
         let plain_decl = sweep_from_check_entry(&CheckEntry {
             name: "default".into(),
             ..Default::default()
-        }).expect("sweep resolves");
+        })
+        .expect("sweep resolves");
         let plain = plan_decl(plain_decl.clone());
         let mut filtered = plain_decl;
         filtered.filters = LaneFilters {
@@ -1884,7 +1890,9 @@ sweeps = ["timing"]
         let resolved = resolve(&cfg, &checks, "timing").unwrap();
         assert_eq!(resolved[0].profile(), Some(SweepProfile::Release));
         assert_eq!(
-            sweep_from_check_entry(&checks[0]).expect("sweep resolves").profile(),
+            sweep_from_check_entry(&checks[0])
+                .expect("sweep resolves")
+                .profile(),
             Some(SweepProfile::Release)
         );
 
@@ -1919,7 +1927,8 @@ sweeps = ["timing"]
         let mut unset_entry = checks[0].clone();
         unset_entry.profile = None;
         assert_ne!(
-            plan_decl(sweep_from_check_entry(&unset_entry).expect("sweep resolves")).build_shape_key(),
+            plan_decl(sweep_from_check_entry(&unset_entry).expect("sweep resolves"))
+                .build_shape_key(),
             plan_decl(dev).build_shape_key()
         );
     }
@@ -2000,7 +2009,11 @@ sweeps = ["sim-live"]
         );
         let resolved = resolve(&cfg, &checks, "sim").unwrap();
         assert!(resolved[0].curated);
-        assert!(sweep_from_check_entry(&checks[0]).expect("sweep resolves").curated);
+        assert!(
+            sweep_from_check_entry(&checks[0])
+                .expect("sweep resolves")
+                .curated
+        );
 
         // Audit policy, not build shape: a curated and a plain sweep of an
         // otherwise-identical entry still dedupe to one clippy run - which

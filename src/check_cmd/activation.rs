@@ -158,9 +158,9 @@ fn resolve_sweeps(
         )?);
         vec![sweep]
     } else if let Some(name) = effective_profile_name(inputs.test_cfg, inputs.profile_name)? {
-        let cfg = inputs
-            .test_cfg
-            .ok_or_else(|| DevError::Internal("resolved profile requires test config".to_owned()))?;
+        let cfg = inputs.test_cfg.ok_or_else(|| {
+            DevError::Internal("resolved profile requires test config".to_owned())
+        })?;
         profile::resolve(cfg, inputs.check_entries, &name)?
     } else if !inputs.check_entries.is_empty() {
         inputs

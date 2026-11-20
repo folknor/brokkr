@@ -203,8 +203,9 @@ impl Worktree {
 
         let slot = checkout_dir(git_root)?.join(short.as_str());
         let checkout = checkout_in(git_root, &slot);
-        let record_name = record_name(&slot)
-            .ok_or_else(|| DevError::Config(format!("bad worktree slot {}", crate::output::path(&slot))))?;
+        let record_name = record_name(&slot).ok_or_else(|| {
+            DevError::Config(format!("bad worktree slot {}", crate::output::path(&slot)))
+        })?;
 
         // A run that died while its cargo config was filtered left the
         // checkout in a state only recovery can read; put it back before any
@@ -261,7 +262,10 @@ impl Worktree {
         before_cut(&slot);
 
         if stale {
-            output::run_msg(&format!("removing stale worktree at {}", crate::output::path(&slot)));
+            output::run_msg(&format!(
+                "removing stale worktree at {}",
+                crate::output::path(&slot)
+            ));
             remove_one(git_root, &slot)?;
         }
 
@@ -642,7 +646,10 @@ pub fn remove_one(git_root: &Path, slot: &Path) -> Result<(), DevError> {
             std::fs::remove_dir_all(dest).map_err(|e| {
                 DevError::Io(std::io::Error::new(
                     e.kind(),
-                    format!("cannot remove worktree target dir {}: {e}", crate::output::path(dest)),
+                    format!(
+                        "cannot remove worktree target dir {}: {e}",
+                        crate::output::path(dest)
+                    ),
                 ))
             })?;
         }
@@ -659,7 +666,10 @@ fn remove_slot(git_root: &Path, slot: &Path) -> Result<(), DevError> {
         std::fs::remove_dir_all(slot).map_err(|e| {
             DevError::Io(std::io::Error::new(
                 e.kind(),
-                format!("cannot remove worktree slot {}: {e}", crate::output::path(slot)),
+                format!(
+                    "cannot remove worktree slot {}: {e}",
+                    crate::output::path(slot)
+                ),
             ))
         })?;
     }

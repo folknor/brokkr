@@ -12,7 +12,8 @@ use std::path::Path;
 /// Every section named `name` in `path`, in table order: none, one, or
 /// (for a file someone stamped twice) several.
 pub(crate) fn read_sections(path: &Path, name: &str) -> Result<Vec<Vec<u8>>, String> {
-    let mut file = std::fs::File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
     let shown = path.display().to_string();
     let mut header = [0u8; 64];
     file.read_exact(&mut header)
@@ -31,7 +32,9 @@ pub(crate) fn read_sections(path: &Path, name: &str) -> Result<Vec<Vec<u8>>, Str
         return Err(format!("{shown} has no section headers"));
     }
     if shentsize < 64 {
-        return Err(format!("{shown}: section header entries of {shentsize} bytes"));
+        return Err(format!(
+            "{shown}: section header entries of {shentsize} bytes"
+        ));
     }
     if shnum == 0 || shstrndx == 0xffff {
         // Extended numbering: the real values live in section header 0.
@@ -44,9 +47,12 @@ pub(crate) fn read_sections(path: &Path, name: &str) -> Result<Vec<Vec<u8>>, Str
         }
     }
     if shnum > 1 << 20 || shstrndx >= shnum {
-        return Err(format!("{shown}: implausible section table ({shnum} entries, names at {shstrndx})"));
+        return Err(format!(
+            "{shown}: implausible section table ({shnum} entries, names at {shstrndx})"
+        ));
     }
-    let len = usize::try_from(shnum * shentsize).map_err(|_| format!("{shown}: section table too large"))?;
+    let len = usize::try_from(shnum * shentsize)
+        .map_err(|_| format!("{shown}: section table too large"))?;
     let table = read_at(&mut file, shoff, len, &shown)?;
     let entry = |i: u64| {
         let start = usize::try_from(i * shentsize).unwrap_or(usize::MAX);
@@ -56,14 +62,17 @@ pub(crate) fn read_sections(path: &Path, name: &str) -> Result<Vec<Vec<u8>>, Str
     let names = read_at(
         &mut file,
         u64_at(names, 0x18),
-        usize::try_from(u64_at(names, 0x20)).map_err(|_| format!("{shown}: name table too large"))?,
+        usize::try_from(u64_at(names, 0x20))
+            .map_err(|_| format!("{shown}: name table too large"))?,
         &shown,
     )?;
     let mut found = Vec::new();
     for i in 0..shnum {
         let Some(sh) = entry(i) else { break };
         let offset = usize::try_from(u32_at(sh, 0)).unwrap_or(usize::MAX);
-        let Some(rest) = names.get(offset..) else { continue };
+        let Some(rest) = names.get(offset..) else {
+            continue;
+        };
         let end = rest.iter().position(|b| *b == 0).unwrap_or(rest.len());
         if &rest[..end] != name.as_bytes() {
             continue;
@@ -73,16 +82,24 @@ pub(crate) fn read_sections(path: &Path, name: &str) -> Result<Vec<Vec<u8>>, Str
             found.push(Vec::new());
             continue;
         }
-        let size = usize::try_from(u64_at(sh, 0x20)).map_err(|_| format!("{shown}: section too large"))?;
+        let size =
+            usize::try_from(u64_at(sh, 0x20)).map_err(|_| format!("{shown}: section too large"))?;
         if size > 1 << 20 {
-            return Err(format!("{shown}: {name} is {size} bytes, more than a stamp"));
+            return Err(format!(
+                "{shown}: {name} is {size} bytes, more than a stamp"
+            ));
         }
         found.push(read_at(&mut file, u64_at(sh, 0x18), size, &shown)?);
     }
     Ok(found)
 }
 
-fn read_at(file: &mut std::fs::File, offset: u64, len: usize, shown: &str) -> Result<Vec<u8>, String> {
+fn read_at(
+    file: &mut std::fs::File,
+    offset: u64,
+    len: usize,
+    shown: &str,
+) -> Result<Vec<u8>, String> {
     file.seek(SeekFrom::Start(offset))
         .map_err(|e| format!("{shown}: cannot seek to {offset}: {e}"))?;
     let mut buf = vec![0u8; len];
@@ -133,9 +150,12 @@ mod tests {
     #[test]
     fn the_running_test_binary_reads_as_elf() {
         // A test binary is never stamped; reading it must still parse.
-        let found = super::read_sections(std::path::Path::new("/proc/self/exe"), ".brokkr.build_info").unwrap();
+        let found =
+            super::read_sections(std::path::Path::new("/proc/self/exe"), ".brokkr.build_info")
+                .unwrap();
         assert!(found.is_empty());
-        let names = super::read_sections(std::path::Path::new("/proc/self/exe"), ".shstrtab").unwrap();
+        let names =
+            super::read_sections(std::path::Path::new("/proc/self/exe"), ".shstrtab").unwrap();
         assert_eq!(names.len(), 1);
         assert!(names[0].windows(9).any(|w| w == b".shstrtab"));
     }

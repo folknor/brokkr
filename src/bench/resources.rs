@@ -212,9 +212,9 @@ impl Resources {
         let file = self.iteration.open_file(path)?;
         let mut bytes = Vec::new();
         let cap = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
-        file.take(cap)
-            .read_to_end(&mut bytes)
-            .map_err(|e| DevError::Config(format!("cannot read {}: {e}", crate::output::path(path))))?;
+        file.take(cap).read_to_end(&mut bytes).map_err(|e| {
+            DevError::Config(format!("cannot read {}: {e}", crate::output::path(path)))
+        })?;
         Ok((bytes.len() <= limit).then_some(bytes))
     }
 
@@ -224,9 +224,12 @@ impl Resources {
         let file = self.open_file(handle)?;
         let mut bytes = Vec::new();
         let cap = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
-        file.take(cap)
-            .read_to_end(&mut bytes)
-            .map_err(|e| DevError::Config(format!("cannot read {}: {e}", crate::output::path(&handle.path))))?;
+        file.take(cap).read_to_end(&mut bytes).map_err(|e| {
+            DevError::Config(format!(
+                "cannot read {}: {e}",
+                crate::output::path(&handle.path)
+            ))
+        })?;
         if bytes.len() > limit {
             return Err(DevError::Config(format!(
                 "{} holds more than {limit} bytes, the most a script's string holds",

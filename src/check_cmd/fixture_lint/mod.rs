@@ -105,7 +105,10 @@ fn seed_lock(
     let Ok(main_lock) = std::fs::read(main_lock_path) else {
         fail(
             &f.name,
-            &format!("seed_lock: no main lock at {}", output::path(main_lock_path)),
+            &format!(
+                "seed_lock: no main lock at {}",
+                output::path(main_lock_path)
+            ),
         );
         return Ok(false);
     };
@@ -204,7 +207,8 @@ fn lint_fixture(
     {
         Ok(m) => m,
         Err(e) => {
-            fail(&f.name, &format!("manifest {}: {e}", output::path(&f.manifest)));
+            let shown = output::path(&f.manifest);
+            fail(&f.name, &format!("manifest {shown}: {e}"));
             return Ok(None);
         }
     };

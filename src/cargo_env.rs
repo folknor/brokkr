@@ -274,7 +274,10 @@ pub fn apply(
             Err(Failure::Interrupted) => return Err(DevError::Interrupted),
             Err(Failure::Failed(why)) => {
                 return Err(record(
-                    format!("{name}: `{command}` (in {}) {why}", crate::output::path(&dir)),
+                    format!(
+                        "{name}: `{command}` (in {}) {why}",
+                        crate::output::path(&dir)
+                    ),
                     phase,
                 ));
             }

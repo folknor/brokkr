@@ -777,11 +777,7 @@ fn hard_kill(info: &lockfile::LockInfo) -> Result<(), DevError> {
         // so the member sweep covers its group once it is gone. A process
         // that led no group leaves no members carrying its pid as pgid.
         if matches!(delivery, Ok(false)) || (matches!(delivery, Ok(true)) && !target.pg_leader) {
-            leaderless.push((
-                target.role,
-                target.pid,
-                target.process.identity().start(),
-            ));
+            leaderless.push((target.role, target.pid, target.process.identity().start()));
         }
         output::lock_msg(&format!(
             "SIGKILL {} {kind} {}: {}",

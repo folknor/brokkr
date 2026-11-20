@@ -69,7 +69,9 @@ pub(crate) struct ElementComparisonPolicy {
 const ZERO_HEIGHT_THRESHOLD: f64 = 0.05;
 
 impl ElementComparisonPolicy {
-    pub(crate) fn from_config(config: &crate::config::project_config::litehtml::LitehtmlConfig) -> Self {
+    pub(crate) fn from_config(
+        config: &crate::config::project_config::litehtml::LitehtmlConfig,
+    ) -> Self {
         Self {
             position_tolerance: config.effective_position_tolerance(),
             size_tolerance: config.effective_size_tolerance(),
@@ -150,15 +152,32 @@ pub(crate) fn compare_elements(
     reference_json: &Path,
     policy: ElementComparisonPolicy,
 ) -> Result<ElementMatchResult, DevError> {
-    let pipeline_text = std::fs::read_to_string(pipeline_json)
-        .map_err(|e| DevError::Verify(format!("cannot read {}: {e}", crate::output::path(pipeline_json))))?;
-    let reference_text = std::fs::read_to_string(reference_json)
-        .map_err(|e| DevError::Verify(format!("cannot read {}: {e}", crate::output::path(reference_json))))?;
+    let pipeline_text = std::fs::read_to_string(pipeline_json).map_err(|e| {
+        DevError::Verify(format!(
+            "cannot read {}: {e}",
+            crate::output::path(pipeline_json)
+        ))
+    })?;
+    let reference_text = std::fs::read_to_string(reference_json).map_err(|e| {
+        DevError::Verify(format!(
+            "cannot read {}: {e}",
+            crate::output::path(reference_json)
+        ))
+    })?;
 
-    let pipeline_elems: Vec<LayoutElement> = serde_json::from_str(&pipeline_text)
-        .map_err(|e| DevError::Verify(format!("invalid JSON {}: {e}", crate::output::path(pipeline_json))))?;
-    let reference_elems: Vec<LayoutElement> = serde_json::from_str(&reference_text)
-        .map_err(|e| DevError::Verify(format!("invalid JSON {}: {e}", crate::output::path(reference_json))))?;
+    let pipeline_elems: Vec<LayoutElement> = serde_json::from_str(&pipeline_text).map_err(|e| {
+        DevError::Verify(format!(
+            "invalid JSON {}: {e}",
+            crate::output::path(pipeline_json)
+        ))
+    })?;
+    let reference_elems: Vec<LayoutElement> =
+        serde_json::from_str(&reference_text).map_err(|e| {
+            DevError::Verify(format!(
+                "invalid JSON {}: {e}",
+                crate::output::path(reference_json)
+            ))
+        })?;
 
     Ok(compare_element_sets_with_policy(
         &pipeline_elems,

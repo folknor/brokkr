@@ -246,7 +246,10 @@ pub fn read(crit_home: &Path, baseline: &str) -> Result<Option<Stamp>, DevError>
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(DevError::Io(std::io::Error::new(
             e.kind(),
-            format!("cannot read baseline stamp {}: {e}", crate::output::path(&path)),
+            format!(
+                "cannot read baseline stamp {}: {e}",
+                crate::output::path(&path)
+            ),
         ))),
     }
 }

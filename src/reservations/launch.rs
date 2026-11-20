@@ -74,8 +74,12 @@ impl LaunchSpec {
         let _serial = super::serialize().map_err(|e| io_error("cannot admit a launch", e))?;
         let scan = store.scan();
         let spell = |path: &Path| {
-            Spelled::of(path, &self.cwd)
-                .map_err(|e| io_error(&format!("cannot resolve launch path {}", crate::output::path(path)), e))
+            Spelled::of(path, &self.cwd).map_err(|e| {
+                io_error(
+                    &format!("cannot resolve launch path {}", crate::output::path(path)),
+                    e,
+                )
+            })
         };
         let mut resources: Vec<Resource> = Vec::new();
         for (path, access) in self
@@ -211,7 +215,10 @@ pub(super) fn make_private_dir(
             let forgotten = lease.forget(index);
             let released = lease.release();
             Err(io_error(
-                &format!("cannot create the private directory {}", crate::output::path(dir)),
+                &format!(
+                    "cannot create the private directory {}",
+                    crate::output::path(dir)
+                ),
                 forgotten.and(released).err().unwrap_or(e),
             ))
         }
@@ -222,7 +229,10 @@ pub(super) fn make_private_dir(
                 // removes it with the lease, or a later scan does.
                 let released = lease.release();
                 Err(io_error(
-                    &format!("cannot record the private directory {}", crate::output::path(dir)),
+                    &format!(
+                        "cannot record the private directory {}",
+                        crate::output::path(dir)
+                    ),
                     released.err().unwrap_or(e),
                 ))
             }
@@ -335,7 +345,10 @@ impl Drop for ReadHold {
 fn check_placement(location: &Path, writes: &[PathBuf], cwd: &Path) -> Result<(), DevError> {
     let here = mount_identity(location).map_err(|e| {
         io_error(
-            &format!("cannot place a private directory in {}", crate::output::path(location)),
+            &format!(
+                "cannot place a private directory in {}",
+                crate::output::path(location)
+            ),
             e,
         )
     })?;

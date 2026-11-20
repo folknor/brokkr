@@ -218,7 +218,10 @@ impl Iteration {
                 // The directory is the lease's: the release removes it.
                 let released = lease.release();
                 Err(io_error(
-                    &format!("cannot lay out the iteration directory {}", crate::output::path(&dir)),
+                    &format!(
+                        "cannot lay out the iteration directory {}",
+                        crate::output::path(&dir)
+                    ),
                     released.err().unwrap_or(e),
                 ))
             }
@@ -362,7 +365,12 @@ impl Iteration {
                 &name,
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
             )
-            .map_err(|e| io_error(&format!("cannot make report {}", crate::output::path(path)), e))?;
+            .map_err(|e| {
+                io_error(
+                    &format!("cannot make report {}", crate::output::path(path)),
+                    e,
+                )
+            })?;
             names_inode(path, &made)?;
         }
         let borrow = store
@@ -395,10 +403,18 @@ impl Iteration {
             name,
             libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
         )
-        .map_err(|e| io_error(&format!("cannot make spool {}", crate::output::path(path)), e))?;
-        let pin = file
-            .try_clone()
-            .map_err(|e| io_error(&format!("cannot pin spool {}", crate::output::path(path)), e))?;
+        .map_err(|e| {
+            io_error(
+                &format!("cannot make spool {}", crate::output::path(path)),
+                e,
+            )
+        })?;
+        let pin = file.try_clone().map_err(|e| {
+            io_error(
+                &format!("cannot pin spool {}", crate::output::path(path)),
+                e,
+            )
+        })?;
         self.spools.push(PinnedSpool {
             path: path.to_path_buf(),
             file: pin,
@@ -454,7 +470,8 @@ impl Iteration {
             )],
         )?;
         let area = self.verified(Area::Out)?;
-        let failed = |e: io::Error| io_error(&format!("cannot write {}", crate::output::path(path)), e);
+        let failed =
+            |e: io::Error| io_error(&format!("cannot write {}", crate::output::path(path)), e);
         match unlink_at(&area.file, &name) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -544,7 +561,10 @@ impl Iteration {
     /// this iteration made there.
     fn check_spool(&self, path: &Path, file: &File) -> Result<(), DevError> {
         let pinned = self.spools.iter().find(|s| s.path == path).ok_or_else(|| {
-            DevError::Config(format!("{} is no spool of this iteration", crate::output::path(path)))
+            DevError::Config(format!(
+                "{} is no spool of this iteration",
+                crate::output::path(path)
+            ))
         })?;
         let (a, b) = (file.metadata()?, pinned.file.metadata()?);
         if (a.dev(), a.ino()) == (b.dev(), b.ino()) {

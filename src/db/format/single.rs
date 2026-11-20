@@ -18,7 +18,6 @@ use super::table::{format_wall, format_wall_value};
 ///
 /// Plus trailing sections for distribution stats and kv pairs when present.
 pub fn format_single_result(row: &StoredRow, has_sidecar: bool) -> String {
-
     let ident = identity_fields(row);
     let host = host_fields(row);
     let env = env_fields(row);

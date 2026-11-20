@@ -71,9 +71,12 @@ fn decode_png(path: &Path) -> Result<DecodedPng, DevError> {
         ))
     })?;
     let mut buf = vec![0u8; buf_size];
-    let output_info = reader
-        .next_frame(&mut buf)
-        .map_err(|e| DevError::Verify(format!("PNG decode error {}: {e}", crate::output::path(path))))?;
+    let output_info = reader.next_frame(&mut buf).map_err(|e| {
+        DevError::Verify(format!(
+            "PNG decode error {}: {e}",
+            crate::output::path(path)
+        ))
+    })?;
     buf.truncate(output_info.buffer_size());
 
     Ok(DecodedPng {
@@ -151,7 +154,10 @@ fn pad_to_size(img: &DecodedPng, target_w: u32, target_h: u32) -> Vec<u8> {
 
 fn write_diff_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), DevError> {
     let file = std::fs::File::create(path).map_err(|e| {
-        DevError::Verify(format!("cannot create diff image {}: {e}", crate::output::path(path)))
+        DevError::Verify(format!(
+            "cannot create diff image {}: {e}",
+            crate::output::path(path)
+        ))
     })?;
     let w = std::io::BufWriter::new(file);
     let mut encoder = png::Encoder::new(w, width, height);

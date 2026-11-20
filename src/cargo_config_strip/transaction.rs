@@ -85,7 +85,10 @@ fn exists(path: &Path) -> Result<bool, DevError> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(io_error(&format!("cannot inspect {}", crate::output::path(path)), &e)),
+        Err(e) => Err(io_error(
+            &format!("cannot inspect {}", crate::output::path(path)),
+            &e,
+        )),
     }
 }
 
@@ -131,7 +134,10 @@ fn remove(path: &Path) -> Result<(), DevError> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(io_error(
-            &format!("cargo config strip: cannot remove {}", crate::output::path(path)),
+            &format!(
+                "cargo config strip: cannot remove {}",
+                crate::output::path(path)
+            ),
             &e,
         )),
     }
@@ -150,7 +156,12 @@ fn regular(path: &Path) -> Result<Option<(Vec<u8>, u32)>, DevError> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(io_error(&format!("cannot inspect {}", crate::output::path(path)), &e)),
+        Err(e) => {
+            return Err(io_error(
+                &format!("cannot inspect {}", crate::output::path(path)),
+                &e,
+            ));
+        }
     };
     if !meta.file_type().is_file() {
         return Ok(None);
@@ -386,13 +397,14 @@ pub fn install(
     live: &Path,
     filter: impl Fn(&str) -> Result<Option<String>, DevError>,
 ) -> Result<Option<Installed>, DevError> {
+    let shown = crate::output::path(live);
     let cargo_dir = live
         .parent()
-        .ok_or_else(|| DevError::Internal(format!("{} has no parent", crate::output::path(live))))?;
+        .ok_or_else(|| DevError::Internal(format!("{shown} has no parent")))?;
     let base = live
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| DevError::Internal(format!("{} has no file name", crate::output::path(live))))?;
+        .ok_or_else(|| DevError::Internal(format!("{shown} has no file name")))?;
     let n = names(cargo_dir, base);
     let Some(_guard) = txn() else {
         return Err(DevError::Interrupted);
@@ -402,7 +414,7 @@ pub fn install(
             conflict(cargo_dir, base)
         } else {
             io_error(
-                &format!("cargo config strip: cannot move {} aside", crate::output::path(&n.live)),
+                &format!("cargo config strip: cannot move {shown} aside"),
                 &e,
             )
         }
@@ -469,7 +481,7 @@ pub fn install(
             return Err(conflict(cargo_dir, base));
         }
         return Err(put_back(io_error(
-            &format!("cargo config strip: cannot install {}", crate::output::path(&n.live)),
+            &format!("cargo config strip: cannot install {shown}"),
             &e,
         )));
     }

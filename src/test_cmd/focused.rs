@@ -122,8 +122,9 @@ pub(crate) fn eligibility(binaries: &[TestBinary]) -> Result<Eligibility<'_>, De
                     b.label()
                 ))
             })?;
-            let parsed = ManifestHarness::parse(&text)
-                .map_err(|e| DevError::Config(format!("cannot parse {}: {e}", crate::output::path(&path))))?;
+            let parsed = ManifestHarness::parse(&text).map_err(|e| {
+                DevError::Config(format!("cannot parse {}: {e}", crate::output::path(&path)))
+            })?;
             manifests.insert(path.clone(), parsed);
         }
         if manifests.get(&path).is_some_and(|m| m.excludes(b)) {

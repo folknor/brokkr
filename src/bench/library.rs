@@ -130,7 +130,10 @@ fn collect(
     use std::io::Read as _;
     use std::os::fd::AsRawFd as _;
     let unreadable = |path: &Path, e: std::io::Error| {
-        DevError::Config(format!("bench_lib: {} cannot be read: {e}", crate::output::path(path)))
+        DevError::Config(format!(
+            "bench_lib: {} cannot be read: {e}",
+            crate::output::path(path)
+        ))
     };
     // The names of the directory held open, whatever its path names now.
     let listing = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));

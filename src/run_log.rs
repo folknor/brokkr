@@ -208,9 +208,10 @@ fn remove_logs(paths: Vec<PathBuf>) -> Vec<String> {
     paths
         .into_iter()
         .filter_map(|path| match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                Some(format!("could not prune {}: {e}", crate::output::path(&path)))
-            }
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Some(format!(
+                "could not prune {}: {e}",
+                crate::output::path(&path)
+            )),
             _ => None,
         })
         .collect()

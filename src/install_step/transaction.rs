@@ -219,7 +219,10 @@ pub(super) fn install(
         Ok(_) => {
             return Err(failed(
                 step,
-                &format!("{} was replaced while staging", crate::output::path(&container_path)),
+                &format!(
+                    "{} was replaced while staging",
+                    crate::output::path(&container_path)
+                ),
             ));
         }
         Err(e) => {
@@ -550,7 +553,12 @@ fn recover(registry: &Registry, record: &mut Record) -> Result<(), String> {
                         crate::output::path(&container_path)
                     ));
                 }
-                Err(e) => return Err(format!("cannot remove {}: {e}", crate::output::path(&container_path))),
+                Err(e) => {
+                    return Err(format!(
+                        "cannot remove {}: {e}",
+                        crate::output::path(&container_path)
+                    ));
+                }
             }
             tree::fsync_dir(&parent)
                 .map_err(|e| format!("cannot fsync {}: {e}", crate::output::path(&parent)))?;
@@ -586,8 +594,9 @@ fn recover(registry: &Registry, record: &mut Record) -> Result<(), String> {
             }
             tree::fsync_dir(&parent)
                 .map_err(|e| format!("cannot fsync {}: {e}", crate::output::path(&parent)))?;
-            tree::fsync_dir(&container_path)
-                .map_err(|e| format!("cannot fsync {}: {e}", crate::output::path(&container_path)))?;
+            tree::fsync_dir(&container_path).map_err(|e| {
+                format!("cannot fsync {}: {e}", crate::output::path(&container_path))
+            })?;
             let live = tree::observe(&destination).map_err(|e| e.to_string())?;
             let in_container =
                 tree::observe(&container_path.join(PAYLOAD)).map_err(|e| e.to_string())?;

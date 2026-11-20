@@ -526,8 +526,13 @@ fn resolve_install_packages(
         let package = metadata
             .packages
             .iter()
-            .find(|p| &p.name == pkg && Path::new(&p.manifest_path).parent() == Some(first.package_dir.as_path()))
-            .ok_or_else(|| DevError::Internal(format!("package '{pkg}' left the metadata snapshot")))?;
+            .find(|p| {
+                &p.name == pkg
+                    && Path::new(&p.manifest_path).parent() == Some(first.package_dir.as_path())
+            })
+            .ok_or_else(|| {
+                DevError::Internal(format!("package '{pkg}' left the metadata snapshot"))
+            })?;
         out.push(InstallPackage {
             name: pkg.clone(),
             package_dir: first.package_dir.clone(),
@@ -684,7 +689,10 @@ pub fn cmd_install(
         // Captured like `run`'s build: progress held back, diagnostics on
         // failure. Nothing replays compiler warnings after an install, so
         // they print here on success.
-        cargo_args.splice(1..1, ["--color=never".into(), "--message-format=json".into()]);
+        cargo_args.splice(
+            1..1,
+            ["--color=never".into(), "--message-format=json".into()],
+        );
         crate::build::cargo_captured(
             &cargo_args,
             &shape.env,
@@ -726,7 +734,10 @@ fn stamp_installed(
     let bins = match &package.bins {
         Ok(bins) => bins,
         Err(e) => {
-            output::warn(&format!("{e} - {}'s bins carry no build stamp", package.name));
+            output::warn(&format!(
+                "{e} - {}'s bins carry no build stamp",
+                package.name
+            ));
             return Ok(());
         }
     };

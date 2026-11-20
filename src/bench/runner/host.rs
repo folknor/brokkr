@@ -954,9 +954,12 @@ fn stored_len(report: &serde_json::Value) -> usize {
 
 /// The report path as the child is told it.
 fn utf8_report(path: &Path) -> Result<String, Abort> {
-    path.to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| Abort::Failed(format!("the report path {} is not UTF-8", crate::output::path(path))))
+    path.to_str().map(str::to_owned).ok_or_else(|| {
+        Abort::Failed(format!(
+            "the report path {} is not UTF-8",
+            crate::output::path(path)
+        ))
+    })
 }
 
 /// The variables a marked call's child gets, whatever the build: an

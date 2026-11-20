@@ -81,7 +81,10 @@ impl ArtefactDir {
         let n = highest_run_number(&test_dir)?
             .checked_add(1)
             .ok_or_else(|| {
-                DevError::Config(format!("{}: run numbers exhausted", crate::output::path(&test_dir)))
+                DevError::Config(format!(
+                    "{}: run numbers exhausted",
+                    crate::output::path(&test_dir)
+                ))
             })?;
         Self::create(&test_dir, n, keep_on_success)
     }
@@ -90,7 +93,10 @@ impl ArtefactDir {
         let run_dir = test_dir.join(format!("run-{n}"));
         fs::create_dir(&run_dir).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
-                DevError::Config(format!("artefact dir {} already exists", crate::output::path(&run_dir)))
+                DevError::Config(format!(
+                    "artefact dir {} already exists",
+                    crate::output::path(&run_dir)
+                ))
             } else {
                 DevError::Io(e)
             }

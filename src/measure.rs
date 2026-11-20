@@ -507,8 +507,8 @@ impl BenchHarness {
         F: Fn(usize, &mut crate::sidecar::SidecarFifo) -> Result<Iteration, DevError>,
     {
         let mut measurement = self.measure(config, Some(program), source, true, |i, fifo| {
-            let fifo = fifo
-                .ok_or_else(|| DevError::Internal("profiled loop owns a FIFO".to_owned()))?;
+            let fifo =
+                fifo.ok_or_else(|| DevError::Internal("profiled loop owns a FIFO".to_owned()))?;
             f(i, fifo)
         })?;
         self.record(config, &mut measurement, |_, _| Ok(()))
@@ -597,8 +597,8 @@ impl BenchHarness {
         let program = invocation.program();
         self.measure(config, Some(program), source, true, |i, fifo| {
             prepare()?;
-            let fifo = fifo
-                .ok_or_else(|| DevError::Internal("external loop owns a FIFO".to_owned()))?;
+            let fifo =
+                fifo.ok_or_else(|| DevError::Internal("external loop owns a FIFO".to_owned()))?;
             let iteration = self.capture(
                 program,
                 &invocation.arg_refs(),

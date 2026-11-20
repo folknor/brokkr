@@ -184,7 +184,8 @@ impl LitehtmlConfig {
     }
 
     pub fn effective_position_tolerance(&self) -> f64 {
-        self.position_tolerance.unwrap_or(DEFAULT_POSITION_TOLERANCE)
+        self.position_tolerance
+            .unwrap_or(DEFAULT_POSITION_TOLERANCE)
     }
 
     pub fn effective_size_tolerance(&self) -> f64 {

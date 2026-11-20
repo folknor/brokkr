@@ -200,6 +200,13 @@ over. Targets are discovered in the worktree, since the commit may predate a
 target or carry one the live tree has dropped. The cargo build's output is
 captured and printed only on failure.
 
+The executable is the one cargo reported for that package and target (bin or
+example, by name), and it has to be exactly one. A build that compiles the
+target more than once - cargo config listing several `build.target`s, or an
+artifact dependency on it - fails rather than guess; this holds wherever
+brokkr runs what `cargo build` produced (`--commit`, `--with`, `build`,
+script benches).
+
 ## `--with`: handing the program another target's path
 
 ```

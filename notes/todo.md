@@ -414,7 +414,7 @@ whose identity rides in the qualifier.
 
 ### Make default binary configurable per-project in brokkr.toml
 
-Currently `find_executable` infers the expected binary name from `BuildConfig.bin` or `BuildConfig.package`. This should be configurable in `brokkr.toml` (e.g. a `default_bin` field per project) so projects with multiple binaries can declare which one brokkr should run by default.
+A build with a package but no `--bin` (a harness without `binary`, passthrough) takes the package's sole bin or the one named like the package, and refuses otherwise (`src/executable_artifact.rs`). This should be configurable in `brokkr.toml` (e.g. a `default_bin` field per project) so projects with multiple binaries can declare which one brokkr should run by default.
 
 ### `Worktree` has no `Drop` impl
 

@@ -19,7 +19,9 @@ pub(crate) fn print_version() {
     };
     output::data_stdout(&format!(
         "local:   {}, protocol {}",
-        local.as_deref().unwrap_or("unstamped (not installed by brokkr install)"),
+        local
+            .as_deref()
+            .unwrap_or("unstamped (not installed by brokkr install)"),
         wire::PROTOCOL_VERSION
     ));
     server_line(local.as_deref());

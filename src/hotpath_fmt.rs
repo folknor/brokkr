@@ -3,7 +3,6 @@
 //! Reads the structured `HotpathData` produced by parsing the hotpath crate's
 //! JSON output, and formats it as column-aligned ASCII tables.
 
-
 use std::collections::BTreeSet;
 
 use crate::db::{HotpathData, HotpathFunction, HotpathThread, KvPair, Percentile, Quantity};

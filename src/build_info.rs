@@ -39,8 +39,10 @@ pub(crate) fn sample(package_dir: &Path) -> Result<Option<Stamp>, DevError> {
         return Ok(None);
     };
     let toplevel = PathBuf::from(toplevel);
-    let Some(sha) = git_line(&toplevel, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
-    else {
+    let Some(sha) = git_line(
+        &toplevel,
+        &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+    ) else {
         return Ok(None);
     };
     if sha.is_empty() || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -236,7 +238,12 @@ pub(crate) fn stamp_file(path: &Path, stamp: &Stamp) -> Result<(), DevError> {
             .arg(path)
             .arg(&scratch.stamped),
     )
-    .map_err(|e| DevError::Build(format!("cannot run objcopy to stamp {}: {e}", crate::output::path(path))))?;
+    .map_err(|e| {
+        DevError::Build(format!(
+            "cannot run objcopy to stamp {}: {e}",
+            crate::output::path(path)
+        ))
+    })?;
     if !out.status.success() {
         return Err(DevError::Build(format!(
             "objcopy could not stamp {}: {}",

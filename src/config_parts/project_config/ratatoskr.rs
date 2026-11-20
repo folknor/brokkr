@@ -336,9 +336,15 @@ mod tests {
         let err = parse_str("[ratatoskr]\ntest_endpoint_env_pop3 = \"X\"\n")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("unknown field `test_endpoint_env_pop3`"), "got: {err}");
+        assert!(
+            err.contains("unknown field `test_endpoint_env_pop3`"),
+            "got: {err}"
+        );
         for (key, _) in KEYS {
-            assert!(err.contains(&format!("`{key}`")), "{key} missing from: {err}");
+            assert!(
+                err.contains(&format!("`{key}`")),
+                "{key} missing from: {err}"
+            );
         }
 
         let err = parse_str("ratatoskr = 5\n").unwrap_err().to_string();

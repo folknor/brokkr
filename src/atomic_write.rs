@@ -401,9 +401,9 @@ fn clear(tmp: &Path) -> std::io::Result<()> {
 }
 
 fn file_name(path: &Path) -> std::io::Result<OsString> {
-    path.file_name()
-        .map(OsStr::to_owned)
-        .ok_or_else(|| std::io::Error::other(format!("{} names no file", crate::output::path(path))))
+    path.file_name().map(OsStr::to_owned).ok_or_else(|| {
+        std::io::Error::other(format!("{} names no file", crate::output::path(path)))
+    })
 }
 
 fn c_name(name: &OsStr) -> std::io::Result<CString> {

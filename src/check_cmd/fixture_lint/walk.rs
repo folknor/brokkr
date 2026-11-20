@@ -89,8 +89,10 @@ fn visit_file(file: &Path, module_dir: &Path, out: &mut Walk) {
     let parsed = match syn::parse_file(&source) {
         Ok(f) => f,
         Err(e) => {
-            out.refusals
-                .push(format!("{}: does not parse: {e}", crate::output::path(file)));
+            out.refusals.push(format!(
+                "{}: does not parse: {e}",
+                crate::output::path(file)
+            ));
             return;
         }
     };

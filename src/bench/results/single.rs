@@ -290,30 +290,30 @@ fn child(out: &mut String, idx: usize, child: &Child) {
     putln(
         out,
         format_args!(
-        "  child {idx}{}  at +{}  {}  {}  {} {}",
-        if child.measured { " (measured)" } else { "" },
-        ms(child.origin_offset_us),
-        ms(child.wall_us),
-        ending(&child.ending),
-        child.program,
-        child.argv.join(" ")
+            "  child {idx}{}  at +{}  {}  {}  {} {}",
+            if child.measured { " (measured)" } else { "" },
+            ms(child.origin_offset_us),
+            ms(child.wall_us),
+            ending(&child.ending),
+            child.program,
+            child.argv.join(" ")
         ),
     );
     putln(
         out,
         format_args!(
-        "           {} samples, {} records{loss}",
-        e.samples.len(),
-        e.records.len()
+            "           {} samples, {} records{loss}",
+            e.samples.len(),
+            e.records.len()
         ),
     );
     if let Some(executable) = &child.executable {
         putln(
             out,
             format_args!(
-            "           executable {}: {}",
-            executable.path,
-            executable_identity(&executable.identity)
+                "           executable {}: {}",
+                executable.path,
+                executable_identity(&executable.identity)
             ),
         );
     }
@@ -323,21 +323,21 @@ fn child(out: &mut String, idx: usize, child: &Child) {
         putln(
             out,
             format_args!(
-            "           page cache ({}), scanned +{} to +{} before launch:",
-            cache.procedure,
-            ms(cache.scan_from_us),
-            ms(cache.scan_to_us)
+                "           page cache ({}), scanned +{} to +{} before launch:",
+                cache.procedure,
+                ms(cache.scan_from_us),
+                ms(cache.scan_to_us)
             ),
         );
         for file in &cache.files {
             putln(
                 out,
                 format_args!(
-                "             {} {}: {} of {} bytes resident",
-                file.mode.name(),
-                file.paths.join(", "),
-                file.resident,
-                file.bytes
+                    "             {} {}: {} of {} bytes resident",
+                    file.mode.name(),
+                    file.paths.join(", "),
+                    file.resident,
+                    file.bytes
                 ),
             );
         }
@@ -353,8 +353,8 @@ fn child(out: &mut String, idx: usize, child: &Child) {
         putln(
             out,
             format_args!(
-            "           hotpath {} #{}: {status}",
-            capture.stage, capture.occurrence
+                "           hotpath {} #{}: {status}",
+                capture.stage, capture.occurrence
             ),
         );
     }
@@ -387,7 +387,10 @@ fn stderr_lines(out: &mut String, stderr: &StderrCapture) {
         StderrTail::OverBudget => ("; over the run's budget, not kept".to_owned(), None),
         StderrTail::Unreadable { reason } => (format!("; unreadable: {reason}"), None),
     };
-    putln(out, format_args!("           stderr {size}{unreleased}{state}"));
+    putln(
+        out,
+        format_args!("           stderr {size}{unreleased}{state}"),
+    );
     let Some(text) = text else { return };
     let lines: Vec<&str> = text.lines().collect();
     let mut shown: Vec<String> = Vec::new();
@@ -464,8 +467,8 @@ fn iterations(out: &mut String, run: &StoredRun) {
         putln(
             out,
             format_args!(
-            "iteration {idx}{result}  {wall}  {}",
-            iteration_outcome(&iteration.outcome)
+                "iteration {idx}{result}  {wall}  {}",
+                iteration_outcome(&iteration.outcome)
             ),
         );
         for line in super::host::iteration_lines(iteration) {

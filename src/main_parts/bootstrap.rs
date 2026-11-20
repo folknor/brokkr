@@ -230,7 +230,10 @@ pub(crate) fn main() {
     // program's, so everything else the run says, from the lock wait on, goes
     // to stderr.
     if matches!(command_id, cli::CommandId::Build | cli::CommandId::Run)
-        || matches!(cli.command, Command::Install(cli::InstallCmd { names: true, .. }))
+        || matches!(
+            cli.command,
+            Command::Install(cli::InstallCmd { names: true, .. })
+        )
     {
         output::reserve_stdout();
     }

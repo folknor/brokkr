@@ -426,7 +426,10 @@ impl Plan<'_> {
         if dest.path.starts_with(&home.state_dir) {
             return Err(refused(
                 step,
-                &format!("{} is inside brokkr's state directory", crate::output::path(&dest.path)),
+                &format!(
+                    "{} is inside brokkr's state directory",
+                    crate::output::path(&dest.path)
+                ),
             ));
         }
         if dest.path.starts_with(source) || source.starts_with(&dest.path) {
@@ -524,13 +527,21 @@ fn resolve(to: &str, home: &Path, create: bool) -> Result<Resolved, String> {
                     .ok_or_else(|| format!("{} does not exist", crate::output::path(&base)))?
                     .to_path_buf();
             }
-            Err(e) => return Err(format!("cannot inspect {}: {e}", crate::output::path(&base))),
+            Err(e) => {
+                return Err(format!(
+                    "cannot inspect {}: {e}",
+                    crate::output::path(&base)
+                ));
+            }
         }
     }
     let mut parent = std::fs::canonicalize(&base)
         .map_err(|e| format!("cannot resolve {}: {e}", crate::output::path(&base)))?;
     if !parent.is_dir() {
-        return Err(format!("{} is not a directory", crate::output::path(&parent)));
+        return Err(format!(
+            "{} is not a directory",
+            crate::output::path(&parent)
+        ));
     }
     // Below the home, every directory from it down to the parent is created
     // and synced on each creating call, so one an earlier install created and
@@ -555,8 +566,12 @@ fn resolve(to: &str, home: &Path, create: bool) -> Result<Resolved, String> {
         parent = next;
     }
     if anchored {
-        crate::atomic_write::create_dir_all_durable(home, &parent)
-            .map_err(|e| format!("cannot create {} durably: {e}", crate::output::path(&parent)))?;
+        crate::atomic_write::create_dir_all_durable(home, &parent).map_err(|e| {
+            format!(
+                "cannot create {} durably: {e}",
+                crate::output::path(&parent)
+            )
+        })?;
     }
     if create {
         parent = std::fs::canonicalize(&parent)
