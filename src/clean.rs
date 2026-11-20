@@ -552,21 +552,6 @@ fn clean_artefact_trees(
         }
     }
 
-    if *project == Project::Piners {
-        let piners = state.piners();
-        let corpus = piners.corpus_root();
-        let removed = clean_artifact_children(&corpus, &[piners.corpus_runs_db()], c)?;
-        if removed > 0 {
-            output::run_msg(&format!(
-                "{} {} in piners corpus",
-                c.verb(),
-                output::count(removed, "artefact directory")
-            ));
-        }
-        // The lint root currently holds only its permanent runs.db (and
-        // SQLite sidecars); lint runs create no per-run artifact directories.
-        // Keeping that path outside the artifact sweep is deliberate.
-    }
     Ok(())
 }
 

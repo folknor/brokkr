@@ -455,10 +455,6 @@ pub fn ratatoskr_msg(msg: &str) {
     emit_tag("[ratatoskr]", msg);
 }
 
-pub fn corpus_msg(msg: &str) {
-    emit_tag("[corpus]", msg);
-}
-
 /// `brokkr install`'s `[[install]]` steps, announced like its cargo runs.
 pub fn install_msg(msg: &str) {
     emit_tag("[install]", msg);
@@ -711,7 +707,6 @@ mod channel_tests {
                 litehtml_msg,
                 sluggrs_msg,
                 ratatoskr_msg,
-                corpus_msg,
                 deps_msg,
                 install_msg,
                 wc_msg,
@@ -755,7 +750,7 @@ mod channel_tests {
         assert!(stdout.contains("[result]  unretrievable result\n"));
         assert!(stdout.contains("[warn]    visible warning\n"));
         assert!(stdout.contains("\r\x1b[2K[test]    clears status\n"));
-        assert_eq!(log.matches("logged action").count(), 13);
+        assert_eq!(log.matches("logged action").count(), 12);
         assert!(!log.contains('\x1b'));
         assert!(stderr.contains("[sidecar] query provenance\n"));
         assert!(stderr.contains("[sidecar] unstored session\n"));

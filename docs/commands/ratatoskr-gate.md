@@ -172,8 +172,7 @@ a lost row cannot be reconstructed from git.
 Accordingly it has no retention or pruning policy (the store is
 insert-and-select only), and `brokkr clean` does not touch it: a clean
 removes the artefact and `mock/` **directories** under
-`.brokkr/ratatoskr` and spares every file at that level. This is the
-same carve-out piners' `runs.db` gets. `brokkr kill`'s graceful path runs
+`.brokkr/ratatoskr` and spares every file at that level. `brokkr kill`'s graceful path runs
 no clean, so a SIGTERM'd bench keeps its artefact directories as well as
 the baselines.
 

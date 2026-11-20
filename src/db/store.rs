@@ -28,19 +28,12 @@ pub(crate) fn column_exists(
     column: &str,
 ) -> Result<bool, DevError> {
     let quoted_table = format!("\"{}\"", table.replace('"', "\"\""));
-    // `table_xinfo` also sees generated columns, which piners uses to verify
-    // its projected schema during migration.
+    // `table_xinfo` also sees generated columns.
     let mut stmt = conn.prepare(&format!("PRAGMA table_xinfo({quoted_table})"))?;
     let columns = stmt
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(columns.iter().any(|name| name == column))
-}
-
-/// Convert a count or size to SQLite's signed integer domain, saturating
-/// instead of wrapping when the input is too large.
-pub(crate) fn as_i64<T: TryInto<i64>>(value: T) -> i64 {
-    value.try_into().unwrap_or(i64::MAX)
 }
 
 /// Open a database for a store that may create or migrate data.

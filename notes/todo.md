@@ -298,7 +298,7 @@ distinct queries run concurrently.
 `docs/commands/clean.md`'s run-artefact bullet ends "through the reservation
 gate" after a list that includes `.brokkr/artifacts/`, `.brokkr/test-hung/` and
 the unify/fixture target dirs, but `src/clean.rs` removes those with the plain
-`Cleaner::dir`; only the verify reference cache and ratatoskr/piners run trees
+`Cleaner::dir`; only the verify reference cache and ratatoskr run trees
 use `guarded_dir`. A script bench is unaffected (clean waits on the global lock
 it holds), but an outside script still running a `brokkr build` snapshot is
 not. Either gate the artifact store or reword the bullet per directory.

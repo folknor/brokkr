@@ -14,7 +14,6 @@ pub enum ProjectConfig {
     Sluggrs(sluggrs::SluggrsConfig),
     /// Boxed: the largest section, reached only through [`Self::ratatoskr`].
     Ratatoskr(Box<ratatoskr::RatatoskrConfig>),
-    Piners(piners::PinersConfig),
     Mogwai(mogwai::MogwaiConfig),
     Generic,
 }
@@ -28,9 +27,10 @@ impl ProjectConfig {
             Project::Litehtml => Ok(Self::Litehtml(litehtml::parse(table)?)),
             Project::Sluggrs => Ok(Self::Sluggrs(sluggrs::parse(table)?)),
             Project::Ratatoskr => Ok(Self::Ratatoskr(Box::new(ratatoskr::parse(table)?))),
-            // Piners keeps its documented path defaults when the table is
-            // absent; the other project handlers require their section.
-            Project::Piners => Ok(Self::Piners(piners::parse(table)?.unwrap_or_default())),
+            Project::Piners => {
+                self::piners::note_retired(table);
+                Ok(Self::Generic)
+            }
             Project::Dellingr => {
                 self::dellingr::note_retired(table);
                 Ok(Self::Generic)
@@ -47,16 +47,6 @@ impl ProjectConfig {
             Self::Ratatoskr(cfg) => Ok(&**cfg),
             _ => Err(DevError::Config(
                 "this command needs a ratatoskr project (`project = \"ratatoskr\"`)".into(),
-            )),
-        }
-    }
-
-    /// The `[piners]` section, defaulted at load when the table is absent.
-    pub(crate) fn piners(&self) -> Result<&piners::PinersConfig, DevError> {
-        match self {
-            Self::Piners(cfg) => Ok(cfg),
-            _ => Err(DevError::Config(
-                "this command needs a piners project (`project = \"piners\"`)".into(),
             )),
         }
     }

@@ -41,7 +41,6 @@ The measurement stores are never removed, by any flag combination:
 | `.brokkr/sluggrs-visual.db` | sluggrs visual runs, results, and approvals |
 | `$XDG_DATA_HOME/brokkr/history.db` | global command history |
 | `$XDG_DATA_HOME/brokkr/bench.db` | every attempted script-bench run, all projects |
-| `.brokkr/piners/corpus/runs.db` | the corpus run store, source of truth |
 | `.brokkr/ratatoskr/gate.db` | the gate baselines |
 | `.brokkr/library-certifications/` | certification records an earlier brokkr's library verification wrote; small, and nothing writes them any more |
 | `.brokkr/bench/` | `brokkr crit`'s criterion baselines + their environment stamps |
@@ -158,9 +157,10 @@ Bare `brokkr clean`, in order:
 - **Elivagar**: nothing. elivagar-devkit's own clean took over what brokkr
   swept for it (scratch, `tilegen_tmp`, `corpus-calibrands/`, the corpus-sort
   spill directories and the tilegen archive store).
+- **Piners**: nothing. The in-tree corpus tool's own `clean` took over the
+  run directories under `.brokkr/piners/corpus/`.
 - **Run-artefact trees**: the named `.brokkr/ratatoskr/{service,service-mock,sync,mock}/`
-  trees and child directories under `.brokkr/piners/corpus/` (the `gate.db`
-  and `runs.db` paths are protected), `.brokkr/test-hung/`, the isolated
+  trees, `.brokkr/test-hung/`, the isolated
   feature-unification and fixture-lint targets, `<target>/unify-*` and
   `<target>/fixture-*` under cargo's resolved target root, which nothing
   else removes, `.brokkr/artifacts/` (the `brokkr build` snapshots), and
@@ -189,7 +189,7 @@ No clean runs after an interrupted command (Ctrl-C, `brokkr kill`). A sweep
 there would run after the command released the brokkr lock, while another
 brokkr may already be using the same paths, and the routine set holds what
 runs keep on purpose for later: hung-test snapshots, the run directories of
-failed corpus and ratatoskr runs, caches. A script-bench iteration's
+failed ratatoskr runs, caches. A script-bench iteration's
 directory goes with its lease instead. Other disposable working state an
 interrupted command leaves on disk sits under a fixed name its next run
 clears, or goes with the next `brokkr clean`. What a stop records on purpose stays: the partial

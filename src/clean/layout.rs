@@ -165,10 +165,6 @@ impl ProjectState {
         RatatoskrLayout::new(&self.root)
     }
 
-    pub(crate) fn piners(&self) -> PinersLayout {
-        PinersLayout::new(&self.root)
-    }
-
     pub(crate) fn litehtml(&self) -> LitehtmlLayout {
         LitehtmlLayout::new(&self.root)
     }
@@ -220,28 +216,6 @@ impl RatatoskrLayout {
     /// Stable readiness sentinel directory for `mock-serve`.
     pub(crate) fn mock_artifacts(&self) -> PathBuf {
         self.root.join("mock")
-    }
-}
-
-/// Piners run artifacts beside the durable corpus and lint databases.
-#[derive(Debug, Clone)]
-pub(crate) struct PinersLayout {
-    root: PathBuf,
-}
-
-impl PinersLayout {
-    fn new(state_root: &Path) -> Self {
-        Self {
-            root: state_root.join("piners"),
-        }
-    }
-
-    pub(crate) fn corpus_root(&self) -> PathBuf {
-        self.root.join("corpus")
-    }
-
-    pub(crate) fn corpus_runs_db(&self) -> PathBuf {
-        self.corpus_root().join("runs.db")
     }
 }
 

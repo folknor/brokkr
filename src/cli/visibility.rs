@@ -112,9 +112,7 @@ Hotpath => ("hotpath", Visibility::Only(&[Project::Sluggrs]), Required, Blocking
 Mogwai => ("mogwai", Visibility::Only(&[Project::Mogwai]), Required, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
 Service => ("service", Visibility::Only(&[Project::Ratatoskr]), Required, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Sync => ("sync", Visibility::Only(&[Project::Ratatoskr]), Required, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
-MockServe => ("mock-serve", Visibility::Only(&[Project::Ratatoskr]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Corpus => ("corpus", Visibility::Only(&[Project::Piners]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
-CorpusResults => ("corpus-results", Visibility::Only(&[Project::Piners]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),}
+MockServe => ("mock-serve", Visibility::Only(&[Project::Ratatoskr]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),}
 
 static INVOCATION: std::sync::OnceLock<CommandId> = std::sync::OnceLock::new();
 pub(crate) fn set_invocation(command: CommandId) {
@@ -223,8 +221,7 @@ impl CommandSpec {
                 }
                 super::Command::Build(super::BuildCmd { commit, .. })
                 | super::Command::Crit(super::CritCmd { commit, .. })
-                | super::Command::Sync(super::SyncCmd { commit, .. })
-                | super::Command::Corpus(super::CorpusCmd { commit, .. }) => Ok(commit.is_some()),
+                | super::Command::Sync(super::SyncCmd { commit, .. }) => Ok(commit.is_some()),
                 // Every build is a worktree's once one commit is given, the
                 // `--rounds` competitors included.
                 super::Command::Bench(super::BenchCmd { commit, .. }) => Ok(!commit.is_empty()),

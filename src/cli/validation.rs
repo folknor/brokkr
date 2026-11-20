@@ -463,58 +463,6 @@ mod tests {
         assert_eq!(repeat.get(), 3);
     }
 
-    /// A parity run builds the harness, so it takes `--commit`; the corpus
-    /// operations that build nothing refuse it.
-    #[test]
-    fn corpus_commit_needs_a_build() {
-        assert!(parse(["brokkr", "corpus", "--all", "--commit", "abc123"]).is_ok());
-        assert!(parse(["brokkr", "corpus", "--all", "--bless", "--commit", "abc123"]).is_ok());
-        assert!(
-            parse([
-                "brokkr",
-                "corpus",
-                "--all",
-                "--verify-only",
-                "--commit",
-                "abc123"
-            ])
-            .is_err()
-        );
-        assert!(
-            parse([
-                "brokkr", "corpus", "--all", "--reseed", "--commit", "abc123"
-            ])
-            .is_err()
-        );
-    }
-
-    /// Corpus is not measurable: piners' corpus binary carries no profiler
-    /// and no timing contract, so the measurement and measured-run flags
-    /// are refused at parse instead of building something that cannot
-    /// report, and the shared flags a parity run never read are gone too.
-    #[test]
-    fn corpus_takes_no_measurement_flags() {
-        for flag in [
-            "--bench",
-            "--hotpath",
-            "--alloc",
-            "--force",
-            "--dry-run",
-            "--verbose",
-        ] {
-            assert!(
-                parse(["brokkr", "corpus", "--all", flag]).is_err(),
-                "{flag}"
-            );
-        }
-        for (flag, value) in [("--stop", "m"), ("--features", "x")] {
-            assert!(
-                parse(["brokkr", "corpus", "--all", flag, value]).is_err(),
-                "{flag}"
-            );
-        }
-    }
-
     #[test]
     fn check_accepts_profile_flag() {
         let parsed = parse(["brokkr", "check", "--profile", "tier1"]).expect("parse");

@@ -149,11 +149,6 @@ pub(crate) fn state_stores(state_root: &Path) -> Vec<Store> {
             remedy: "no pruning: visual results and approvals",
         },
         Store {
-            name: "piners-corpus",
-            path: state.piners().corpus_root(),
-            remedy: "brokkr clean removes run artefacts; runs.db keeps its newest runs",
-        },
-        Store {
             name: "ratatoskr-gate.db",
             path: state.ratatoskr().gate_db(),
             remedy: "no pruning: the gate baselines",

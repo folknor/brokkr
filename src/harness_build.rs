@@ -1,8 +1,7 @@
 //! Cargo builds for command-owned harness binaries.
 //!
 //! Shared by every orchestration command that builds a harness from a
-//! `[*.harness]` block: ratatoskr's `sync` and `service`, piners'
-//! `corpus`. Decoupled from `[[check]]`: an orchestration
+//! `[*.harness]` block, ratatoskr's `sync` and `service`. Decoupled from `[[check]]`: an orchestration
 //! build does not participate in `brokkr check`'s sweep matrix, so everyday
 //! checks don't compile orchestration-only feature graphs.
 //!
@@ -11,8 +10,7 @@
 //! cargo as written, and the built tree and its effective cargo
 //! configuration give them meaning. A
 //! commit that lacks one of those names fails its build with cargo's error;
-//! the `--commit` sections of `docs/commands/sync.md` and
-//! `docs/commands/corpus.md` state this. Reading the spec at the commit would
+//! the `--commit` section of `docs/commands/sync.md` states this. Reading the spec at the commit would
 //! need the project's definitions versioned with its code, which today's
 //! design does not do.
 //!
@@ -33,8 +31,7 @@ pub struct HarnessBuild {
     /// `<target>/<profile dir>/`.
     pub binary: PathBuf,
     /// Directory containing every binary the package produced. Exported to
-    /// a ratatoskr harness as `BROKKR_TEST_BIN_DIR` (the piners corpus
-    /// harness gets no brokkr variables) so spawned-binary tests can find
+    /// a ratatoskr harness as `BROKKR_TEST_BIN_DIR` so spawned-binary tests can find
     /// sibling helpers without re-deriving the cargo target dir. The parent
     /// of the executable cargo reported, so a custom profile's directory
     /// needs no mapping of its own.

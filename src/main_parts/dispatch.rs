@@ -9,17 +9,16 @@ use crate::clean::{cargo_clean_package, cmd_clean};
 use crate::cli::{Cli, Command};
 use crate::command_args::{profile_choice, resolve_features};
 use crate::config::project_config::ProjectConfig;
-use crate::context::with_worktree;
 use crate::env::cmd_env;
 use crate::error::DevError;
 use crate::lock_cmd::{cmd_kill, cmd_lock};
 use crate::passthrough_cmd::{RunOptions, cmd_run};
 use crate::project::Project;
-use crate::request::{CorpusQuery, ResultsQuery, SidecarQuery};
+use crate::request::{ResultsQuery, SidecarQuery};
 use crate::visual_approve_cmd::cmd_approve;
 use crate::{
     check_cmd, cli, context, crit_cmd, history_cmd, invalidate_cmd, litehtml, lockfile, mogwai,
-    output, piners, project, ratatoskr, results_cmd, runnables, sidecar_cmd, sluggrs, test_cmd,
+    output, project, ratatoskr, results_cmd, runnables, sidecar_cmd, sluggrs, test_cmd,
 };
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
@@ -589,44 +588,6 @@ fn run_project(
             };
             results_cmd::cmd_results(dev_config, project_root, &rq)
         }
-        Command::CorpusResults(cli::CorpusResultsCmd {
-            run_id,
-            run,
-            limit,
-            probe,
-            diffs,
-            dispositions,
-            scalars,
-            columns,
-            runtimes,
-            over,
-            trend,
-            where_expr,
-            sql,
-            full,
-            compare,
-        }) => {
-            let cq = CorpusQuery {
-                run_id,
-                run,
-                limit,
-                probe,
-                diffs,
-                dispositions,
-                scalars,
-                columns,
-                runtimes,
-                over,
-                trend,
-                where_expr,
-                sql,
-                full,
-                compare: compare
-                    .map(|values| crate::request::compare_pair(values, "--compare"))
-                    .transpose()?,
-            };
-            piners::corpus_query::cmd(project_root, &cq)
-        }
         Command::Sidecar(cli::SidecarCmd {
             query,
             samples,
@@ -952,58 +913,6 @@ fn run_project(
                 config: cfg,
                 fixture: &fixture,
             })
-        }
-        // ----- piners-only commands -----
-        Command::Corpus(cli::CorpusCmd {
-            keyword,
-            probe,
-            all,
-            verify_only,
-            reseed,
-            bless,
-            attribute,
-            no_gate,
-            no_isolate,
-            debug,
-            release,
-            profile,
-            keep_artefacts,
-            harness_args,
-            commit,
-        }) => {
-            let args = piners::cmd::CorpusArgs {
-                keywords: keyword,
-                probe,
-                all,
-                verify_only,
-                reseed,
-                bless,
-                attributions: piners::bless::parse_attributions(&attribute)?,
-                no_gate,
-                no_isolate,
-                profile_override: profile_choice(debug, release, profile.as_ref()),
-                keep_artefacts,
-                harness_args,
-            };
-            // The parity run (gate + runs.db); corpus has no measured mode
-            // (see the `piners` module docs). Under `--commit` only the
-            // harness build and the recorded commit move to the worktree;
-            // selection, pins, corpus bytes, the harness cwd, runs.db and
-            // artefacts stay on the main tree. `--verify-only` and `--reseed`
-            // build nothing, so clap refuses `--commit` beside them.
-            let piners_cfg = project_config.piners()?;
-            with_worktree(
-                Some(project),
-                &detection.project_root,
-                &detection.build_root,
-                commit.as_deref(),
-                false,
-                &crate::tree_policy::TreePolicy::of(dev_config),
-                context::worktree_keep(dev_config)?,
-                |build_root| {
-                    piners::cmd::corpus(project_root, build_root.as_path(), piners_cfg, &args)
-                },
-            )
         }
     }
 }

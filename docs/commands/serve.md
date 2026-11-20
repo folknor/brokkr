@@ -76,7 +76,7 @@ The check runs where the measurement starts, under its hold, which no serve can
 start inside, so the answer holds for the whole measurement. A measured
 command that builds first is refused after its build. The refusal names the
 live serves and how to stop them. Every other command that takes the lock -
-`check`, `test`, `run`, `build`, a `corpus` run whose wall is incidental -
+`check`, `test`, `run`, `build` -
 proceeds, with one warning naming the serves.
 
 An application's own exclusions are its own: a writer of the store a server

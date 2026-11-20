@@ -15,7 +15,7 @@ upgrade never makes existing history unreadable. A store stamped with a newer
 schema version than this brokkr knows is refused, by queries and writes alike;
 a stamp is never lowered.
 
-Uniform across all projects, piners included (for its hotpath/alloc runs). The
+Uniform across all projects. The
 exception is litehtml, whose only use of `results.db` is the unrelated
 `MechanicalDb` schema: `results` and `sidecar` there read its script-bench
 runs alone and never open that file, and `invalidate`, which reads nothing

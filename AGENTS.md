@@ -18,7 +18,7 @@ The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bar
 - `docs/brokkr.toml.conventions.md` - convention gates: gremlins, textlint, script checks, manifest, rustdoc, fixture lints, dependency rules.
 - `docs/brokkr.toml.bench.md` - script bench config: `[bench.*]`, params and binding, the resolved view, `[bench_params.*]`, `[data]`, `bench_lib`, the `bench` check phase.
 - `docs/brokkr.toml.sweeps.md` - `[[check]]` and `[[lint_sweep]]` sweeps, `[test]` profiles, `[[quarantine]]`.
-- `docs/brokkr.toml.datasets.md`, `docs/brokkr.toml.piners.md` - project config blocks.
+- `docs/brokkr.toml.datasets.md` - the datasets config block.
 - `docs/commands/check.md` - using `brokkr check`.
 - `docs/commands/check.test-lanes.md` - check's test phase and its lanes.
 - `docs/commands/check.hygiene.md` - time ceilings, `brokkr lock` and the lock queue, `brokkr kill`'s scope, strays and orphans, the rustc guard.
@@ -30,7 +30,7 @@ The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bar
 - `reference/bench-store.md` - the store of script-bench runs and the results server wire contract. Read before changing `src/bench/store/`.
 - `reference/results-server.md` - how `brokkr-results-server` is built. Read before changing `src/bin/results_server/`. Running it: `docs/results-server.md`.
 - `reference/bench-resources.md` - what a script-bench iteration owns: leases, admission, handles, placement. Read before changing `src/reservations/iteration.rs` or `src/bench/resources.rs`.
-- `docs/commands/visual.md`, `hotpath.md`, `sync.md`, `ratatoskr-gate.md`, `service.md`, `corpus.md` - project-specific commands.
+- `docs/commands/visual.md`, `hotpath.md`, `sync.md`, `ratatoskr-gate.md`, `service.md` - project-specific commands.
 - `docs/projects/*.md` - per-project commands and internals; pbfhogg uses script benches and generic commands.
 
 ## Architecture
@@ -57,7 +57,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `lock`, `strays [--kill]`, `guard [--install|--remove]`, `kill [--hard] [--project NAME | --all]` - lock status and queue, process hygiene, and stopping this project's commands (another project's only when named).
 - `sidecar <uuid>` - sidecar profiler data.
 - `fmt` - locked `cargo fmt` wrapper.
-- Project-specific: `corpus-results`, `mogwai`, `hotpath` - see the project docs.
+- Project-specific: `mogwai`, `hotpath` - see the project docs.
 
 ## Conventions
 

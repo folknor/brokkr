@@ -25,8 +25,10 @@ reads the ones that apply to it:
 - `[litehtml]` -> `docs/projects/litehtml.md`
 - `[sluggrs]` -> `docs/projects/sluggrs.md`
 - `[ratatoskr]` and `[ratatoskr.harness]` -> `docs/projects/ratatoskr.md`
-- `[piners]` and `[piners.harness]` -> `docs/brokkr.toml.piners.md`; runner
-  behaviour is in `docs/commands/corpus.md`
+- `[piners]` is retired with `brokkr corpus` and `brokkr corpus-results`:
+  it still loads in a piners project, whatever it holds, unvalidated and with
+  a warning, and stays in the composed config a script's `config()` sees;
+  piners runs its parity corpus through its own in-tree tool
 - `[dellingr]` is retired with the `brokkr dellingr` driver: it still loads
   in a dellingr project, whatever it holds, unvalidated and with a warning,
   and stays in the composed config a script's `config()` sees; dellingr
@@ -222,7 +224,6 @@ legacy hostname section, and an unrecognized non-table value is rejected.
 `[mogwai]` belong only to projects with the matching `project` value; a
 section for a different project is a load error. The matching section is
 required for `litehtml-rs`, `sluggrs`, `ratatoskr` and `mogwai`.
-Piners keeps its default corpus and registry paths when `[piners]` is absent.
 Project-specific config details are in the linked project docs at the top of
 this document.
 `[host.<name>]` is also accepted and lets a hostname use a reserved section

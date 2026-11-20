@@ -203,12 +203,6 @@ pub fn commit_subject(repo: &Path, commit: &Commit) -> Result<String, DevError> 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// Whether `repo` has uncommitted changes under the run-record policy.
-/// `None` means git could not answer.
-pub fn has_uncommitted(repo: &Path) -> Option<bool> {
-    Some(TreeState::read(repo)?.for_record())
-}
-
 /// Structured git state for the benchmark harness.
 pub struct GitInfo {
     /// `HEAD`'s fixed-width abbreviation.

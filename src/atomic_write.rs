@@ -1,5 +1,5 @@
 //! Atomic replacement of a file: small hand-curated ones (`brokkr.toml`,
-//! piners' `pins.toml`, the corpus digest, the hash cache and the
+//! the hash cache and the
 //! cargo config edited by `brokkr guard`) through [`replace`], and streamed
 //! ones too large to hold in memory (tool and dataset downloads) through
 //! [`Staged`]; plus a durable tier for the few records crash recovery reads

@@ -60,7 +60,6 @@ mod mogwai;
 mod oom;
 mod output;
 mod passthrough_cmd;
-mod piners;
 mod preflight;
 mod process;
 mod profile;

@@ -1,14 +1,12 @@
 //! Per-run artefact directories for harness-style commands.
 //!
-//! Shared by ratatoskr's service/sync harness (`.brokkr/ratatoskr/...`)
-//! and piners' corpus runner (`.brokkr/piners/...`). The API takes a
-//! generic parent path, so each caller supplies its own `.brokkr/<proj>`
-//! root.
+//! Used by ratatoskr's service/sync harness (`.brokkr/ratatoskr/...`). The
+//! API takes a generic parent path, so each caller supplies its own
+//! `.brokkr/<proj>` root.
 //!
 //! Each run gets `<parent>/<test_id>/run-N/`, where N is one past the
 //! highest `run-N/` present ([`ArtefactDir::allocate`]) - so a number frees
-//! up again once its dir is removed - or a number the caller reserved
-//! ([`ArtefactDir::allocate_at`], piners' run-store id). Callers populate the directory while the run executes
+//! up again once its dir is removed. Callers populate the directory while the run executes
 //! (frame log, event log, /proc snapshots, data-dir copies); when the
 //! run finishes they call [`ArtefactDir::finalize_success`] or
 //! [`ArtefactDir::finalize_failure`] to drive the retention policy:
@@ -33,7 +31,7 @@ use crate::error::DevError;
 /// preserved artefact dirs. Call from any failure path that has just
 /// printed a `FAIL ... (artefacts: <path>)` or "artefacts preserved at
 /// ..." message. `print` is the caller's prefixed printer (for example
-/// `output::ratatoskr_msg` or `output::corpus_msg`), so each project's
+/// `output::ratatoskr_msg`), so each project's
 /// hint carries its own prefix.
 ///
 /// Once per process: the hint is about the command's artefact tree, not
@@ -85,28 +83,6 @@ impl ArtefactDir {
             .ok_or_else(|| {
                 DevError::Config(format!("{}: run numbers exhausted", test_dir.display()))
             })?;
-        Self::create(&test_dir, n, keep_on_success)
-    }
-
-    /// Allocate `<parent>/<test_id>/run-<n>/` for a number the caller
-    /// reserved (piners numbers its dirs by the run-store id, so the dir
-    /// and the row carry one number). Refuses an `n` below 1 and a
-    /// `run-<n>/` that already exists - the creation is exclusive, never a
-    /// reuse.
-    pub fn allocate_at(
-        parent: &Path,
-        test_id: &str,
-        n: i64,
-        keep_on_success: bool,
-    ) -> Result<Self, DevError> {
-        validate_test_id(test_id)?;
-        if n < 1 {
-            return Err(DevError::Config(format!(
-                "artefact run number must be positive (got {n})"
-            )));
-        }
-        let test_dir = parent.join(test_id);
-        fs::create_dir_all(&test_dir)?;
         Self::create(&test_dir, n, keep_on_success)
     }
 
@@ -247,18 +223,6 @@ mod tests {
         let dir = ArtefactDir::allocate(&parent, "test_beta", false).unwrap();
         assert_eq!(dir.path().file_name().unwrap(), "run-4");
         dir.finalize_failure();
-    }
-
-    #[test]
-    fn allocate_at_takes_the_given_number_and_refuses_an_existing_one() {
-        let parent = tmpdir("artefacts_allocate_at");
-        let dir = ArtefactDir::allocate_at(&parent, "corpus", 2403, false).unwrap();
-        assert_eq!(dir.path().file_name().unwrap(), "run-2403");
-        assert_eq!(highest_run_number(&parent.join("corpus")).unwrap(), 2403);
-        dir.finalize_failure();
-        let again = ArtefactDir::allocate_at(&parent, "corpus", 2403, false);
-        assert!(matches!(again, Err(DevError::Config(_))), "{again:?}");
-        assert!(ArtefactDir::allocate_at(&parent, "corpus", 0, false).is_err());
     }
 
     #[test]

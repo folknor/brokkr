@@ -1,7 +1,7 @@
 //! Operator-facing path display.
 //!
 //! A path inside the project tree prints relative to the directory brokkr was
-//! invoked from: `.brokkr/piners/corpus/run-7` when the config sits in cwd,
+//! invoked from: `.brokkr/ratatoskr/sync/foo/run-7` when the config sits in cwd,
 //! `../.brokkr/...` in the layout where it sits one level up. Every other path
 //! prints absolute, unchanged.
 //!

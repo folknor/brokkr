@@ -3067,6 +3067,24 @@ force_sorted = true
         assert!(err.to_string().contains("belongs to project"), "{err}");
     }
 
+    /// The retired `[piners]` table loads whatever it holds, the old corpus
+    /// paths and harness block, keys the old schema refused, or nothing.
+    #[test]
+    fn a_retired_piners_table_loads_whatever_it_holds() {
+        let project = crate::project::Project::Piners;
+        for body in [
+            "",
+            "[piners]\ncorpus_root = \"corpus\"\n[piners.harness]\npackage = \"h\"\n",
+            "[piners]\nanything = [1, 2]\n",
+        ] {
+            let table = root_table(&format!("project = \"piners\"\n{body}"));
+            assert!(
+                project_config::ProjectConfig::parse(&project, &table).is_ok(),
+                "{body}"
+            );
+        }
+    }
+
     // -----------------------------------------------------------------------
     // User-wide config layer
     // -----------------------------------------------------------------------

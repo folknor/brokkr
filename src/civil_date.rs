@@ -9,12 +9,6 @@ pub(crate) struct CivilDate {
 }
 
 impl CivilDate {
-    pub(crate) const UNIX_EPOCH: Self = Self {
-        year: 1970,
-        month: 1,
-        day: 1,
-    };
-
     /// Construct a valid calendar date.
     pub(crate) fn new(year: i32, month: u32, day: u32) -> Option<Self> {
         let days_in_month = match month {
@@ -32,11 +26,6 @@ impl CivilDate {
 
     pub(crate) const fn year(self) -> i32 {
         self.year
-    }
-
-    /// Calendar components as `(year, month, day)`.
-    pub(crate) const fn components(self) -> (i32, u32, u32) {
-        (self.year, self.month, self.day)
     }
 
     /// Format as ISO `YYYY-MM-DD`.

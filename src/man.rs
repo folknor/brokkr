@@ -12,7 +12,7 @@
 //! headings themselves - see [`sections`].
 //!
 //! Topics are filtered by the detected project, the same way `--help` filters
-//! subcommands: a pbfhogg tree has no use for the piners corpus reference. The
+//! subcommands: a pbfhogg tree has no use for the ratatoskr sync reference. The
 //! project-agnostic topics - the ones about `check`, `deps`, `clippy`,
 //! measurement and config - are always listed, because they describe machinery
 //! that runs everywhere.
@@ -224,24 +224,6 @@ const TOPICS: &[Topic] = &[
         commands: &[CommandId::Sync],
     },
     Topic {
-        name: "piners",
-        summary: "harness NDJSON/manifest contracts, runs.db, corpus-results",
-        content: include_str!("../docs/projects/piners.md"),
-        commands: &[CommandId::Corpus],
-    },
-    Topic {
-        name: "piners-config",
-        summary: "the [piners] config block and its corpus and registry paths",
-        content: include_str!("../docs/brokkr.toml.piners.md"),
-        commands: &[CommandId::Corpus],
-    },
-    Topic {
-        name: "corpus",
-        summary: "the parity-corpus runner: pins.toml, probes, dispositions",
-        content: include_str!("../docs/commands/corpus.md"),
-        commands: &[CommandId::Corpus],
-    },
-    Topic {
         name: "mogwai",
         summary: "benching mogwai surfaces: the [mogwai.targets.*] registry, counters, datasets",
         content: include_str!("../docs/projects/mogwai.md"),
@@ -437,19 +419,19 @@ mod tests {
     /// And the project-scoped ones must not leak across.
     #[test]
     fn scoped_topics_stay_in_their_project() {
-        let piners: Vec<&str> = visible(Some(&Project::Piners))
+        let ratatoskr: Vec<&str> = visible(Some(&Project::Ratatoskr))
             .iter()
             .map(|t| t.name)
             .collect();
-        assert!(piners.contains(&"corpus"));
-        assert!(piners.contains(&"pbfhogg"));
+        assert!(ratatoskr.contains(&"sync"));
+        assert!(ratatoskr.contains(&"pbfhogg"));
 
         let pbfhogg: Vec<&str> = visible(Some(&Project::Pbfhogg))
             .iter()
             .map(|t| t.name)
             .collect();
         assert!(pbfhogg.contains(&"pbfhogg"));
-        assert!(!pbfhogg.contains(&"corpus"));
+        assert!(!pbfhogg.contains(&"sync"));
     }
 
     /// An unrecognised project still gets a usable listing rather than an empty

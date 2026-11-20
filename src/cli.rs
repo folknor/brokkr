@@ -121,12 +121,12 @@ mod visibility_tests {
         ));
     }
 
-    /// `Other("piners")` is a foreign repo that happens to call itself piners
-    /// in its own brokkr.toml - it is NOT `Project::Piners` and must not be
-    /// handed piners' project-specific commands.
+    /// `Other("ratatoskr")` is a foreign repo that happens to call itself
+    /// ratatoskr in its own brokkr.toml - it is NOT `Project::Ratatoskr` and
+    /// must not be handed ratatoskr's project-specific commands.
     #[test]
     fn other_does_not_impersonate_a_builtin() {
-        assert!(visible_in("corpus", &Project::Piners));
-        assert!(!visible_in("corpus", &Project::Other("piners".into())));
+        assert!(visible_in("sync", &Project::Ratatoskr));
+        assert!(!visible_in("sync", &Project::Other("ratatoskr".into())));
     }
 }

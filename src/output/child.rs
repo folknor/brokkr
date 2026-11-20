@@ -434,35 +434,6 @@ pub(crate) fn run_captured_with_env_and_deadline_with_options(
     deadline_capture_without_incomplete_output(program, capture, options)
 }
 
-/// Like [`run_captured_with_env_and_deadline_with_options`], but returns a
-/// capture whose output pipe stayed open past the drain grace. This is for
-/// callers that record incomplete output as part of their own integrity
-/// assessment.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_captured_with_env_and_deadline_allow_output_cut(
-    program: &str,
-    args: &[&str],
-    cwd: &Path,
-    env: &[(&str, &str)],
-    deadline: Duration,
-    on_spawn: Option<&dyn Fn(u32)>,
-    isolation: ChildIsolation<'_>,
-    options: ChildOptions,
-) -> Result<DeadlineCapture, DevError> {
-    run_captured_limited(
-        program,
-        args,
-        cwd,
-        env,
-        ChildLimit::Wall(deadline),
-        on_spawn,
-        isolation,
-        SpawnProfile::Plain,
-        options,
-        false,
-    )
-}
-
 /// As run_captured_with_env_and_deadline, but the limit is on inactivity, and
 /// the caller names the spawn profile (a cargo launch passes the cargo one).
 pub fn run_captured_with_idle_deadline(
@@ -671,11 +642,6 @@ impl ChildOptions {
 
     pub(crate) const CARGO: Self = Self {
         capture_cap: CaptureCap::CARGO,
-        ..Self::DEFAULT
-    };
-
-    pub(crate) const LARGE: Self = Self {
-        capture_cap: CaptureCap::LARGE,
         ..Self::DEFAULT
     };
 

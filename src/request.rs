@@ -35,44 +35,6 @@ pub(crate) struct ResultsQuery {
     pub(crate) project: String,
 }
 
-/// Query parameters for the `corpus-results` command (piners only) - the
-/// corpus run store (`.brokkr/piners/corpus/runs.db`). Distinct from
-/// [`ResultsQuery`]: no benchmark filters apply here, so the bench store and
-/// the corpus store no longer share one overloaded command.
-pub(crate) struct CorpusQuery {
-    /// Bare positional run id (default: latest). Equivalent to `--run`.
-    pub(crate) run_id: Option<i64>,
-    /// `--run N`: a specific corpus run id (default: latest).
-    pub(crate) run: Option<i64>,
-    /// Row cap for the recent-runs table and `--trend` history.
-    pub(crate) limit: usize,
-    /// Probe selector. One id (no table flag) is the combo view; repeated
-    /// under `--diffs`/`--dispositions`/`--scalars` is an IN-list filter on that table.
-    pub(crate) probe: Vec<String>,
-    pub(crate) diffs: bool,
-    pub(crate) dispositions: bool,
-    /// `--scalars`: the performance scalars leg's figures, one row per pair
-    /// (the missed ones unless `--full`).
-    pub(crate) scalars: bool,
-    /// `--columns` projection for the `--diffs`/`--dispositions`/`--scalars` table. Empty
-    /// = that table's curated default; `["all"]` = every column, rendered
-    /// vertically; else a validated subset.
-    pub(crate) columns: Vec<String>,
-    /// `--runtimes`: per-probe most-recent runtime, slowest first.
-    pub(crate) runtimes: bool,
-    /// `--over <secs>`: with `--runtimes`, keep only probes above this many
-    /// seconds.
-    pub(crate) over: Option<f64>,
-    pub(crate) trend: Option<String>,
-    pub(crate) where_expr: Option<String>,
-    pub(crate) sql: Option<String>,
-    /// Run-detail view: show every probe, not just the ones deviating from
-    /// their pin. With `compare`, also list the probes that did not move.
-    pub(crate) full: bool,
-    /// `--compare A B`: the per-probe count comparison, B read against A.
-    pub(crate) compare: Option<(i64, i64)>,
-}
-
 /// One selected sidecar view. Selectors are resolved before the command
 /// handler receives the request, and compare operands are always a pair.
 pub(crate) enum SidecarView {

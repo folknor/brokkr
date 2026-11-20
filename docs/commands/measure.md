@@ -36,9 +36,7 @@ All flags go after the command name.
 The typed measurable commands are mogwai's `mogwai`,
 sluggrs' `hotpath` and ratatoskr's `sync --bench`. Every other project
 measures through script benches (`brokkr bench NAME`), which any project can
-declare. Piners' `corpus` is **not**
-measurable: it takes no measurement flag, and its timing is the parity run
-row's `wall_ms` (why: `docs/commands/corpus.md`).
+declare.
 
 ## Benchmark harness
 
@@ -753,7 +751,7 @@ trajectory is incomplete.
 
 The shared child supervisor also bounds captured stdout and stderr: 16 MiB per
 stream for ordinary commands and sidecar measurements, 64 MiB for the ratatoskr
-harness and piners corpus report, and 128 MiB for Cargo output. The
+harness, and 128 MiB for Cargo output. The
 `[cargo_env]` evaluator and `script_check`
 have smaller contract-specific limits.
 The supervisor keeps reading after a limit so the child cannot block on a full

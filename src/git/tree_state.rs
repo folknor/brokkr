@@ -182,21 +182,9 @@ impl TreeState {
         })
     }
 
-    /// Whether an invocation record should say the working tree was dirty.
-    /// This is broader than measurement cleanliness: prose and project config
-    /// count, while brokkr's own state and its own tree edits do not.
-    pub(crate) fn for_record(&self) -> bool {
-        let tree_edits = brokkr_tree_edits(&self.root, &self.entries);
-        self.entries.iter().any(|entry| {
-            entry.paths.iter().any(|path| {
-                !tree_edits.contains(&path.path) && path.class != PathClass::BrokkrStore
-            })
-        })
-    }
-
     /// Whether an installed binary's build stamp must say the tree was dirty.
-    /// The record rule, except that brokkr state is exempt only while
-    /// untracked: a tracked file under `.brokkr` can be a build input. The
+    /// Prose and project config count; brokkr state is exempt only while
+    /// untracked, since a tracked file under `.brokkr` can be a build input. The
     /// verified locked-window edits stay exempt, since they are the
     /// project's configured install policy at this commit.
     pub(crate) fn for_install(&self) -> bool {

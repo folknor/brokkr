@@ -1267,10 +1267,15 @@ pub(crate) fn config_args_for(kind: FlagKind, sink: Sink, flags: &[String]) -> V
     };
     let list = flags
         .iter()
-        .map(|f| crate::piners::toml_writer::toml_string(f))
+        .map(|f| toml_string(f))
         .collect::<Vec<_>>()
         .join(",");
     vec!["--config".into(), format!("{key}=[{list}]")]
+}
+
+/// Serialize a TOML string value through `toml_edit`'s basic-string writer.
+fn toml_string(s: &str) -> String {
+    toml_edit::Value::from(s).to_string()
 }
 
 fn target_rustflags_env_var(triple: &str) -> String {
@@ -2067,7 +2072,7 @@ mod tests {
         // The quoting style is the writer's choice; what matters is that the
         // expression parses back to exactly the original string.
         for original in ["a\"b", "a\\b"] {
-            let expr = format!("v = {}", crate::piners::toml_writer::toml_string(original));
+            let expr = format!("v = {}", super::toml_string(original));
             let parsed = expr.parse::<toml::Table>().unwrap();
             assert_eq!(parsed["v"].as_str(), Some(original), "{expr}");
         }
