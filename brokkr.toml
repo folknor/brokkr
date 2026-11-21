@@ -41,6 +41,18 @@ pattern = '\bnotes/'
 paths = ["README.md", "CLAUDE.md", "docs/**/*.md", "scripts/**/*.js", "scripts/**/*.py", "scripts/**/*.sh"]
 message = "notes/ is transient; durable docs must carry their own context"
 
+# docs/ is how brokkr is used; source paths are no use to its reader and
+# belong in reference/ or a code comment (reference/how-to-write-docs.md).
+# A pattern, not a parser: docs/ quotes consumer projects' own src/ paths in
+# config examples, so it names brokkr's distinctive modules rather than every
+# src/ path, and leaves out generic names a consumer repo shares (lib, main,
+# bin, config, cli, output). A new module joins the list when it matters.
+[[textlint]]
+name = "docs-no-source-paths"
+pattern = '\bcrate::|\bDevError::|\bsrc/(?:artefacts|atomic_write|bench|build_info|build_provenance|build_purpose|cargo_\w+|check_cmd|civil_date|clean|command_args|config_parts|cpu_topology|crit_cmd|datasets|dependency_rules|deps|disk_gate|elf_section|executable_artifact|fmt_cmd|fs_probe|gremlins|harness\w*|hold|hotpath_fmt|install_step|invalidate_cmd|litehtml|lock\w*|maintenance|manifest|measure\w*|mogwai|oom|passthrough_cmd|preflight|ratatoskr|reservations|results_cmd|run_invocation|run_log|runnables|rustc_text|rustdoc_check|rustflags|script_check|serve|shutdown|sidecar\w*|sluggrs|stray|target_namespace|target_platform|test_\w+|textlint|toolchain|tree_policy|user_dirs|utf8_path|version_cmd|visual\w*|worktree\w*)\b'
+paths = ["docs/**/*.md"]
+message = "docs/ says how brokkr is used; move source paths to reference/ or a code comment"
+
 [[textlint]]
 name = "durable-docs-avoid-machine-local-paths"
 pattern = '/home/'

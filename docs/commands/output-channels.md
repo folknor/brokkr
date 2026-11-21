@@ -1,207 +1,251 @@
-# Output channels: how brokkr captures a run's output
+# Output channels
 
 When brokkr runs a project binary under a measurement mode, the binary's
-output can travel to the operator's terminal, to the gitignored results DB, to
-the gitignored sidecar DB, or nowhere at all. Which of these happens depends
-entirely on **which harness path** the command's dispatch chose - the project
-binary itself never knows what mode it runs under. This file is the map.
+output can go to your terminal, to the results DB, to the sidecar DB, or
+nowhere at all. Which of these happens depends entirely on which harness path
+the command's dispatch chose; the project binary itself never knows what mode
+it runs under. "Databases" and "Console output" describe where output is
+kept and shown, "Transport channels" and "Capture by mode" are the reference
+map, and "Choosing a channel" says which one to use.
 
-## The two databases
+## Databases
 
-- `.brokkr/results.db` - **gitignored**, kept small. One row per bench
-  run:
-  `command`, `elapsed_ms`, `commit`, `input`, and a `kv` column of
-  arbitrary `key=value` metrics. Queried with `brokkr results`. Two things
-  brokkr records itself rather than receiving over a transport channel: the
-  per-iteration walls of a `--bench N` run (`run_iterations`, in execution
-  order) and the `prev.*` kv pairs naming the previously-recorded run. Neither
-  comes from the binary - see `docs/commands/measure.md`.
-- `.brokkr/sidecar.db` - **gitignored** (split out of results.db when
-  results.db's schema went from v8 to v9). Per-run `/proc` sample
-  trajectories, phase markers, application counters, and for a
-  harness that runs calls in one process each call's sink ends and boundaries. Queried with `brokkr
-  sidecar <uuid>`.
+brokkr keeps two gitignored databases per project:
 
-Both live under the project root's `.brokkr/` (never a `--commit` worktree's)
-and are resolved identically for every project by `BenchHarness::new_with_lock`
-(`src/measure.rs`), which reads git provenance from the build root.
-See `docs/commands/measure.md` for the sidecar's sampling/marker protocol.
+- **`.brokkr/results.db`**, kept small. It holds one row per bench run:
+  `command`, `elapsed_ms`, `commit`, `input`, and a `kv` column of arbitrary
+  `key=value` metrics. Query it with `brokkr results`.
+- **`.brokkr/sidecar.db`** holds per-run `/proc` sample trajectories, phase
+  markers and application counters. For a harness that runs calls in one
+  process, it also holds each call's sink ends and boundaries. Query it with
+  `brokkr sidecar UUID`.
+
+brokkr records two things in results.db itself rather than receiving them
+over a transport channel. These are the per-iteration walls of a `--bench N`
+run (`run_iterations`, in execution order) and the `prev.*` kv pairs naming
+the previously recorded run. Neither comes from the binary; see `brokkr man
+measure iteration-walls` and `brokkr man measure prev-fields`.
+
+Both databases live under the project root's `.brokkr/`, never a `--commit`
+worktree's. brokkr resolves them identically for every project and reads git
+provenance from the build root. `brokkr man measure sidecar` has the sidecar's
+sampling and marker protocol.
+
 A script bench's children (`brokkr man bench`) are captured the same way but
-stored in the per-user bench store instead, each child's records apart;
-`brokkr results` and `brokkr sidecar <uuid>` read them there.
+stored in the per-user bench store instead, each child's records apart.
+`brokkr results` and `brokkr sidecar UUID` read them there.
 
-The `.brokkr/` directory ignores itself: every command that reads config
-creates it with a `.gitignore` of `*` (left alone if one is already there), so
-its logs, journals and databases stay out of `git status` and out of a
-`git add -A` even in a repo whose own `.gitignore` never mentions it. A project
-that commits its `results.db` keeps doing so: git keeps tracking a tracked
-file whatever an ignore rule says, and the first add is `git add -f`.
+The `.brokkr/` directory ignores itself. Every command that reads config
+creates it with a `.gitignore` of `*`, left alone if one is already there.
+So its logs, journals and databases stay out of `git status` and out of a
+`git add -A`, even in a repo whose own `.gitignore` never mentions it. A
+project that commits its `results.db` keeps doing so: git keeps tracking a
+tracked file whatever an ignore rule says, and the first add is `git add -f`.
 
-What brokkr itself prints around a measured run (the `run i/n` line, the
-single `[sidecar]` summary, the `[run] results.db <id>` line naming the stored
-row, the `[run] commit` line for `--commit`) is specified in
-`docs/commands/measure.md` ("What a measured run prints").
+## Console output
 
-The prefixed printers in `src/output/console.rs` (`[build]`, `[run]`, `[lock]`, `[strays]`,
-`[guard]`, `[bench]`, `[verify]`, `[sidecar]`, `[dry-run]`, ...) all go through
-one renderer, which tees each line into the run log when the command keeps one
-(`check`, `test`, measured runs, `crit`; `.brokkr/check-logs/<kind>-<ms>.log`)
-and keeps a drawn status line intact; none writes to the console directly.
-Each prefix is padded to ten columns, and a longer tag (`[ratatoskr]`) overflows
-by one space instead of being cut. Lines go to stdout, except `[sidecar]`
-narration (stderr, so `brokkr sidecar ... | jq` stays clean) and the deliberately
-bounded `[warn]` bookkeeping paths, which attempt both logging and rendering.
-These late warnings use stderr so a final JSON summary remains the last stdout
-line. Sidecar provenance errors and warnings also stay on stderr. `[lock]` is for lock events,
-`[strays]` for the stray-process reaps and `brokkr strays`, and `[guard]` for
-`brokkr guard`; `[dry-run]` marks a planned action under `--dry-run`.
+brokkr prints its own lines around a measured run: the `run i/n` line, the
+single `[sidecar]` summary, the `[run] results.db ID` line naming the stored
+row, and the `[run] commit` line for `--commit`. `brokkr man measure
+run-output` specifies them.
 
-Quiet mode hides progress on the console but retains it in the run log.
-Warnings, errors, requested test verdicts and lock/guard/stray actions remain
-visible. The output channel owns all `[result]` framing; an unretrievable result
-(a dirty run or a failed database insert) uses the same printer without quiet
-suppression, and so does the `[sidecar]` line naming a session no results row
-names. Non-fatal bookkeeping failures are warnings.
+The prefixed printers (`[build]`, `[run]`, `[lock]`, `[strays]`, `[guard]`,
+`[bench]`, `[verify]`, `[sidecar]`, `[dry-run]`, ...) all go through one
+renderer, and none writes to the console directly. The renderer tees each
+line into the run log when the command keeps one, and keeps a drawn status
+line intact. The commands that keep a run log are `check`, `test`, measured
+runs and `crit`, writing `.brokkr/check-logs/KIND-MS.log`.
 
-JSON, query tables, outline and other data output retain their exact bytes and
-streams. Direct print macros are denied by this crate's Clippy configuration;
-function-scoped exceptions identify genuine data and subprocess protocols.
-Captured raw replay uses the output renderer without adding a newline. The
-shared elapsed-duration formatter affects operator prose, not numeric stored
-metrics or table formats. Likewise, a path inside the project prints relative
-to the directory brokkr was invoked from in operator lines (and in the run
-log, whose header records that directory), while stored values, argv and data
-output keep it absolute. Allocation-profile notes have one owner in
-`measure::ProfiledMode`.
+Each prefix is padded to ten columns, and a longer tag (`[ratatoskr]`)
+overflows by one space instead of being cut. The prefixes mean:
 
-Captured and passthrough subprocesses run through `src/output/child.rs`, which
-owns child polling, typed endings, deadlines, signal forwarding, and bounded
-stdout/stderr drains. A captured stream is not replayed while the child
-runs; a caller that wants it shown replays the captured bytes afterwards.
+- **`[lock]`**: lock events
+- **`[strays]`**: the stray-process reaps and `brokkr strays`
+- **`[guard]`**: `brokkr guard`
+- **`[dry-run]`**: a planned action under `--dry-run`
 
-## The three transport channels
+Lines go to stdout, with these exceptions on stderr:
 
-A running binary can hand data to brokkr three ways:
+- `[sidecar]` narration, so `brokkr sidecar ... | jq` stays clean
+- the deliberately bounded `[warn]` bookkeeping paths, which attempt both
+  logging and rendering; they use stderr so a final JSON summary remains the
+  last stdout line
+- sidecar provenance errors and warnings
 
-1. **stdout** - human-readable prose. Either inherited (printed straight to
-   the terminal) or captured (drained into a buffer and dropped). Never
-   parsed, never stored.
-2. **stderr `key=value` lines** - structured metrics, parsed by
-   `parse_kv_lines_us` (`src/measure/kv.rs`) on every path that scrapes
-   stderr. A line counts only if the text before its first `=`, trimmed,
-   is a **field name**: an ASCII letter or `_`, then ASCII letters, digits,
-   `_`, `.` or `-` (`rows`, `cold_prepare_us`, `cache.hit-rate`). Any other
-   line is prose and is skipped silently, so `Note: auto-selected index
-   (sorted=true)` or `time-filter: N versions scanned, M <= cutoff` store
-   nothing. The value is the trimmed rest of the line, `=` included
-   (`label=a=b` stores `a=b`). The grammar rejects nonconforming names; it
-   does not detect prose, so a sentence that opens with a field name and
-   `=` (`wheel = zoom, drag = pan`) still reads as a field. On every scraping path, `elapsed_ms` and
-   `total_ms` are reserved timing names and never stored as counters, and a
-   field in one of brokkr's own namespaces (`meta.`, `env.`, `prev.`,
-   `threads.`, `sidecar.`, `provenance.`) is dropped, warned once per key: those
-   keys record what brokkr observed, so a child cannot write them. On the
-   self-reported paths an `elapsed_ms=` (or its alias `total_ms=`) line is
-   **mandatory** - its absence errors the whole run; if both appear, the
-   last valid timing line wins. This is the subprocess's **self-reported**
-   timing, not brokkr's wall-clock (the `run_external_ok` path uses
-   external best-of-N wall-clock instead and ignores the reserved names).
-   The value may be **fractional** (`elapsed_ms=6.847`): it is kept as
-   exact microseconds in the `elapsed_us` column, with `elapsed_ms` holding
-   it rounded to nearest for every existing query and view. Best-of-N and
-   `--compare`'s delta use the microsecond reading when both sides have one -
-   without it a single-digit-millisecond workload's 100-200us deltas round
-   away to nothing. Every other field's value is type-inferred in order:
-   `i64` -> finite `f64` -> text (a non-finite float like `NaN`/`inf` falls
-   back to text). Those pairs land in the results.db `kv` column and the
-   `[result]` line. Rows stored before the field-name rule keep whatever
-   keys the older scrape gave them, prose-shaped ones included; a
-   `--compare` against such a row lists those as counters present on one
-   side only.
-3. **FIFO markers + counters** - via `BROKKR_MARKER_FIFO`. The target writes
-   `<us> name` (marker) or `<us> @name=value` (counter, value must parse as
-   `i64`), `<us>` being microseconds since the process started, optionally
-   tagged with a call stream (`<us> %<call_id> ...`, which also carries a
-   call sink's sealing and terminal records; see "Marker & counter
-   rules" in `docs/commands/measure.md`, The clock included). Drained by
-   `SidecarFifo::drain` (`src/sidecar.rs`) into one arrival-ordered capture,
-   then into sidecar.db. Any project
-   binary can emit them by writing that line format to the FIFO. In pbfhogg
-   markers and counters go to the invocation's instrument sink; the CLI
-   opens the FIFO as that sink from `BROKKR_MARKER_FIFO` and passes no sink
-   when the variable is absent (no sidecar attached).
+Quiet mode hides progress on the console but keeps it in the run log.
+Warnings, errors, requested test verdicts and lock, guard and stray actions
+stay visible. The output channel owns all `[result]` framing. An
+unretrievable result (a dirty run or a failed database insert) uses the same
+printer without quiet suppression. So does the `[sidecar]` line naming a
+session no results row names. Non-fatal bookkeeping failures are warnings.
 
-## Derived fields on the `[result]` line
+JSON, query tables, outline and other data output keep their exact bytes and
+streams. Formatting for operator prose doesn't touch data:
 
-`format_result_line` (`src/measure/record.rs`) adds fields brokkr
-computes itself, on top of the raw kv pairs:
+- Human-readable durations appear in operator prose only, never in stored
+  metrics or table formats.
+- A path inside the project prints relative to the directory brokkr was
+  invoked from in operator lines and in the run log, whose header records
+  that directory. Stored values, argv and data output keep it absolute.
 
-- `read_mbs` - appears whenever the input size is known (`config.input_mb`,
-  resolved from the dataset config) and the wall is non-zero: `input_mb /
-  secs`, with `secs` from `elapsed_us` when the run has it (so a run that
-  rounds to 0 ms still gets a figure) and from `elapsed_ms` otherwise.
-- `write_mbs` - appears additionally when the run reported an `output_bytes`
-  kv pair (so this one *does* depend on the binary emitting it): computed as
-  `output_bytes/1e6 / secs`.
+A captured child's output isn't shown while the child runs. Where brokkr
+shows it, it replays the captured bytes after the child exits.
 
-So a metric can reach the `[result]` line three ways: a raw stderr kv pair, a
-brokkr-derived throughput field, or (for `write_mbs`) a kv pair that feeds a
-derived one. The external wall-clock path also scrapes counters; only its timing comes
+## Transport channels
+
+A running binary can hand data to brokkr three ways: stdout, stderr
+`key=value` lines, and FIFO markers and counters.
+
+### stdout
+
+stdout is human-readable prose. It's either inherited (printed straight to
+the terminal) or captured (drained into a buffer and dropped). brokkr never
+parses or stores it.
+
+### stderr kv
+
+stderr `key=value` lines are structured metrics, parsed on every path that
+scrapes stderr. A line counts only if the text before its first `=`, trimmed,
+is a **field name**: an ASCII letter or `_`, then ASCII letters, digits, `_`,
+`.` or `-` (`rows`, `cold_prepare_us`, `cache.hit-rate`).
+
+Any other line is prose and is skipped silently. So `Note: auto-selected
+index (sorted=true)` or `time-filter: N versions scanned, M <= cutoff` store
+nothing. The value is the trimmed rest of the line, `=` included (`label=a=b`
+stores `a=b`). The grammar rejects nonconforming names, but it doesn't detect
+prose. So a sentence that opens with a field name and `=` (`wheel = zoom,
+drag = pan`) still reads as a field.
+
+These names are special on every scraping path:
+
+- `elapsed_ms` and `total_ms` are reserved timing names, never stored as
+  counters.
+- A field in one of brokkr's own namespaces (`meta.`, `env.`, `prev.`,
+  `threads.`, `sidecar.`, `provenance.`) is dropped, with one warning per
+  key. Those keys record what brokkr observed, so a child can't write them.
+
+On the self-reported paths an `elapsed_ms=` line, or its alias `total_ms=`,
+is **mandatory**: its absence errors the whole run. If both appear, the last
+valid timing line wins. This is the subprocess's self-reported timing, not
+brokkr's wall clock. The external wall-clock path (`brokkr mogwai`) uses
+external best-of-N wall clock instead and ignores the reserved names.
+
+The timing value may be fractional (`elapsed_ms=6.847`). brokkr keeps it as
+exact microseconds in the `elapsed_us` column, and `elapsed_ms` holds it
+rounded to nearest for every existing query and view. Best-of-N and
+`--compare`'s delta use the microsecond reading when both sides have one.
+Without it, a single-digit-millisecond workload's 100 to 200 us deltas round
+away to nothing.
+
+Every other field's value is type-inferred in order: `i64`, then finite
+`f64`, then text. A non-finite float like `NaN` or `inf` falls back to text.
+Those pairs go into the results.db `kv` column and the `[result]` line.
+
+Rows stored before the field-name rule keep whatever keys the older scrape
+gave them, prose-shaped ones included. A `--compare` against such a row lists
+those as counters present on one side only.
+
+### FIFO
+
+FIFO markers and counters go through `BROKKR_MARKER_FIFO`. The target writes
+one of these line formats, where `US` is microseconds since the process
+started:
+
+- `US NAME`, a marker
+- `US @NAME=VALUE`, a counter; the value must parse as `i64`
+- `US %CALL_ID ...`, either of the above tagged with a call stream, which
+  also has a call sink's sealing and terminal records
+
+"Marker & counter rules" in `brokkr man measure` has the full rules, "The
+clock" included. brokkr drains the FIFO into one arrival-ordered capture,
+then into sidecar.db. Any project binary can emit these by writing that line
+format to the FIFO.
+
+In pbfhogg, markers and counters go to the invocation's instrument sink. The
+CLI opens the FIFO as that sink from `BROKKR_MARKER_FIFO`, and passes no sink
+when the variable is absent (no sidecar attached).
+
+## Derived result fields
+
+The `[result]` line adds fields brokkr computes itself, on top of the raw kv
+pairs:
+
+- **`read_mbs`** appears whenever the input size is known and the wall is
+  non-zero. The input size is `config.input_mb`, resolved from the dataset
+  config. The value is `input_mb / secs`, with `secs` from `elapsed_us` when
+  the run has it (so a run that rounds to 0 ms still gets a figure) and from
+  `elapsed_ms` otherwise.
+- **`write_mbs`** appears additionally when the run reported an
+  `output_bytes` kv pair, so this one does depend on the binary emitting it.
+  The value is `output_bytes/1e6 / secs`.
+
+So a metric can reach the `[result]` line three ways:
+
+- a raw stderr kv pair
+- a brokkr-derived throughput field
+- for `write_mbs`, a kv pair that feeds a derived one
+
+The external wall-clock path also scrapes counters; only its timing comes
 from brokkr rather than stderr.
 
-## The harness paths and what each captures
+## Capture by mode
 
-| Harness fn | stdout | stderr kv -> results.db | FIFO -> sidecar.db | Used by |
-|---|---|---|---|---|
-| `run_passthrough_timed` | inherited (shown) | no | **no** (no FIFO) | run mode (no `--bench`) |
-| `run_external_ok` | captured, dropped | **yes** (counters only) | yes | `brokkr mogwai` |
-| `run_external_with_kv` | captured, dropped | **yes** | yes | sluggrs `hotpath --bench` |
-| `capture_hotpath` (stored via `run_hotpath`) | captured | stderr counters + JSON profile | yes | `--hotpath` / `--alloc`, all projects |
+Each measurement mode captures a different set of channels. The table lists
+what each keeps:
 
-The two external paths differ in exactly one thing: **which clock the recorded
-`elapsed_ms` comes from.** `run_external_ok` measures the child from outside;
-`run_external_with_kv` believes the target's own `elapsed_ms=` and discards
-the external wall. Both record microseconds in `elapsed_us` - the external
-path from its exact `Duration` - and `elapsed_ms` is that value rounded to
-nearest.
+| Mode | stdout | stderr kv | FIFO |
+|---|---|---|---|
+| run mode, no `--bench` | shown | no | no FIFO |
+| `brokkr mogwai` | dropped | counters only | yes |
+| sluggrs `hotpath --bench` | dropped | yes | yes |
+| `--hotpath`, `--alloc` | captured | see below | yes |
 
-`Measurement` retains stdout and stderr for every captured iteration. Callers
-may inspect either stream before recording; storage uses the winner's metrics.
-Missing or invalid hotpath JSON fails the iteration and preserves its sidecar
-under `dirty`, rather than recording a profile mode without a profile.
+The columns read as follows:
 
-Both scrape non-timing stderr `key=value` pairs for counters, because stderr is
-captured either way and the scrape is free. A wall on its own cannot
-distinguish "the code got faster" from "the code did less"; the counters are
-what answer that, and they drive `--compare`'s `counters:` line. The reserved
-`elapsed_ms` and `total_ms` keys are omitted from the external path's counters;
-on the self-reported path they supply the recorded wall.
+- **stdout**: shown means inherited; dropped means captured and dropped.
+- **stderr kv**: what goes to results.db. `--hotpath` and `--alloc`, in
+  every project, keep stderr counters and a JSON profile.
+- **FIFO**: whether markers and counters reach sidecar.db.
 
-There was briefly a third path combining an external wall with counter scraping.
-It differed from `run_external_ok` by a bool that the shared body already took,
-so it is gone: scraping is now unconditional.
+The two external paths, `brokkr mogwai` and sluggrs `hotpath --bench`,
+differ in exactly one thing: which clock the recorded `elapsed_ms` comes
+from. `brokkr mogwai` measures the child from outside. sluggrs
+`hotpath --bench` believes the target's own `elapsed_ms=` and discards the
+external wall. Both record microseconds in `elapsed_us`, the external path
+from its exact duration, and `elapsed_ms` is that value rounded to nearest.
 
-Two consequences worth internalizing:
+Missing or invalid hotpath JSON fails the iteration and preserves its
+sidecar under `dirty`, rather than recording a profile mode without a
+profile.
+
+Both external paths scrape non-timing stderr `key=value` pairs for counters,
+because stderr is captured either way and the scrape is free. A wall on its
+own can't distinguish "the code got faster" from "the code did less". The
+counters answer that, and they drive `--compare`'s `counters:` line. The
+reserved `elapsed_ms` and `total_ms` keys are omitted from the external
+path's counters; on the self-reported path they supply the recorded wall.
+
+Two consequences follow:
 
 - **Run mode (no `--bench`) stores nothing and attaches no sidecar.** stdio
-  is inherited, so the binary's own prose reaches the terminal verbatim, and
-  FIFO emission has nowhere to go because `BROKKR_MARKER_FIFO` is unset.
-- In every captured path, the binary's stdout prose is **swallowed** - brokkr
-  prints its own `[result]` line instead. To survive bench mode, data must
-  go out as a FIFO counter or (on the kv path) an stderr `key=value` line.
+  is inherited, so the binary's own prose reaches the terminal verbatim. FIFO
+  emission has nowhere to go, because `BROKKR_MARKER_FIFO` is unset.
+- **In every captured path, brokkr swallows the binary's stdout prose** and
+  prints its own `[result]` line instead. To survive bench mode, data must go
+  out as a FIFO counter or, on the kv path, an stderr `key=value` line.
 
-## Quick decision guide
+## Choosing a channel
 
-- Want a metric in `brokkr results`? Print a non-timing `key=value` line to
-  stderr, its key a field name (letter or `_`, then letters, digits, `_`,
-  `.`, `-`) with nothing before it. On
-  the external wall-clock path (`run_external_ok`: `brokkr mogwai`) it is scraped into `kv` as a counter
-  and feeds `--compare`'s `counters:` line; `elapsed_ms` and `total_ms` are
-  reserved and ignored there, and the wall stays brokkr's own. On the
-  self-reported path (sluggrs `hotpath --bench` through
-  `run_external_with_kv`) a mandatory
-  `elapsed_ms=`/`total_ms=` line additionally supplies the recorded timing.
-- Want a metric in `brokkr sidecar`? Emit an `@name=value` counter to
-  `BROKKR_MARKER_FIFO`. Works on any path that spawns the sidecar, in
-  bench/hotpath/alloc modes.
-- Want it just on your terminal? Print to stdout and run without `--bench`.
+Pick the channel by where you want the metric to show up:
+
+- **In `brokkr results`**: print a non-timing `key=value` line to stderr, its
+  key a field name with nothing before it (see "stderr kv"). On the external
+  wall-clock path (`brokkr mogwai`), it's scraped into `kv` as a counter and
+  feeds `--compare`'s `counters:` line. There, `elapsed_ms` and `total_ms`
+  are reserved and ignored, and the wall stays brokkr's own. On the
+  self-reported path (sluggrs `hotpath --bench`), a mandatory `elapsed_ms=`
+  or `total_ms=` line also supplies the recorded timing.
+- **In `brokkr sidecar`**: emit an `@NAME=VALUE` counter to
+  `BROKKR_MARKER_FIFO`. This works on any path that spawns the sidecar, in
+  bench, hotpath and alloc modes.
+- **Only on your terminal**: print to stdout and run without `--bench`.

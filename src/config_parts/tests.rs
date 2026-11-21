@@ -24,7 +24,7 @@ mod tests {
     fn config_reference_lists_the_parser_section_universe() {
         let docs = include_str!("../../docs/brokkr.toml.md");
         let list = docs
-            .split_once("Reserved top-level keys parsed as config sections, or consumed by composition:\n")
+            .split_once("parsed as config sections or consumed by\ncomposition:\n")
             .expect("reserved-section list heading")
             .1
             .lines()

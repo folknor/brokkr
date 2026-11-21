@@ -251,8 +251,9 @@ pub(crate) fn refuse_measurement(what: &str) -> Result<(), DevError> {
         return Ok(());
     }
     let mut message = format!(
-        "{what} refuses while {} outstanding - a serving process perturbs measurements:",
-        output::count(live.len(), "serve is")
+        "{what} refuses while {} {} outstanding - a serving process perturbs measurements:",
+        output::count(live.len(), "serve"),
+        if live.len() == 1 { "is" } else { "are" }
     );
     for one in &live {
         message.push_str("\n  ");

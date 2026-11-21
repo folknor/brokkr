@@ -2,7 +2,7 @@
 //! the dellingr-free value tree the Lua seam (`super::lua`) converts to and
 //! from.
 //!
-//! One shape everywhere (`docs/commands/bench.md`, The script's builtins): an
+//! One shape everywhere (`docs/commands/bench.md`, Builtins): an
 //! object has string keys, an array is a list, nothing nests deeper than
 //! [`MAX_DEPTH`], a number is finite, a string is UTF-8. Decoding is strict
 //! as the project's other JSON readers are: a key given twice in one object

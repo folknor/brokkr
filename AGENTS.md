@@ -12,6 +12,7 @@ These files are not auto-loaded - read them on demand based on what the user ask
 
 The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bare `brokkr man` lists the current project's topics), project-filtered by the CLI's `Visibility`; the `reference/` files are not. When editing this list, update `TOPICS` to match. A doc with 8+ `##` sections is section-addressed (`brokkr man conventions script_check`; bare `brokkr man conventions` lists them), slugs derived from the headings (`src/man/sections.rs`), so keep one subject per `##`.
 
+- `reference/how-to-write-docs.md` - house rules for prose and headings in `docs/` and `reference/`. Read before editing either tree.
 - `reference/architecture.md` - the full module map. Read before changing a module you have not touched this session.
 - `reference/output.md` - operator output channel conventions.
 - `docs/brokkr.toml.md` - config core: location, the user-wide layer, `include`, host sections and the top-level keys and tables.
@@ -29,8 +30,13 @@ The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bar
 - `docs/commands/output-channels.md` - where a run's output goes.
 - `reference/bench-store.md` - the store of script-bench runs and the results server wire contract. Read before changing `src/bench/store/`.
 - `reference/results-server.md` - how `brokkr-results-server` is built. Read before changing `src/bin/results_server/`. Running it: `docs/results-server.md`.
+- `reference/measure-harness.md` - how the typed measurement harness is built: `BenchHarness`, the measurement loop, recording, the child supervisor and sidecar internals. Read before changing `src/measure/`, `src/harness.rs` or `src/sidecar.rs`.
 - `reference/bench-resources.md` - what a script-bench iteration owns: leases, admission, handles, placement. Read before changing `src/reservations/iteration.rs` or `src/bench/resources.rs`.
+- `reference/clean.md` - clean's ownership rule, disk gate, store maintenance and worktree purge. Read before changing `src/clean.rs` or `src/clean/`.
+- `reference/crit.md` - crit's design decisions and the failure each prevents. Read before changing `src/crit_cmd/`.
+- `reference/deps.md` - deps internals: phase model, metadata graph, ccu shell-out, publish-cycle walk. Read before changing `src/deps/`.
 - `docs/commands/visual.md`, `hotpath.md`, `sync.md`, `ratatoskr-gate.md`, `service.md` - project-specific commands.
+- `reference/visual-projects.md`, `reference/ratatoskr.md`, `reference/mogwai.md` - internals of those projects' commands. Read before changing `src/visual/`, `src/litehtml/`, `src/sluggrs/`, `src/ratatoskr/` or `src/mogwai/`.
 - `docs/projects/*.md` - per-project commands and internals; pbfhogg uses script benches and generic commands.
 
 ## Architecture

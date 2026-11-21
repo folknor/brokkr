@@ -11,13 +11,13 @@
 //! line. Recognized keys:
 //!
 //! - `description` (free text shown by bare `brokkr service`)
-//! - `expected = pass | ignored` (ignored scripts are skipped by default)
+//! - `expected: pass | ignored` (ignored scripts are skipped by default)
 //! - `fixture` (optional for service scripts, required for sync scripts)
 //! - `protocol` (informational label)
-//! - `ceiling = 60s` / `5m` / `1h` / `90` - per-script wall-clock
+//! - `ceiling: 60s` / `5m` / `1h` / `90` - per-script wall-clock
 //!   backstop enforced by brokkr around the whole run. Bare numbers are
 //!   read as seconds. Omitted scripts use [`DEFAULT_CEILING`].
-//! - `preserve_data_dir = on_success_too` - keep the artefact dir even
+//! - `preserve_data_dir: on_success_too` - keep the artefact dir even
 //!   when the run succeeds (failures are always preserved).
 //!
 //! Unknown lowercase annotation keys and duplicate or malformed metadata

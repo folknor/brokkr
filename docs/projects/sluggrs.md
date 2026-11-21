@@ -1,10 +1,17 @@
-# sluggrs project notes
+# sluggrs project
 
-`project = "sluggrs"` in `brokkr.toml`. The visual commands are shared with
-litehtml, but sluggrs renders snapshots with its own pipeline binary and
-compares them with approved PNGs.
+This page covers the sluggrs project, selected by `project = "sluggrs"` in
+`brokkr.toml`. sluggrs shares the visual commands with litehtml, but renders
+snapshots with its own pipeline binary and compares them with approved PNGs.
+The sections below cover the `[sluggrs]` config, snapshot outputs and the
+snapshot store. The shared command surface and status meanings are in
+`brokkr man visual`.
 
 ## Config
+
+The `[sluggrs]` table sets the render size and comparison settings, and each
+`[[sluggrs.snapshot]]` entry declares one snapshot. This example shows every
+key:
 
 ```toml
 [sluggrs]
@@ -21,39 +28,35 @@ fonts = ["assets/fonts/body.ttf"]
 optional_fonts = ["assets/fonts/emoji.ttf"]
 ```
 
-`[sluggrs]` requires `width`, `height`, and `pixel_diff_threshold`. The
-threshold is a pixel-difference percentage in percentage points. The optional
-`regression_tolerance` (finite, at least zero) and `pixel_fuzz_percent`
-(integer 0 to 100) default to the values shown and mean what they do for
-litehtml; see `docs/commands/visual.md`.
+`[sluggrs]` requires `width`, `height` and `pixel_diff_threshold`. The
+threshold is a pixel-difference percentage, in percentage points. Two keys
+are optional, default to the values shown, and mean what they do for
+litehtml (see `brokkr man visual`):
 
-Each `[[sluggrs.snapshot]]` requires a unique, path-safe `id`, a `description`,
-and a `fonts` list. Font paths are resolved under the project config root and
-passed to the snapshot binary as `--font` arguments. `optional_fonts` is an
-optional list of paths passed as `--optional-font`; omit it or use an empty
-list when no optional fonts are needed. Duplicate IDs and IDs that could
-escape the `snapshots/<id>` artifact directory are rejected before a visual
-command runs.
+- **`regression_tolerance`**: finite, at least zero
+- **`pixel_fuzz_percent`**: an integer from 0 to 100
 
-Sluggrs records rendered output under `snapshots/<id>/output.png` and compares
-it with `approved.png`. A snapshot without an approval is `NO_BASELINE`; an
-approval record whose PNG is missing is an `ERROR`, so a deleted baseline is
-not silently treated as a new snapshot.
+Each `[[sluggrs.snapshot]]` requires a unique, path-safe `id`, a
+`description` and a `fonts` list. brokkr resolves font paths under the
+project config root and passes them to the snapshot binary as `--font`
+arguments. `optional_fonts` is an optional list of paths passed as
+`--optional-font`; omit it or leave it empty when you need no optional fonts.
+brokkr rejects duplicate IDs, and IDs that could escape the `snapshots/ID`
+artifact directory, before a visual command runs.
 
-## Module layout
+## Snapshot outputs
 
-- `src/sluggrs/cmd.rs` - snapshot rendering, approval, and status commands;
-  its approved-image path helper also defines git's measurement-cleanliness
-  exemption, so rendering, approval, and dirty-tree checks share one layout.
-- `src/sluggrs/db.rs` - the sluggrs adapter for its versioned snapshot store;
-  shared SQLite operations and the one-time import from the former shared
-  file live in `src/visual/db.rs`. Snapshot tables now live in
-  `.brokkr/sluggrs-visual.db`; existing `snapshot_*` rows are imported from
-  `.brokkr/results.db` on first open.
-- `src/sluggrs/hotpath.rs` - the sluggrs rendering benchmark path.
-- `src/visual/` - shared pixel comparison, typed visual statuses, run engine,
-  database operations, and common command formatting. Sluggrs has no
-  dependency on litehtml's comparison module.
+sluggrs records rendered output under `snapshots/ID/output.png` and compares
+it with `approved.png`. A snapshot without an approval is `NO_BASELINE`. An
+approval record whose PNG is missing is an `ERROR`, so brokkr never treats a
+deleted baseline as a new snapshot.
 
-For the shared command surface and status meanings see
-`docs/commands/visual.md`.
+The approved PNGs don't count against a clean tree: brokkr exempts them from
+brokkr's dirty-tree check, so an approval you haven't committed yet doesn't
+make the tree read as dirty.
+
+## Snapshot store
+
+brokkr keeps sluggrs snapshot runs, results and approvals in
+`.brokkr/sluggrs-visual.db`. On first open it imports any existing snapshot
+rows from `.brokkr/results.db`. `brokkr clean` never removes the store.

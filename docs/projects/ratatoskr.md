@@ -1,152 +1,166 @@
-# ratatoskr project notes
+# ratatoskr project
 
-`project = "ratatoskr"` in `brokkr.toml`. Multi-crate workspace.
+This page covers the ratatoskr project, a multi-crate workspace selected by
+`project = "ratatoskr"` in `brokkr.toml`. It describes the `[ratatoskr]`
+config, the harness build, the two test harness flows, the saehrimnir mock
+server contract, fixture resolution, the Lua runtime boundary and the
+artefact layout. The schema-universal fields are in `brokkr man config`;
+the ratatoskr-specific sections are gathered here so service, sync and gate
+users find them in one place.
 
 ## Configuration
 
 Project-specific settings live under `[ratatoskr]` in the project
 `brokkr.toml`:
 
-- `[ratatoskr.harness]` names the cargo package (`package`), optional binary
-  target (`binary`; without it the package's sole bin, else the one named
-  like the package, else the build refuses), optional cargo
-  `features`, and an optional `debug` or `profile` default. Orchestration builds use
-  this spec directly; they do not select a `[[check]]` sweep.
-- `mock_server_binary` points to the sæhrimnir executable and `fixtures_dir`
-  to its fixture files. Absolute paths stay absolute; relative paths resolve
-  from the project root. Both are required when a selected service or sync
-  script uses a fixture, and by `mock-serve`.
-- `test_endpoint_env_<protocol>` settings name the environment variable
-  brokkr sets for each protocol's endpoint. The registered protocols are
-  `jmap`, `imap`, `smtp`, `graph`, `gmail`, `caldav`, `carddav`, `people`,
-  and `gcal`. These variables are injected for fixture-backed service and
-  sync runs. HTTP protocols receive an `http://host:port` origin; IMAP and
-  SMTP receive `host:port`.
-- `sync_script_dir` optionally selects the sync script directory. Relative
-  paths resolve from the project root; the default is
+- **`[ratatoskr.harness]`**: the build spec for the harness binary. See
+  "Harness build" below.
+- **`mock_server_binary`, `fixtures_dir`**: the saehrimnir executable and its
+  fixture files. Absolute paths stay absolute; relative paths resolve from the
+  project root. Both are required by `mock-serve`, and by any selected service
+  or sync script that uses a fixture.
+- **`test_endpoint_env_PROTOCOL`**: the environment variable brokkr sets for
+  that protocol's endpoint. brokkr injects these variables for
+  fixture-backed service and sync runs.
+- **`sync_script_dir`**: optional, the sync script directory. A relative path
+  resolves from the project root. The default is
   `crates/app/tests/sync-harness`.
-- `[ratatoskr.gate.<name>]` configures a gate's script, baseline identity,
-  and metric rules. See
-  [the sync gate guide](../commands/ratatoskr-gate.md) for its full shape.
+- **`[ratatoskr.gate.NAME]`**: a gate's script, baseline identity and metric
+  rules. `brokkr man gate` gives its full shape.
 
-The schema-universal fields are documented in `docs/brokkr.toml.md`; the
-ratatoskr-specific config sections are described here so service, sync, and
-gate users can find them in one place.
+The registered protocols are `jmap`, `imap`, `smtp`, `graph`, `gmail`,
+`caldav`, `carddav`, `people` and `gcal`. HTTP protocols receive an
+`http://host:port` origin; IMAP and SMTP receive `host:port`.
 
-## Two test harnesses
+## Harness build
 
-ratatoskr exercises two separate harness flows from brokkr:
+The `[ratatoskr.harness]` table is a self-contained build spec that both
+harness flows share. Its keys:
 
-1. **Service-subprocess harness** (`service`: bare lists, `<SCRIPT>`
-   runs one, `--all` runs the cohort) - lua-driven tests against the
-   ratatoskr binary's `--test-harness` mode. See
-   `docs/commands/service.md`.
-2. **Sync orchestration** (`sync`, `mock-serve`) - two-child
-   orchestration with sæhrimnir (mock email
-   server) + the ratatoskr harness binary. See `docs/commands/sync.md`.
+- **`package`**: the cargo package to build.
+- **`binary`**: optional, the `[[bin]]` target to spawn. Without it, brokkr
+  uses the package's sole bin, else the bin named like the package, else the
+  build refuses.
+- **`features`**: optional cargo features.
+- **`debug = true`**: optional, defaults the orchestration commands to the
+  dev profile.
+- **`profile = "NAME"`**: optional, defaults the orchestration commands to
+  any cargo profile (`dev`, `release`, or a custom `[profile.NAME]`, built
+  into `TARGET/NAME/`). It wins over `debug`, with the rules of
+  `[bin] profile` in `brokkr man config`.
 
-Both share the harness build pipeline through `[ratatoskr.harness]`. The
-block is a **self-contained build spec** - it names the cargo package to
-build (`package`), optionally an override `[[bin]]` to spawn (`binary`,
-defaults to `package`), optional cargo `features`, and an optional
-`debug = true` to default the orchestration commands to the dev profile -
-or `profile = "<name>"` to default them to any cargo profile (`dev`,
-`release`, or a custom `[profile.<name>]`, built into `<target>/<name>/`;
-it wins over `debug`, with the rules of `[bin] profile` in
-`docs/brokkr.toml.md`). Unset, the orchestration commands build release.
-It does **not** reference `[[check]]`: orchestration builds are
-intentionally outside the everyday `brokkr check` sweep matrix, so adding
-an orchestration command never widens the per-crate feature graph that
-`brokkr check` and `brokkr check -p <crate>` walk.
+With neither `debug` nor `profile` set, the orchestration commands build
+release. The orchestration commands accept `--debug`, `--release` or
+`--profile NAME`, mutually exclusive, to override the toml for one
+invocation. Every run's `run.toml` records the `profile` the harness was
+built under.
 
-See `RatatoskrConfig` rustdoc in
-`src/config_parts/project_config/ratatoskr.rs` and `HarnessConfig` in
-`src/config_parts/schema.rs` for the fields. The protocol list itself is
-spelled once, in the `ratatoskr_protocols!` registry in that same
-`ratatoskr.rs`: it drives the `test_endpoint_env_<protocol>` keys, the
-sentinel parse, the endpoint shapes and the frontmatter `protocol` values.
-The orchestration commands
-accept `--debug` / `--release` / `--profile <name>` (mutually exclusive) to
-override the toml on a per-invocation basis. Every run's `run.toml` records
-the `profile` the harness was built under.
+The harness spec doesn't reference `[[check]]`, and orchestration builds
+don't select a `[[check]]` sweep. They stay outside the everyday
+`brokkr check` sweep matrix, so adding an orchestration command never widens
+the per-crate feature graph that `brokkr check` and `brokkr check -p CRATE`
+walk.
 
-A stale `[ratatoskr.harness].sweep` field from the pre-decoupling shape
-is rejected at parse time with a migration message: drop the matching
-`[[check]] name = "<sweep>"` entry and fold its `features` /
-`build_packages` directly into `[ratatoskr.harness]` as `features` /
-`package`.
+brokkr rejects a `[ratatoskr.harness].sweep` field at parse time with a
+migration message. To migrate, drop the matching `[[check]] name = "SWEEP"`
+entry, and fold its `features` and `build_packages` into
+`[ratatoskr.harness]` as `features` and `package`.
 
-## sæhrimnir contract
+## Test harnesses
 
-sæhrimnir is an external repo (sibling checkout, see
-`mock_server_binary` / `fixtures_dir` in `[ratatoskr]` config). It writes a
-readiness sentinel naming each protocol's listening port, one line per
-protocol, which
-brokkr parses via `parse_sentinel` in `src/ratatoskr/saehrimnir.rs`.
+brokkr drives two separate ratatoskr harness flows:
 
-Spawn lifecycle:
-1. brokkr spawns sæhrimnir with `--fixture <PATH> --readiness-file <PATH>`.
-2. brokkr polls the readiness file (50ms cadence, 10s budget).
-3. brokkr parses endpoints, exports them as
-   `RATATOSKR_TEST_<PROTO>_ENDPOINT` env vars per `[ratatoskr]` config.
-4. brokkr spawns the harness binary with those env vars set.
-5. After the harness exits: SIGTERM sæhrimnir, 1.5s budget, then SIGKILL.
+1. **Service-subprocess harness** (`service`): Lua-driven tests against the
+   ratatoskr binary's `--test-harness` mode. Bare `service` lists the
+   scripts, `service SCRIPT` runs one, and `--all` runs the cohort. See
+   `brokkr man service`.
+2. **Sync orchestration** (`sync`, `mock-serve`): two-child orchestration of
+   the saehrimnir mock email server and the ratatoskr harness binary. See
+   `brokkr man sync`.
 
-Auto-build of sæhrimnir is not yet wired - the binary must already exist at
+## saehrimnir
+
+saehrimnir is the mock email server, an external repo in a sibling checkout
+located by `mock_server_binary` and `fixtures_dir`. It writes a readiness
+sentinel naming each protocol's listening port, one line per protocol, which
+brokkr reads to find the endpoints.
+
+A run follows this lifecycle:
+
+1. brokkr spawns saehrimnir with `--fixture PATH --readiness-file PATH`.
+2. brokkr polls the readiness file every 50 ms, for up to 10s.
+3. brokkr parses the endpoints and exports each as the variable its
+   `test_endpoint_env_PROTOCOL` key names, such as
+   `RATATOSKR_TEST_PROTO_ENDPOINT`.
+4. brokkr spawns the harness binary with those variables set.
+5. After the harness exits, brokkr sends saehrimnir SIGTERM, waits up to
+   1.5s, then sends SIGKILL.
+
+brokkr doesn't build saehrimnir: the binary must already exist at
 `mock_server_binary`.
 
 ## Fixture resolution
 
-Fixtures live in `<fixtures_dir>` and may be `.toml` or `.lua`. brokkr's
-`resolve_fixture` (in `src/ratatoskr/saehrimnir.rs`) picks whichever exists
-for a given stem; if both exist for the same stem (e.g. `jmap-small.toml`
-and `jmap-small.lua`), the user must write the name with its extension to
-disambiguate. Bare stems with both files present errors out.
+Fixtures live in `fixtures_dir` and may be `.toml` or `.lua`. Given a bare
+stem, brokkr picks whichever of the two exists. When both exist for one stem (`jmap-small.toml` and
+`jmap-small.lua`), a bare stem is an error, and you must write the name with
+its extension.
 
 ## Lua test runtime
 
-The Lua VM, `ServiceClient` userdata bindings, wait combinators, and
-runtime-owned artefact writers (`frames.jsonl`, `events.jsonl`,
-`steps.jsonl`, `service.stderr`, `runtime-outcome.json`,
-`proc-{status,wchan,syscall,stack}.txt`, `data-dir/`) live in ratatoskr, not
-in brokkr. brokkr reaches them only through the binary `[ratatoskr.harness]`
-builds (`package` and `binary` name it), run in its `--test-harness <script>`
-mode; which ratatoskr crate holds the code, and whether a cargo feature gates
-it, is ratatoskr's business and not something brokkr builds against.
+The Lua runtime lives in ratatoskr, not brokkr. It includes the Lua VM, the
+`ServiceClient` userdata bindings, the wait combinators and the
+runtime-owned artefact writers: `frames.jsonl`, `events.jsonl`,
+`steps.jsonl`, `service.stderr`, `runtime-outcome.json`, the
+`proc-status.txt`, `proc-wchan.txt`, `proc-syscall.txt` and `proc-stack.txt`
+files, and `data-dir/`.
 
-Anything else the runtime spawns is ratatoskr's to find. brokkr's part is
-`BROKKR_TEST_BIN_DIR`, the directory holding the binary it built, so the
-runtime can start that same binary in another mode (its parent-death helper
-is one) rather than look for a separately built one.
+brokkr reaches the runtime only through the binary `[ratatoskr.harness]`
+builds (`package` and `binary` name it), run in its
+`--test-harness SCRIPT` mode. Which ratatoskr crate holds the code, and
+whether a cargo feature gates it, is ratatoskr's business; brokkr doesn't
+build against either.
+
+The runtime finds anything else it spawns itself. brokkr sets
+`BROKKR_TEST_BIN_DIR` to the directory holding the binary it built. The
+runtime can then start that same binary in another mode, such as its
+parent-death helper, rather than look for a separately built one.
 
 ## Artefact layout
 
-- `service <SCRIPT>`: `.brokkr/ratatoskr/service/<test>/run-N/` with
-  `binary-stdout.log` / `binary-stderr.log` / `run.toml` plus
-  runtime-emitted artefacts; a fixture's sæhrimnir state goes to
-  `.brokkr/ratatoskr/service-mock/<fixture>/`. Neither sits directly in
-  `.brokkr/ratatoskr/`, where a script named `mock` or `sync` would write
-  into brokkr's own trees.
-- `mock-serve`: `.brokkr/ratatoskr/mock/` (`readiness`).
-- `sync <SCRIPT>`: `.brokkr/ratatoskr/sync/<test>/run-N/` with `harness/` and
-  `mock/` subdirs (`mock/readiness`, `mock/stderr.log`).
-- `sync <SCRIPT> --bench N`: `.brokkr/ratatoskr/sync/<test>/run-N/iter-K/harness/` per
-  iteration; the best iteration's `summary.json` is ingested as KvPair rows.
+Each command writes its artefacts under `.brokkr/ratatoskr/`:
 
-Per-run cleanup is the runtime's job: `ArtefactDir::finalize_success`
-removes the `run-N/` dir on green runs (unless `--keep-artefacts` or
-`preserve_data_dir = on_success_too` was set), `finalize_failure`
-preserves it, and a panic / early return defaults to preserve so
-diagnostics are never lost. To sweep accumulated dirs from past
-failures, run `brokkr clean` - on ratatoskr projects it removes the
-artefact and `mock/` directories under `.brokkr/ratatoskr/` (it acquires
-the project lock first, so concurrent harness runs and `mock-serve` are
-not affected). It spares every *file* at that level, `gate.db`
-especially: that store holds the only copy of the numbers a gate
-baseline pins by UUID, so it is out of clean's scope like `results.db`.
-See `docs/commands/ratatoskr-gate.md`.
+- **`service SCRIPT`**: `service/TEST/run-N/`, with `binary-stdout.log`,
+  `binary-stderr.log`, `run.toml` and the runtime-emitted artefacts. A
+  fixture's saehrimnir state goes to `service-mock/FIXTURE/`.
+- **`mock-serve`**: `mock/`, holding `readiness`.
+- **`sync SCRIPT`**: `sync/TEST/run-N/`, with `harness/` and `mock/` subdirs
+  (`mock/readiness`, `mock/stderr.log`).
+- **`sync SCRIPT --bench N`**: `sync/TEST/run-N/iter-K/harness/` per
+  iteration. brokkr ingests the best iteration's `summary.json` as KvPair
+  rows.
 
-## Cross-cutting design
+Neither service tree sits directly in `.brokkr/ratatoskr/`, where a script
+named `mock` or `sync` would write into brokkr's own trees.
 
-Cross-cutting design lives in the ratatoskr repo at
-`<ratatoskr>/docs/harness/{problem-statement,architecture,roadmap}.md`.
+### Cleanup
+
+brokkr decides at the end of each run whether its `run-N/` dir stays:
+
+- A green run's dir is removed, unless you passed `--keep-artefacts` or the
+  script's frontmatter sets `preserve_data_dir = on_success_too`.
+- A failed run's dir is kept.
+- A panic or early return keeps the dir, so diagnostics survive.
+
+To sweep dirs that past failures left, run `brokkr clean`. In a ratatoskr
+project it removes the artefact and `mock/` directories under
+`.brokkr/ratatoskr/`. It takes the project lock first, so concurrent harness
+runs and `mock-serve` aren't affected. It spares every file at that level,
+`gate.db` especially: that store holds the only copy of the numbers a gate
+baseline pins by UUID, so it's out of clean's scope, like `results.db`. See
+`brokkr man gate`.
+
+## Design documents
+
+ratatoskr's cross-cutting harness design lives in the ratatoskr repo, in
+`docs/harness/problem-statement.md`, `architecture.md` and `roadmap.md`.

@@ -270,7 +270,7 @@ pub(crate) fn main() {
         // guard, the lock included, has dropped, and the routine set holds what
         // runs keep on purpose: hung-test snapshots, failure artefacts, caches.
         // A measured attempt discards its own scratch output while it unwinds,
-        // under its hold (`measure::runner`); other disposable working state
+        // under its hold (`crate::measure`); other disposable working state
         // an interrupted run leaves sits under a fixed name its next run
         // clears, or goes with a `brokkr clean`.
         Err(DevError::Interrupted) => std::process::exit(130),

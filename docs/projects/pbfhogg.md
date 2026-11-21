@@ -1,14 +1,16 @@
 # pbfhogg
 
-pbfhogg uses script benches declared in `[bench.*]`, run with
-`brokkr bench NAME`. See `docs/commands/bench.md` and
-`docs/brokkr.toml.bench.md` for params, inputs, profiling and results.
+This page covers how brokkr serves the pbfhogg project. pbfhogg declares
+script benches in `[bench.*]` and runs them with `brokkr bench NAME`. Params,
+inputs, profiling and results are documented in `brokkr man bench` and
+`brokkr man bench-config`.
 
-The generic commands remain available: `check`, `test`, `clippy`, `run`,
+The generic commands also work here: `check`, `test`, `clippy`, `run`,
 `build`, `install`, `results`, `sidecar`, `clean` and the other shared tools.
-For example:
+These invocations list the benches, show one bench's help, and run pbfhogg's
+own tools:
 
-```
+```sh
 brokkr bench
 brokkr bench NAME --help
 brokkr run --with pbfhogg pbfhogg-verify -- all denmark
@@ -16,13 +18,16 @@ brokkr run --with pbfhogg pbfhogg-datasets -- download denmark
 brokkr run --with pbfhogg-harness pbfhogg-library -- --help
 ```
 
-Answer checking belongs to pbfhogg's `pbfhogg-verify`. Dataset download and
-snapshot promotion belong to `pbfhogg-datasets`; library verification belongs
-to `pbfhogg-library`. These programs receive the executable built by `--with`
-in `BROKKR_WITH_EXE`.
+pbfhogg's own programs own these jobs:
 
-Historical typed-command results and sidecar records remain readable through
-`results` and `sidecar`. The dataset `pbf.<variant>.expect`, dataset `expect`,
-`getid_ids` and `getparents_ids` fields remain accepted and validated for
-compatibility, but brokkr no longer uses them. Script benches still see
-configured data in the resolved view.
+- **`pbfhogg-verify`**: answer checking
+- **`pbfhogg-datasets`**: dataset download and snapshot promotion
+- **`pbfhogg-library`**: library verification
+
+Each program receives the executable built by `--with` in `BROKKR_WITH_EXE`.
+
+`results` and `sidecar` still read historical typed-command results and
+sidecar records. brokkr accepts and validates the dataset fields
+`pbf.VARIANT.expect`, `expect`, `getid_ids` and `getparents_ids` for
+compatibility, but doesn't use them. Script benches still see configured
+data in the resolved view.

@@ -390,8 +390,8 @@ where
                 // following `Paragraph` does not push a SECOND newline and open a
                 // stray blank line between the item and its body (S23).
                 self.end_newline = true;
-                // Indent nested bullets by list depth so architecture.md's nested
-                // lists keep their hierarchy instead of rendering flat.
+                // Indent nested bullets by list depth so nested lists keep
+                // their hierarchy instead of rendering flat.
                 // `list_stack` already holds the current list (pushed on
                 // `Tag::List`), so depth 1 is top-level and gets no indent.
                 let indent = "  ".repeat(self.list_stack.len().saturating_sub(1));

@@ -22,7 +22,7 @@
 //! entry fails because capture cannot prove the complete stream matched.
 //!
 //! This module is the logic (`evaluate` + `run_one`); orchestration and
-//! failure formatting live in `check_cmd::phase::run_script_checks`, mirroring
+//! failure formatting live in `check_cmd::conventions::run_script_checks`, mirroring
 //! how `textlint`/`manifest` split scan-logic from phase-plumbing.
 
 use std::path::Path;

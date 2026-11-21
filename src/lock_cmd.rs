@@ -89,7 +89,7 @@ fn holder_status() -> Result<(), DevError> {
     // First ask the holder itself, over its control socket. It answers about
     // its own process, so no PID crosses a namespace boundary - this works
     // from the host, from a sibling sandbox, from anywhere the socket is.
-    let mut unanswered = "it records no control socket (an older brokkr)".to_owned();
+    let mut unanswered = "it records no control socket".to_owned();
     if !info.acq_id.is_empty() {
         match crate::lock_service::request(&info.acq_id, "status") {
             crate::lock_service::Reply::Status(s) => {
@@ -125,7 +125,7 @@ fn holder_status() -> Result<(), DevError> {
         output::lock_msg(&hint);
     }
 
-    // The holder did not answer (an older brokkr, or one that is stopped).
+    // The holder did not answer (no socket, or it is stopped).
     // Every PID in the lock file was written in the HOLDER's PID namespace
     // (a sandboxed holder writes pid=2, which is kthreadd here), so each
     // one is shown only when the namespaces match and its identity tokens
@@ -621,7 +621,7 @@ fn stop_holder(info: &lockfile::LockInfo, hard: bool) -> Result<(), DevError> {
 fn kill_graceful(info: &lockfile::LockInfo) -> Result<(), DevError> {
     use crate::lock_service::Reply;
     let unanswered = if info.acq_id.is_empty() {
-        "the holder records no control socket (an older brokkr)".to_owned()
+        "the holder records no control socket".to_owned()
     } else {
         match crate::lock_service::request(&info.acq_id, "stop") {
             Reply::Accepted { signal_error: None } => {
@@ -647,7 +647,7 @@ fn kill_graceful(info: &lockfile::LockInfo) -> Result<(), DevError> {
             Reply::NoAnswer(why) => why,
         }
     };
-    // No answer (an older brokkr, or a stopped holder): the numeric path,
+    // No answer (no socket, or a stopped holder): the numeric path,
     // only where the recorded PID means the same thing here.
     if !crate::process::shares_namespace_tokens(&info.pid_ns, &info.time_ns) {
         return Err(refuse_kill(&format!(

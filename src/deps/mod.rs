@@ -5,7 +5,7 @@
 //! uses the same projection and falls back to the unfiltered graph when needed.
 //! The renderer turns events into prefixed text or NDJSON, depending on `--json`.
 //!
-//! Shipped phases and planned work are listed in `docs/commands/deps.md`.
+//! The phases are listed in `docs/commands/deps.md`.
 
 use std::path::Path;
 

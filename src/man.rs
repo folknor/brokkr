@@ -189,13 +189,13 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "litehtml",
-        summary: "litehtml internals: modules, fixtures, Node.js scripts",
+        summary: "litehtml config: the visual store, fixtures, Node runtime, test runner",
         content: include_str!("../docs/projects/litehtml.md"),
         commands: &[CommandId::Visual],
     },
     Topic {
         name: "sluggrs",
-        summary: "sluggrs config, snapshot layout and module map",
+        summary: "sluggrs config, snapshot outputs and the snapshot store",
         content: include_str!("../docs/projects/sluggrs.md"),
         commands: &[CommandId::Hotpath],
     },

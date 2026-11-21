@@ -30,7 +30,7 @@
 //!    `stopped_by_signal = true`.
 //! 4. `run_external` propagates that up as [`crate::error::DevError::Interrupted`]
 //!    after saving the partial sidecar data under the `dirty` alias. The
-//!    measured runner (`crate::measure::runner`) discards the interrupted
+//!    measured runner (`crate::measure`) discards the interrupted
 //!    attempt's own scratch output as it unwinds, still under the command's
 //!    hold, and `main` exits 130.
 //!

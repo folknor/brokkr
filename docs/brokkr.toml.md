@@ -1,203 +1,222 @@
 # brokkr.toml
 
-Per-project config consumed by brokkr. Lives at the project root (`./brokkr.toml`).
-
-This file documents the core of the **schema-universal** parts of
-brokkr.toml - every section below applies in any project. Each `##` heading is
-addressable on its own: `brokkr man config lints` prints that section and
-nothing else, `brokkr man config include bin` prints two, and bare
-`brokkr man config` lists them.
+`brokkr.toml` is the per-project config brokkr reads from the project root.
+This page covers the core of the schema that applies in every project: where
+the file lives, the user-wide layer, `include`, the top-level keys and host
+sections, and the reference sections for each core key and table. Each `##`
+section is addressable on its own: `brokkr man config lints` prints that
+section and nothing else, `brokkr man config include bin` prints two, and
+bare `brokkr man config` lists them.
 
 The rest of the universal schema is split by subject:
-- Source-convention gates (`[gremlins]`, `[header]`, `[[textlint]]`,
-  `[textlint_preset]`, `[[script_check]]`, `[manifest]`, `[[dependency_rule]]`,
-  `[rustdoc]`) -> `docs/brokkr.toml.conventions.md` (`brokkr man conventions`)
-- Sweeps and test policy (`[[check]]`, `[[lint_sweep]]`, `parallel`, `[test]`
-  and its profiles, `[[quarantine]]`) -> `docs/brokkr.toml.sweeps.md`
-  (`brokkr man sweeps`)
-- Script benches (`[bench.*]`, `[bench_params.*]`, `[data]`) ->
-  `docs/brokkr.toml.bench.md` (`brokkr man bench-config`)
 
-Project-specific config blocks live in their own docs, so a checkout only ever
+- **Source-convention gates** (`[gremlins]`, `[header]`, `[[textlint]]`,
+  `[textlint_preset]`, `[[script_check]]`, `[manifest]`,
+  `[[dependency_rule]]`, `[rustdoc]`): `brokkr man conventions`
+- **Sweeps and test policy** (`[[check]]`, `[[lint_sweep]]`, `parallel`,
+  `[test]` and its profiles, `[[quarantine]]`): `brokkr man sweeps`
+- **Script benches** (`[bench.*]`, `[bench_params.*]`, `[data]`):
+  `brokkr man bench-config`
+
+Project-specific config blocks live in their own docs, so a checkout only
 reads the ones that apply to it:
-- Datasets (`[<host>.datasets.*]` pbf/osc/pmtiles/polygon) ->
-  `docs/brokkr.toml.datasets.md` (`brokkr man datasets`)
-- `[litehtml]` -> `docs/projects/litehtml.md`
-- `[sluggrs]` -> `docs/projects/sluggrs.md`
-- `[ratatoskr]` and `[ratatoskr.harness]` -> `docs/projects/ratatoskr.md`
-- `[piners]` is retired with `brokkr corpus` and `brokkr corpus-results`:
-  it still loads in a piners project, whatever it holds, unvalidated and with
-  a warning, and stays in the composed config a script's `config()` sees;
-  piners runs its parity corpus through its own in-tree tool
-- `[dellingr]` is retired with the `brokkr dellingr` driver: it still loads
+
+- **Datasets** (`[HOST.datasets.*]` pbf, osc, pmtiles and polygon):
+  `brokkr man datasets`
+- **`[litehtml]`**: `docs/projects/litehtml.md`
+- **`[sluggrs]`**: `docs/projects/sluggrs.md`
+- **`[ratatoskr]` and `[ratatoskr.harness]`**: `docs/projects/ratatoskr.md`
+- **`[mogwai]` and `[mogwai.targets.*]`**: `docs/projects/mogwai.md`
+- **`[piners]`**: retired with `brokkr corpus` and `brokkr corpus-results`.
+  It still loads in a piners project, whatever it holds, unvalidated and with
+  a warning, and stays in the composed config a script's `config()` sees.
+  piners runs its parity corpus through its own in-tree tool.
+- **`[dellingr]`**: retired with the `brokkr dellingr` driver. It still loads
   in a dellingr project, whatever it holds, unvalidated and with a warning,
-  and stays in the composed config a script's `config()` sees; dellingr
-  benchmarks through `[bench.*]` (`docs/brokkr.toml.bench.md`)
-- `[mogwai]` and `[mogwai.targets.*]` -> `docs/projects/mogwai.md`
+  and stays in the composed config a script's `config()` sees. dellingr
+  benchmarks through `[bench.*]` (`brokkr man bench-config`).
 
 pbfhogg uses script benches and generic commands (`docs/projects/pbfhogg.md`).
 
-## Where brokkr.toml lives
+## Location
 
-Looked up in the working directory, or failing that in its **immediate parent** -
-one level, never a walk to the filesystem root. A deeper search would silently
-attach to a stray `brokkr.toml` in a home directory or to an unrelated enclosing
-project.
+brokkr looks for `brokkr.toml` in the working directory, or failing that in
+its **immediate parent**. It looks one level up, never all the way to the
+filesystem root. A deeper search would silently attach to a stray
+`brokkr.toml` in a home directory or to an unrelated enclosing project.
 
-Finding it one level up is the layout for driving a checkout that is not ours:
-brokkr's state (`.brokkr/`, `data/`) stays in the parent and the foreign repo
-stays clean. That splits two roots which coincide in the ordinary case:
+The one-level-up layout is for driving a checkout that isn't yours: brokkr's
+state (`.brokkr/`, `data/`) stays in the parent and the foreign repo stays
+clean. That layout splits two roots which coincide in the ordinary case:
 
-- **project root** - the directory holding `brokkr.toml`. Anchors `.brokkr/`,
-  `data/`, and every other brokkr-owned store.
-- **build root** - the working directory, where cargo and git run.
+- **Project root**: the directory holding `brokkr.toml`. It anchors
+  `.brokkr/`, `data/` and every other brokkr-owned store.
+- **Build root**: the working directory, where cargo and git run.
 
-The build root is always cwd, and there is deliberately no step that descends
-from the config directory to find the checkout: one config directory may sit
-above several, and guessing which was meant is how a command operates on the
-wrong tree.
+The build root is always the working directory. brokkr deliberately never
+descends from the config directory to find the checkout: one config directory
+may sit above several, and guessing which you meant is how a command operates
+on the wrong tree.
 
-**So run brokkr from inside the checkout, not from the directory holding
-`brokkr.toml`.** Standing in the config directory points every cargo-driving
-command at a directory that holds no `Cargo.toml`; brokkr refuses by name
-(`no Cargo.toml in <dir> or any parent`) rather than forwarding cargo's own
+**Run brokkr from inside the checkout, not from the directory holding
+`brokkr.toml`.** From the config directory, every cargo-driving command would
+point at a directory with no `Cargo.toml`. brokkr refuses by name
+(`no Cargo.toml in DIR or any parent`) rather than forwarding cargo's own
 error, which walks to the root and reads as though the project were broken.
-Config-only commands (`man`, `results`, `history`) work from either directory.
+Config-only commands (`man`, `results`, `history`) work from either
+directory.
 
-## The user-wide brokkr.toml
+## User config
 
-A second, optional config lives at `$XDG_CONFIG_HOME/brokkr/brokkr.toml`
-(falling back to `$HOME/.config/brokkr/brokkr.toml`; an empty or relative
-`XDG_CONFIG_HOME` counts as unset, as the XDG spec says, rather than resolving
-against the cwd). It holds the conventions
-that belong to *you* rather than to any one tree, and it applies in every
-project brokkr detects.
+A second, optional config lives at `$XDG_CONFIG_HOME/brokkr/brokkr.toml`,
+falling back to `$HOME/.config/brokkr/brokkr.toml`. An empty or relative
+`XDG_CONFIG_HOME` counts as unset, as the XDG spec says, rather than
+resolving against the working directory. The user config holds the
+conventions that belong to you rather than to any one tree, and it applies in
+every project brokkr detects.
 
-It accepts these top-level keys and nothing else:
+The user config accepts these top-level keys and nothing else:
 
 | Key | |
 |---|---|
 | `[[textlint]]` | rules, exactly as in a project config |
-| `[textlint_preset.<name>]` | presets for those rules |
+| `[textlint_preset.NAME]` | presets for those rules |
 | `[[script_check]]` | gates, exactly as in a project config |
-| `results_server` | the results server your script-bench runs go to (below); user-only |
+| `results_server` | where your script-bench runs go; user-only (`brokkr man config results_server`) |
 
-Any other key - `project`, `[[check]]`, a host section, `[bench.*]` - is an
-error naming the file.
+Any other key (`project`, `[[check]]`, a host section, `[bench.*]`) is an
+error naming the file. The rest of the schema describes one project (its
+datasets, its sweeps, its bin targets) and has no meaning machine-wide. A
+project-shaped key in a machine-wide file is a mistake, not a setting, so
+brokkr rejects it rather than silently ignoring it.
 
-**`results_server`** names a `brokkr-results-server` (`brokkr man
-results-server`) by URL:
+brokkr interprets `[[textlint]]` `paths` globs and `[[script_check]]`
+commands against each project's own tree, exactly as if you had written the
+entry in that project's config. One exception: a project that declares no
+complete profile doesn't refuse a user `[[script_check]]` with
+`when = "gate"`, as it would its own. That check runs under a complete claim
+and is logged as not run on every other run.
+
+Presets resolve after all config layers are composed, so a user rule can use
+a project preset and a project rule can use a user preset. A preset no
+composed rule references is an error. The exception is a user-only preset
+whose last referencing rule a project shadowed: brokkr drops it, so the
+shadowing opt-out below never fails the load. A project rule that uses a user
+preset loads only on machines that have the user config.
+
+**Merging.** The user file is the lowest-precedence config layer. Its entries
+run first, followed by included project files and the project's own file.
+Shadowing is by `name`: a higher layer that reuses a lower entry's name
+replaces it outright. That is the opt-out: a project that must not run a
+personal rule redefines it under the same name, with no suppression syntax to
+remember. brokkr composes the layer before it parses config sections, so
+named entries and presets resolve across the same complete config.
+
+**Trees with no brokkr.toml.** `check` runs in any Rust and git repo, and the
+user layer applies there too. A repo that never adopted a `brokkr.toml` is
+where a personal convention is likeliest to be the only rule there is. With
+nothing to merge into, the user entries stand alone: `check` runs its
+gremlins, textlint and `script_check` phases from them and skips the
+config-driven rest.
+
+**Overriding the path.** `BROKKR_USER_CONFIG=/path/to/file` reads the layer
+from somewhere else. `BROKKR_USER_CONFIG=` (set, empty) switches it off
+entirely, `results_server` included, for a CI job that must see only the
+project's own rules. An absent file isn't an error. A file that exists but
+doesn't parse is, because silently ignoring it would let one typo switch off
+every rule you wrote.
+
+`brokkr env` prints a `user cfg:` line with the resolved path and how many
+entries of each kind the layer contributed, since a rule from outside the
+tree is otherwise invisible from inside it. When `results_server` is set, it
+also prints a `bench runs:` line naming the server.
+
+## results_server
+
+The user-only `results_server` key names a `brokkr-results-server`
+(`brokkr man results-server`) by URL:
 
 ```toml
 results_server = "https://bench.example.ts.net:8443"
 ```
 
-With it set, `brokkr bench` publishes every run there and `brokkr results`
-reads script-bench runs from there, in every project; the local
-`$XDG_DATA_HOME/brokkr/bench.db` is neither read nor written. Without it,
-everything stays in that local file. The URL is `http://` or `https://`
-with a host (and a port, if given, that is a number), no credentials (the server has no authentication), no query
-or fragment; a path is a prefix for a proxy that routes by path, trailing
-slashes dropped, and every request goes to it with `/bench` appended. An
-invalid value fails every command, naming the file. The key belongs to you,
-not to a project: composition takes it out of the user layer before any
-merge, so it never appears in the composed config or in a run's stored
-config, and a project's `brokkr.toml` or any file it includes setting it to
-a value is an error naming that file (a `[results_server]` table there is
-a host section, as it always was). The rest of the schema describes one project (its datasets, its sweeps,
-its bin targets) and has no meaning machine-wide; a project-shaped key in a
-machine-wide file is a mistake, not a setting, and rejecting it beats
-silently ignoring it.
+With the key set, `brokkr bench` publishes every run there and
+`brokkr results` reads script-bench runs from there, in every project. brokkr
+neither reads nor writes the local `$XDG_DATA_HOME/brokkr/bench.db`. Without
+the key, everything stays in that local file, and so it does when
+`BROKKR_USER_CONFIG=` switches the user layer off.
 
-`[[textlint]]` `paths` globs and `[[script_check]]` commands are interpreted
-against each project's own tree, exactly as if the entry had been written in
-that project's config. One exception: a user `[[script_check]]` with `when =
-"gate"` is not refused in a project that declares no complete profile, as a
-project's own would be; it runs under a complete claim and is logged as not
-run on every other run. Presets resolve after all config layers are composed,
-so a user rule can use a project preset and a project rule can use a user
-preset. A preset not referenced by any composed rule is an error, except a
-user-only preset whose last referencing rule a project shadowed: that one is
-dropped, so the shadowing opt-out below never fails the load. A project rule
-that uses a user preset only loads on machines that have the user config.
+The URL must satisfy all of these:
 
-**Merging.** The user file is the lowest-precedence config layer. Its entries
-run first, followed by included project files and the project's own file.
-Shadowing is by `name`: a higher layer that reuses a lower entry's name
-replaces it outright. That is the opt-out - a project that must not run a
-personal rule redefines it under the same name, rather than needing a
-suppression syntax nobody would remember.
+- The scheme is `http://` or `https://`, with a host.
+- A port, if given, is a number.
+- It has no credentials, since the server has no authentication.
+- It has no query or fragment.
 
-The layer is composed before config sections are parsed, so named entries and
-presets resolve across the same complete config.
+A path is a prefix for a proxy that routes by path. brokkr drops trailing
+slashes and sends every request to the path with `/bench` appended. An
+invalid value fails every command, naming the file.
 
-**Trees with no `brokkr.toml` at all.** `check` runs in any Rust+git repo, and
-the user-wide layer reaches those too - it is not about this project, and a repo
-that never adopted a `brokkr.toml` is exactly where a personal convention is
-likely to be the only rule there is. With nothing to merge into, the user
-entries stand alone: `check` runs its gremlins, textlint and `script_check`
-phases from them and skips the config-driven rest.
+The key belongs to you, not to a project. Composition takes it out of the
+user layer before any merge, so it never appears in the composed config or in
+a run's stored config. A project's `brokkr.toml`, or any file it includes,
+that sets it to a value is an error naming that file. A `[results_server]`
+table there is a host section.
 
-**Overriding the path.** `BROKKR_USER_CONFIG=/path/to/file` reads the layer from
-somewhere else; `BROKKR_USER_CONFIG=` (set, empty) switches it off entirely, for
-a CI job that must see only the project's own rules. An absent file is not an
-error; a file that exists but does not parse is, because silently ignoring it
-would let one typo switch off every rule you wrote.
+## include
 
-`brokkr env` prints a `user cfg:` line with the resolved path and how many
-entries of each kind it contributed - a rule that comes from outside the tree is
-otherwise invisible from inside it - and, when `results_server` is set, a
-`bench runs:` line naming the server.
-
-`BROKKR_USER_CONFIG=` switches `results_server` off with the rest of the
-layer, so script-bench runs go back to the local store.
-
-## `include` - composing brokkr.toml from several files
+A top-level `include` lists further config files that brokkr folds in beneath
+the file naming them:
 
 ```toml
 project = "pbfhogg"
 include = ["../shared/hosts.toml", "../shared/checks.toml"]
 ```
 
-A top-level `include` lists further config files that are folded in *beneath*
-the file naming them. Any key of the project schema may appear in an included
-file - host sections, datasets, `[[check]]`, `[lints]` - except `project`, which
-belongs to the project's own `brokkr.toml`. Included files may `include` more
-files in turn.
+Any key of the project schema may appear in an included file (host sections,
+datasets, `[[check]]`, `[lints]`) except `project`, which belongs to the
+project's own `brokkr.toml`. Included files may `include` more files in turn.
 
-**Precedence.** A file's own keys override everything it includes, and a later
-include overrides an earlier one. Merging is key by key:
+**Precedence.** A file's own keys override everything it includes, and a
+later include overrides an earlier one. Merging is key by key:
 
 | Both sides hold | Result |
 |---|---|
-| a table | merged recursively - a host section may be split across files |
+| a table | merged recursively, so a host section may be split across files |
 | an array of tables (`[[check]]`, `[[textlint]]`, `[[script_check]]`, ...) | joined, included entries first; an included entry whose `name` the including side reuses is dropped (the user layer's shadowing rule) |
 | anything else | the including side's value replaces the included one |
 
 **Paths.** `include` paths resolve against the directory of the file naming
 them, and so does a bench's `script_file` (`brokkr man bench-config`): both
-name a piece of the config's own file layout. Every *other* path in an
-included file (dataset files, `[[script_check]]` commands, globs) means what
-it means in `brokkr.toml`: it resolves against the project root. An included
-file is config for the project that includes it, not a project of its own.
-The directory is the file's real one: a file reached through a symlink
-resolves beside its target.
+name a piece of the config's own file layout. Every other path in an included
+file (dataset files, `[[script_check]]` commands, globs) means what it means
+in `brokkr.toml` and resolves against the project root. An included file is
+config for the project that includes it, not a project of its own. The
+directory is the file's real one: a file reached through a symlink resolves
+beside its target.
 
-**Errors, not skips.** A missing, unreadable or malformed include is an error
-naming the file that included it, as is a cycle, or a file reached twice (its
-`[[array]]` entries would be counted twice).
+**Errors, not skips.** Each of these is an error naming the file that
+included it:
 
-**Where brokkr writes.** A write to `[<host>.datasets.<name>]` edits the file
-that defines it, located from the composed config's per-table provenance. A dataset not registered
-anywhere yet goes into the file that already holds that host's datasets, when
-that is one file, and into `brokkr.toml` otherwise. A dataset table split across
-two files is refused: editing one half would leave a mixture.
+- a missing, unreadable or malformed include
+- a cycle
+- a file reached twice, whose `[[array]]` entries would be counted twice
+
+**Where brokkr writes.** A write to `[HOST.datasets.NAME]` edits the file
+that defines it, located from the composed config's per-table provenance. A
+dataset not registered anywhere yet goes into the file that already holds
+that host's datasets, when that is one file, and into `brokkr.toml`
+otherwise. brokkr refuses a dataset table split across two files, since
+editing one half would leave a mixture.
 
 **Clean-tree checks.** Included files inside the checkout are exempt from the
 measured-run dirty check, exactly as `brokkr.toml` is, since brokkr writes
 registrations into them too.
 
 ## Top-level shape
+
+A `brokkr.toml` names its project and then holds reserved sections and host
+sections:
 
 ```toml
 project = "pbfhogg"
@@ -206,443 +225,494 @@ project = "pbfhogg"
 data = "data"
 scratch = "data/scratch"
 target = "target"
-worktree_keep = 6         # persistent --commit worktrees kept before LRU eviction
+worktree_keep = 6
 drives.source = "nvme"
 drives.data = "ssd"
 features = ["linux-direct-io", "linux-io-uring"]
 
-# Map-data projects add [<host>.datasets.*] tables here -
-# see docs/brokkr.toml.datasets.md
-# A hostname colliding with a reserved section can use [host.<name>],
-# e.g. [host.test].
+# Map-data projects add [HOST.datasets.*] tables here
+# (brokkr man datasets).
 ```
 
-`include` is consumed while config layers are composed. Other reserved
-top-level keys are parsed as their named sections; an unrecognized table is a
-legacy hostname section, and an unrecognized non-table value is rejected.
-`[litehtml]`, `[sluggrs]`, `[ratatoskr]`, `[piners]`, `[dellingr]`, and
+brokkr consumes `include` while it composes config layers. It parses the
+other reserved top-level keys as their named sections. An unrecognized table
+is a legacy hostname section (`brokkr man config host-sections`), and an
+unrecognized non-table value is rejected.
+
+`[litehtml]`, `[sluggrs]`, `[ratatoskr]`, `[piners]`, `[dellingr]` and
 `[mogwai]` belong only to projects with the matching `project` value; a
-section for a different project is a load error. The matching section is
-required for `litehtml-rs`, `sluggrs`, `ratatoskr` and `mogwai`.
-Project-specific config details are in the linked project docs at the top of
-this document.
-`[host.<name>]` is also accepted and lets a hostname use a reserved section
-name. Host tables must set at least one supported option, and unknown fields
-inside one are rejected. When host sections exist but none names this machine,
-defaults apply silently on ordinary commands (a config shared across machines
-is normal); `brokkr env` warns and lists the configured hostnames, which is
-where a misspelled hostname shows up. Since legacy hostnames are open-ended, a table with a
-valid host shape is necessarily interpreted as a host even if its name
-resembles a misspelled section. Datasets are host-scoped (no global
-`[datasets]` section). Path resolution: host config -> defaults (`data/`,
-`data/scratch/`), from the config alone. `target` is read by
-`brokkr env`'s storage report alone, which falls back to cargo's target dir when
-it is absent. Builds and `brokkr clean` always use cargo's.
+section for a different project is a load error. `litehtml-rs`, `sluggrs`,
+`ratatoskr` and `mogwai` require their matching section. The project docs
+listed at the top of this page hold the details.
+
+These reserved top-level keys are parsed as config sections or consumed by
+composition:
+`project`, `include`, `host`, `litehtml`, `sluggrs`, `ratatoskr`, `piners`,
+`dellingr`, `mogwai`, `check`, `dependency_rule`, `test`, `quarantine`,
+`capture_env`, `gremlins`, `header`, `textlint`, `textlint_preset`,
+`script_check`, `manifest`, `rustdoc`, `deps`, `lints` (and its `clippy`
+alias), `bin`, `member_check`, `fixture_lint`, `disable_toolchain`,
+`cargo_env`, `bench`, `bench_params`, `data`.
+
+A host literally named `bench`, `bench_params` or `data` (the script-bench
+sections, `brokkr man bench-config`) is written `[host.NAME]`.
+
+Some keys are brokkr's only as non-table values. A table with any of these
+names is still read as a hostname section:
+
+- the `strip_rustflags = [...]` array
+- the `[[lint_sweep]]` and `[[install]]` arrays of tables
+- the `bench_lib = "dir"`, `bench_scripts = "dir"` and `bench_tests = "dir"`
+  strings (`brokkr man bench-config`)
+- the `bench_scripts_exempt = [...]` list (`brokkr man bench-config`)
+
+## Host sections
+
+A host section is a table named after a machine's hostname, holding that
+host's options. `[host.NAME]` is also accepted and lets a hostname use a
+reserved section name, such as `[host.test]`. A host table must set at least
+one supported option, and brokkr rejects unknown fields inside one.
+
+When host sections exist but none names this machine, defaults apply
+silently on ordinary commands, since a config shared across machines is
+normal. `brokkr env` warns and lists the configured hostnames, which is where
+a misspelled hostname shows up. Legacy hostnames are open-ended, so brokkr
+interprets any table with a valid host shape as a host, even if its name
+resembles a misspelled section. `[pbfhogg]` is an ordinary hostname section;
+a `[pbfhogg.library]` table fails to load as an unknown host field.
+
+Datasets are host-scoped; there is no global `[datasets]` section. Paths
+resolve from the host config, then the defaults (`data/`, `data/scratch/`),
+from the config alone. Only `brokkr env`'s storage report reads `target`, and
+it falls back to cargo's target dir when the key is absent. Builds and
+`brokkr clean` always use cargo's.
+
+**Host features.** brokkr adds a host's `features` to these builds:
+
+- measured-request builds, through the shared build context
+- the `passthrough` path
+- a script bench's build (`brokkr bench`), before the bench's own `features`
+
+Standalone `run`, `install`, `check`, `clippy`, `test` and Criterion `crit`
+use their own cargo default or sweep feature selection and don't inherit host
+features. Where a path applies host features, CLI `--features` add to them,
+with duplicates removed. This list is the complete policy for which cargo
+builds inherit host features.
+
+**port.** A host's `port` is for the project's own tools, which read it from
+the composed config (nidhogg's do). No built-in command reads it; a script
+bench sees it in the resolved view's `host` table (`brokkr man
+bench-config`).
 
 **elivagar's host keys.** `output` (elivagar's durable tilegen output store)
-and `[<host>.tilegen.<name>]` blocks are elivagar's own: brokkr reads neither,
-but keeps accepting both so an elivagar host loads. A tilegen block is an
-opaque table, any contents, and counts as host content. A script bench sees
-both in the resolved view's `host` table, with `output` resolved and
-defaulted to `data/tilegen` (`brokkr man bench-config`).
+and `[HOST.tilegen.NAME]` blocks are elivagar's own. brokkr reads neither,
+but accepts both so an elivagar host loads. A tilegen block is an opaque
+table with any contents, and counts as host content. A script bench sees both
+in the resolved view's `host` table, with `output` resolved and defaulted to
+`data/tilegen` (`brokkr man bench-config`).
 
-**Host feature policy.** Host `features` are added to measured-request builds
-through the shared build context, to the `passthrough` path,
-and to a script bench's build (`brokkr bench`, before the bench's own
-`features`). Standalone `run`, `install`, `check`, `clippy`,
-`test`, and Criterion `crit` use their own cargo/default or sweep feature
-selection and do not inherit host features. CLI `--features` are additive to
-host features in paths that apply them, with duplicates removed. This is the
-complete policy for which Cargo builds inherit host features. Host `port` is
-a port for the project's own tools, which read it from the composed config
-(nidhogg's do). No built-in command reads it; a script bench sees it in the
-resolved view's `host` table (`brokkr man bench-config`).
-Reserved top-level keys parsed as config sections, or consumed by composition:
-`project`, `include`, `host`,
-`litehtml`, `sluggrs`, `ratatoskr`, `piners`, `dellingr`, `mogwai`, `check`,
-`dependency_rule`, `test`, `quarantine`, `capture_env`, `gremlins`, `header`,
-`textlint`, `textlint_preset`, `script_check`, `manifest`, `rustdoc`, `deps`,
-`lints` (and its `clippy` alias), `bin`, `member_check`, `fixture_lint`,
-`disable_toolchain`, `cargo_env`, `bench`, `bench_params`, `data`.
+**verify_reference_budget.** This host key is retired: a host that sets it
+loads, and nothing reads the value. It bounded pbfhogg's verify reference
+cache, which no command writes. `brokkr clean` removes a leftover cache.
 
-`bench`, `bench_params` and `data` (the script-bench sections, `brokkr man
-bench-config`) were hostname sections before brokkr claimed them; a host
-literally named one of them is written `[host.<name>]`.
+## worktree_keep
 
-`strip_rustflags`, `lint_sweep`, `install`, `bench_lib`, `bench_scripts`,
-`bench_scripts_exempt` and `bench_tests` are also brokkr's, but only as
-non-table values: a table of any of those names is still read as a hostname
-section, while the `strip_rustflags = [...]` array, the `[[lint_sweep]]` and
-`[[install]]` arrays of tables, the `bench_lib = "dir"`, `bench_scripts =
-"dir"` and `bench_tests = "dir"` strings and the `bench_scripts_exempt =
-[...]` list (`brokkr man bench-config`) are brokkr's.
-
-`[pbfhogg]` is an ordinary hostname section, like any other host name. The
-former `[pbfhogg.library]` claim (harness and require tables) is retired: a
-leftover `[pbfhogg.library]` fails to load as an unknown host field.
-
-## `worktree_keep`
+The host key `worktree_keep` sets how many persistent `--commit` worktrees
+this project keeps before brokkr evicts the least-recently-used:
 
 ```toml
 [plantasjen]
 worktree_keep = 6
 ```
 
-How many persistent `--commit` worktrees this project keeps before the
-least-recently-used are evicted. Default 6. Per host because the disk is a host
-property. `0` is a config error; omit the key to use the default. Zero would
-evict every worktree the moment a second was wanted, which is indistinguishable
-from the feature being broken.
+The default is 6. The key is per host because disk is a host property. `0`
+is a config error; omit the key to use the default. Zero would evict every
+worktree the moment a second was wanted, which looks the same as the feature
+being broken.
 
-Eviction runs when a **new** worktree is cut, never on reuse and never on a
-plain run. That keeps the cost adjacent to a build you are already paying for
-rather than appearing as an unexplained pause, and it stops a measurement from
-becoming a destructive operation merely by happening. The consequence is that a
-project which stops growing never shrinks on its own; `brokkr clean
---worktrees` is the explicit hammer for that.
+The default suits the heaviest dependency graph, not the lightest. A cold
+worktree build on that graph is costly, and a silent multi-minute stall is a
+worse failure than keeping some extra worktrees. A host's `worktree_keep`
+lowers or raises it.
+
+**When eviction runs.** brokkr evicts only when it cuts a new worktree, never
+on reuse and never on a plain run. The cost then comes with a build you are
+already paying for, rather than as an unexplained pause, and a measurement
+never becomes destructive merely by happening. A project that stops growing
+never shrinks on its own; run `brokkr clean --worktrees` for that.
 
 Eviction makes room for the worktree being cut, so the steady state is
-`worktree_keep` worktrees, not one more. The worktree being cut is never itself
-a victim - including when it replaces a stale directory of the same name. The
-whole sequence (eviction, replacement, creation, bookkeeping) runs under the
-global lock, which is then held through the build and measurement, so a
-concurrent brokkr can neither evict a worktree mid-build nor lose a
-bookkeeping update.
+`worktree_keep` worktrees, not one more. The worktree being cut is never
+itself a victim, including when it replaces a stale directory of the same
+name. The whole sequence (eviction, replacement, creation, bookkeeping) runs
+under the global lock, which stays held through the build and measurement.
+A concurrent brokkr can therefore neither evict a worktree mid-build nor lose
+a bookkeeping update.
 
-**This is a growth damper, not a bound.** Retention is per project, so the
-disk-wide total grows with the number of projects that use worktrees. Only a
-global byte budget could promise "never fills the disk", and a count is a proxy
-for the real constraint, which is bytes. The bookkeeping records last-use time
-but does not currently record worktree size; a future size-based rule would
-need to add that measurement.
+**A growth damper, not a bound.** Retention is per project, so the disk-wide
+total grows with the number of projects that use worktrees. Only a global
+byte budget could promise never to fill the disk; a count is a proxy for the
+real constraint, bytes. The bookkeeping records last-use time but not
+worktree size.
 
-The default comes from `worktree_record::DEFAULT_KEEP` and is chosen for the
-**heaviest** dependency graph, not the lightest. A cold worktree build on that
-graph is costly, and a silent multi-minute stall is a worse failure than
-keeping some extra worktrees. The host's `worktree_keep` value can lower or
-raise the default.
+Eviction obeys two rules:
 
-Two rules the eviction obeys:
-
-- **A worktree with uncommitted work is never evicted**, regardless of whether
-  git would have succeeded in removing it. That is correctness, not courtesy: a
-  dirty worktree is the one place where removal destroys something
-  unrecoverable. If git cannot be consulted at all, the worktree is assumed
-  dirty and kept. The same rule guards replacement: a directory at the name
-  `--commit` wants that is not checked out at the requested commit is replaced
-  only if clean, and a dirty (or unreadable) one fails the run with its path
-  rather than being force-removed.
+- **A worktree with uncommitted work is never evicted**, whether or not git
+  would have managed to remove it. A dirty worktree is the one place where
+  removal destroys something unrecoverable. If brokkr can't consult git at
+  all, it assumes the worktree is dirty and keeps it. The same rule guards
+  replacement: brokkr replaces a directory at the name `--commit` wants, not
+  checked out at the requested commit, only if it is clean. A dirty or
+  unreadable one fails the run with its path rather than being force-removed.
 - **Failures skip and continue**, because housekeeping must not fail the
-  measurement you actually asked for. Since skips can hold the count above the
-  limit, brokkr reports the overage on *every* run where it is exceeded, not
-  once when a removal fails - a damper that has quietly stopped working is the
-  original problem, and you should not learn about it from the volume filling.
+  measurement you asked for. Skips can hold the count above the limit, so
+  brokkr reports the overage on every run where it is exceeded, not once
+  when a removal fails. You should learn that the damper stopped working
+  before the volume fills.
 
-Bookkeeping lives in `.brokkr/worktrees.toml` at the project root, written on
-both create and reuse. It is safe to delete; losing it costs a suboptimal
-eviction order, never data. A worktree with no record sorts as oldest, since it
-predates the bookkeeping - treating it as freshest would make pre-existing
-worktrees permanently un-evictable. A file that exists but does not parse is
-reported as an error on every `--commit` run and left untouched (eviction and
-bookkeeping are skipped, the run itself proceeds) rather than silently read as
-empty and overwritten; delete it to recover.
+**Bookkeeping.** brokkr records worktrees in `.brokkr/worktrees.toml` at the
+project root, written on both create and reuse. The file is safe to delete;
+losing it costs a suboptimal eviction order, never data. A worktree with no
+record sorts as oldest, since treating it as freshest would make it
+permanently un-evictable. A file that exists but doesn't parse is reported as
+an error on every `--commit` run and left untouched: eviction and bookkeeping
+are skipped and the run itself proceeds. brokkr never reads it as empty and
+overwrites it; delete it to recover.
 
-Where one project root governs several checkouts (the config-one-level-up
-layout), they share that one file. Each checkout's eviction and pruning touch
-only records named for its own worktrees (`<checkout key>/<short hash>`, the
-key being the checkout's name plus a hash of its path, matched by construction,
-so checkout `foo` never claims `foo-bar`'s).
+Where one project root governs several checkouts (the one-level-up layout in
+`brokkr man config location`), they share that one file. Each checkout's
+eviction and pruning touch only records named for its own worktrees,
+`CHECKOUT_KEY/SHORT_HASH`. The key is the checkout's name plus a hash of its
+path, matched by construction, so checkout `foo` never claims `foo-bar`'s.
 
-A worktree is never *reused* unless its checkout is exactly its commit. The
-worktree container (`~/.brokkr/worktrees`) is writable to sandboxed agents, so
-one can be edited between runs, and reusing it would measure the edit under
-the commit's name. Such a run fails with the worktree's path; `brokkr clean
---worktrees` clears it.
+**Reuse.** brokkr reuses a worktree only if its checkout is exactly its
+commit. Sandboxed agents can write to the worktree container
+(`~/.brokkr/worktrees`), so a worktree can be edited between runs, and
+reusing it would measure the edit under the commit's name. Such a run fails
+with the worktree's path; run `brokkr clean --worktrees` to clear it.
 
-## `verify_reference_budget`
+## disable_toolchain
 
-Retired. It bounded pbfhogg's verify reference cache, which no command writes
-any more. A host that still sets it loads, and nothing reads the value.
-`brokkr clean` removes a cache an earlier brokkr left behind.
-
-## `disable_toolchain`
+The top-level boolean `disable_toolchain` (default `false`) moves the
+project's `rust-toolchain.toml`, or the legacy bare `rust-toolchain`, aside
+while brokkr holds the global lock:
 
 ```toml
 disable_toolchain = true
 ```
 
-Top-level boolean (default `false`). When set, brokkr moves the project's
-`rust-toolchain.toml` (or the legacy bare `rust-toolchain`) aside for the
-duration of the global lock, so rustup ignores the pin and falls back to its
-normal default. brokkr picks no replacement toolchain - it only disables the
-file. The file lives in the code tree (the working directory / build root),
-which is where cargo runs; combined with the parent-directory `brokkr.toml`
-lookup, this is the setup for driving a foreign checkout whose pinned toolchain
-you don't have or don't want.
+rustup then ignores the pin and falls back to its normal default. brokkr
+picks no replacement toolchain; it only disables the file. The file lives in
+the code tree (the working directory, the build root), where cargo runs.
+Combined with the parent-directory `brokkr.toml` lookup, this is the setup
+for driving a foreign checkout whose pinned toolchain you don't have or don't
+want.
 
-Suppression is tied to the lock, not to the whole command: the file is moved
-aside the moment brokkr takes the global lock and restored just before it is
-released. Every command that runs cargo or rustup against the tree therefore
-takes the lock so the pin is disabled while it works - including `deps`
-(which shells out to `cargo metadata`), `env` (whose target report does) and
-`fmt` (rustfmt is toolchain-pinned), none of which are builds in the timing
-sense. Resolving a host's data, scratch and output paths is config alone and
-asks cargo nothing. A command that takes no lock leaves the file alone.
+**Tied to the lock.** brokkr moves the file aside the moment it takes the
+global lock and restores it just before releasing the lock. Every command
+that runs cargo or rustup against the tree therefore takes the lock, so the
+pin is disabled while it works. That includes commands that aren't builds in
+the timing sense:
 
-**When the host toolchain is newer than the pin,** brokkr builds with lints the
-pinned toolchain does not have. That is often the point - it lints ahead of the
-pin - but it has a failure mode worth recognising, because it presents three
-layers away from its cause. A lint the host knows and the pin does not (a
-freshly deprecated API, say) meets a `-Dwarnings` in the project's
-`.cargo/config.toml` and becomes a *hard compile error*, in code no local
-change touched, that CI - building on the pin - never sees. It reads as "your
-code doesn't compile". Suppress the unactionable ones with
-[`[lints] allow`](#lints-section), which reaches the clippy phase and the test
-build alike, or install the pinned toolchain.
+- `deps`, which shells out to `cargo metadata`
+- `env`, whose target report does too
+- `fmt`, since rustfmt is toolchain-pinned
 
-The file is restored when the lock is released - on normal exit, on error, or
-on a cooperative interrupt. A hard kill (`brokkr kill --hard`, SIGKILL) during a
-non-tracked window can leave it moved aside as `rust-toolchain.toml.brokkr-disabled`;
-the next brokkr run in that directory adopts the leftover and restores it,
-printing a `[warn]` that it did so. The routine move aside is identical on
-every run, so a command that keeps a run log (`check`, `test`, measured runs,
-`crit`) records it there only; any other command prints it as a quiet-gated
-`[run]` line rather than drop it.
-Worktree builds (`--commit`) run in a separate checkout that may carry its own
-committed pin; brokkr re-points the disable there for the build, so the
-worktree's pin is disabled too rather than honored.
+Resolving a host's data, scratch and output paths is config alone and asks
+cargo nothing. A command that takes no lock leaves the file alone.
 
-## `strip_rustflags` - removing flags from the tree's cargo config
+**Restoring.** brokkr restores the file when it releases the lock: on normal
+exit, on error, or on a cooperative interrupt. A hard kill
+(`brokkr kill --hard`, SIGKILL) during a non-tracked window can leave it
+moved aside as `rust-toolchain.toml.brokkr-disabled`. The next brokkr run in
+that directory adopts the leftover and restores it, printing a `[warn]` that
+it did so. The routine move aside is identical on every run, so a command
+that keeps a run log (`check`, `test`, measured runs, `crit`) records it only
+there. Any other command prints it as a quiet-gated `[run]` line.
+
+**Worktrees.** A `--commit` build runs in a separate checkout that may have
+its own committed pin. brokkr re-points the disable there for the build, so
+the worktree's pin is disabled too.
+
+**A newer host toolchain.** When the host toolchain is newer than the pin,
+brokkr builds with lints the pinned toolchain doesn't have. That is often the
+point, since it lints ahead of the pin, but the failure mode presents three
+layers away from its cause. A lint the host knows and the pin doesn't, such
+as a freshly deprecated API, meets a `-Dwarnings` in the project's
+`.cargo/config.toml` and becomes a hard compile error. The error is in code
+no local change touched, and CI, building on the pin, never sees it. Suppress
+the unactionable ones with `[lints] allow` (`brokkr man config lints`), which
+reaches the clippy phase and the test build alike, or install the pinned
+toolchain.
+
+## strip_rustflags
+
+The top-level array `strip_rustflags` removes listed flags from the tree's
+cargo config while brokkr holds the global lock:
 
 ```toml
 strip_rustflags = ["-Clink-arg=-fuse-ld=lld"]
 ```
 
-A top-level array, beside `disable_toolchain`. It is a plain key rather than
-a table so it claims no name a hostname section could already use.
+It is a plain key rather than a table, so it claims no name a hostname
+section could already use.
 
-For a foreign checkout whose own `.cargo/config.toml` carries a flag that is
-wrong on this host. The case it was written for: the project's
-`[target.'cfg(target_os = "linux")'] rustflags` names `-fuse-ld=lld`, the
-user-wide `~/.cargo/config.toml` names another linker, cargo joins every
-matching target table, the C driver gets both, lld is not installed, and every
-link fails in code nobody touched. Cargo cannot subtract a flag: `--config`
-merges arrays, and `RUSTFLAGS` replaces every config source at once, dropping
-the project's `-Dwarnings` with the flag you meant. Moving the whole file aside
-would drop those too, so local gates would run laxer than CI.
+The key is for a foreign checkout whose own `.cargo/config.toml` has a flag
+that is wrong on this host. The case it was written for:
 
-While brokkr holds the global lock, the one file cargo reads in
-`<tree>/.cargo` (the legacy extensionless `config` when it can be opened, else
-`config.toml`, by cargo's own probe; a selected path that is not a regular file
-is refused) is replaced by a copy with the listed flags removed, and the
-original is put back before the lock is released. It follows
-`disable_toolchain`'s lifecycle exactly: the build root on every locked
-command, the checkout itself under `--commit`, restored on exit, error,
-interrupt or watchdog kill.
+1. The project's `[target.'cfg(target_os = "linux")'] rustflags` names
+   `-fuse-ld=lld`.
+2. The user-wide `~/.cargo/config.toml` names another linker.
+3. cargo joins every matching target table, so the C driver gets both.
+4. lld isn't installed, so every link fails in code nobody touched.
+
+cargo can't subtract a flag. `--config` merges arrays, and `RUSTFLAGS`
+replaces every config source at once, dropping the project's `-Dwarnings`
+with the flag you meant. Moving the whole file aside would drop those too, so
+local gates would run laxer than CI.
+
+**What is edited.** brokkr selects the one file cargo reads in `TREE/.cargo`
+by cargo's own probe: the legacy extensionless `config` when it can be
+opened, else `config.toml`. A selected path that isn't a regular file is
+refused. brokkr replaces it with a copy with the listed flags removed, and
+puts the original back before releasing the lock. The lifecycle is
+`disable_toolchain`'s exactly: the build root on every locked command, the
+checkout itself under `--commit`, restored on exit, error, interrupt or
+watchdog kill.
 
 **What an entry matches.** An entry is a token sequence: a string splits on
-whitespace, and an array of strings gives tokens verbatim, for an operand that
-contains a space. A `-C` or `-Z` token followed by another forms one unit with
-it, so `"-Clink-arg=x"` and `"-C link-arg=x"` are the same entry and match
-either spelling in the file, while a payload alone (`"link-arg=x"`) never
-matches half of a pair. Matching is physical deletion from each `rustflags`
-value of the file - `build.rustflags`, `host.rustflags`,
-`host.<triple>.rustflags` and every `target.<triple-or-cfg>.rustflags` - not an
-interpretation of rustc's command line:
+whitespace, and an array of strings gives tokens verbatim, for an operand
+that contains a space. A `-C` or `-Z` token followed by another forms one
+unit with it. So `"-Clink-arg=x"` and `"-C link-arg=x"` are the same entry
+and match either spelling in the file, while a payload alone
+(`"link-arg=x"`) never matches half of a pair.
 
-- Every match is found against the original value before anything is removed,
-  so removal never creates a new match. Two entries matching overlapping runs
-  are refused rather than chosen between.
-- A value with no match is left byte-for-byte as it was, and a file with no
-  match anywhere is not replaced at all. A string value stays a string (its
-  surviving tokens rejoined with single spaces), so cargo's string-replaces,
-  array-appends merge is unchanged.
+Matching is physical deletion from each `rustflags` value of the file, not an
+interpretation of rustc's command line. The values are `build.rustflags`,
+`host.rustflags`, `host.TRIPLE.rustflags` and every
+`target.TRIPLE_OR_CFG.rustflags`. Matching follows these rules:
+
+- brokkr finds every match against the original value before removing
+  anything, so removal never creates a new match. It refuses two entries
+  matching overlapping runs rather than choosing between them.
+- A value with no match stays byte-for-byte as it was, and a file with no
+  match anywhere isn't replaced at all. A string value stays a string, its
+  surviving tokens rejoined with single spaces, so cargo's merge (strings
+  replace, arrays append) is unchanged.
 - brokkr refuses to edit a value where a match follows a response file
-  (`@path`) or `--`, or directly follows an option that may take it as an
-  operand (a bare short option such as `-o`, or a long option without `=`),
-  other than the operand-less `-O -g -v -V -h --test --verbose --version
-  --help`. What another config layer contributes before the value is outside
-  the contract.
-- Includes are not followed; only flags written in the selected file are
-  edited. An entry that matched nothing is warned about on every run, naming
-  any `include` or response file it saw as places the flag might live instead.
+  (`@path`) or `--`. It also refuses where a match directly follows an
+  option that may take it as an operand: a bare short option such as `-o`,
+  or a long option without `=`. The operand-less
+  `-O -g -v -V -h --test --verbose --version --help` are exempt. What
+  another config layer contributes before the value is outside the contract.
+- brokkr doesn't follow includes; it edits only flags written in the
+  selected file. An entry that matched nothing draws a warning on every run,
+  naming any `include` or response file it saw as places the flag might live
+  instead.
 - When a removal empties every matching target table, cargo falls through to
-  `build.rustflags`; brokkr warns when the source a host build uses changed.
+  `build.rustflags`. brokkr warns when the source a host build uses changed.
 
-A non-array value, empty entries, entries that are not strings or string
-arrays, and two entries naming the same flag are config errors. A symlinked
-config file is refused. The user-wide config layer rejects the key; under
-`include` the including file's list replaces an included one, like any plain
-value.
+**Config errors.** brokkr rejects a non-array value, empty entries, entries
+that aren't strings or string arrays, and two entries naming the same flag.
+It refuses a symlinked config file. The user-wide config layer rejects the
+key. Under `include`, the including file's list replaces an included one,
+like any plain value.
 
-**What is promised about the file.** The original is moved, never copied, and
-every move is a rename that will not replace an existing file, so an editor
-saving the config during the window is never lost: brokkr finds a file it did
-not install and stops with a refusal naming every file present, changing
+**What is promised about the file.** brokkr moves the original, never copies
+it, and every move is a rename that won't replace an existing file. An editor
+saving the config during the window is never lost: brokkr finds a file it
+didn't install and stops with a refusal naming every file present, changing
 nothing. The installed copy starts with a `# brokkr strip_rustflags v1` line
-naming hashes of the original and of itself, which is how a later run tells
-its own untouched install from an edit. A run that died mid-window is put back
-by the next brokkr run in that tree, whatever `brokkr.toml` says by then, and a
-`--commit` worktree is put back before its cleanliness is checked for reuse.
-Three names next to the file are brokkr's own while it works -
-`<file>.brokkr-original`, `<file>.brokkr-installing` and
-`<file>.brokkr-displaced`; changing those by hand, or writing through a
-descriptor an editor had open on the file before the window, is outside what
-is guarded. The installed copy and its original count as clean for
-measurement and history only when the original still equals `HEAD` and the
-copy is brokkr's untouched install over it. Code:
-`src/cargo_config_strip/`, `src/tree_policy.rs`.
+naming hashes of the original and of itself. That line is how a later run
+tells its own untouched install from an edit.
 
-## `[cargo_env]` - variables computed per cargo invocation
+The next brokkr run in that tree puts back a run that died mid-window,
+whatever `brokkr.toml` says by then. brokkr puts a `--commit` worktree back
+before checking its cleanliness for reuse. Three names next to the file are
+brokkr's own while it works: `FILE.brokkr-original`, `FILE.brokkr-installing`
+and `FILE.brokkr-displaced`. Changing those by hand, or writing through a
+descriptor an editor had open on the file before the window, is outside what
+is guarded.
+
+The installed copy and its original count as clean for measurement and
+history only when the original still equals `HEAD` and the copy is brokkr's
+untouched install over it.
+
+## cargo_env
+
+The `[cargo_env]` table sets environment variables computed per cargo
+invocation. Each entry names a variable and a shell command:
 
 ```toml
 [cargo_env]
 BA_SOURCE_IDENTITY = "python3 scripts/source_identity.py"
 ```
 
-Each entry names an environment variable and a shell command. Before every
-cargo brokkr launches, every command runs and its trimmed stdout is set on that
-cargo as the variable. The use it exists for: a build script whose real input
-cargo cannot watch through mtimes (a content-exact source identity, say)
-declares `cargo::rerun-if-env-changed=NAME` instead of rerunning on every
-build. A rerun build script dirties its own package, so the difference is every
-consumer recompiling on every cargo invocation against recompiling only when
+Before every cargo brokkr launches, brokkr runs every command and sets its
+trimmed stdout on that cargo as the variable. The table is for a build script
+whose real input cargo can't watch through mtimes, such as a content-exact
+source identity. The build script declares
+`cargo::rerun-if-env-changed=NAME` instead of rerunning on every build. A
+rerun build script dirties its own package, so the difference is every
+consumer recompiling on every cargo invocation, against recompiling only when
 the value changes. A plain `cargo` or rust-analyzer never sets the variable,
 so such a build script should keep rerunning when it is absent.
 
-- **Per invocation, never cached.** An edit between two cargo invocations of one
-  run changes what the second gets. Each evaluation is a point-in-time reading:
-  an edit during the build itself is the command's to detect.
-- **What counts.** Every cargo brokkr launches itself, except invocations that
-  run no build script (`metadata`, `clean`, `tree`, `locate-project`, `pkgid`,
-  `version`, `help`, `fmt`, and cargo's own `--version`/`--help`). A cargo run
-  by a script check, a test or a build script is outside it. A
-  `brokkr check` lane that runs its prepared binaries without invoking cargo
-  evaluates nothing: those binaries carry the value they were built with.
-- **Where it runs.** `sh -c` in the directory cargo is about to run in - the
-  worktree for a `--commit` build, so a relative command runs that tree's own
-  script against that tree. The entries are the current tree's, though, so a
-  commit older than the script has no script to run: a plain entry that
-  runs it fails there, and with it every `--commit` build of that commit. The environment is
-  the one that cargo gets (brokkr's, the sweep's, the hold capability) with
-  every configured name removed, so no command reads a stale value of itself
-  or another entry. Entries are evaluated in name order, independently.
+The rules for entries:
+
+- **Per invocation, never cached.** An edit between two cargo invocations of
+  one run changes what the second gets. Each evaluation is a point-in-time
+  reading: detecting an edit during the build itself is the command's job.
+- **What counts.** Every cargo brokkr launches itself, except invocations
+  that run no build script: `metadata`, `clean`, `tree`, `locate-project`,
+  `pkgid`, `version`, `help`, `fmt`, and cargo's own `--version` and
+  `--help`. A cargo run by a script check, a test or a build script is
+  outside it. A `brokkr check` lane that runs its prepared binaries without
+  invoking cargo evaluates nothing: those binaries have the value they were
+  built with.
+- **Where it runs.** brokkr runs `sh -c` in the directory cargo is about to
+  run in: the worktree for a `--commit` build, so a relative command runs
+  that tree's own script against that tree. The entries are the current
+  tree's, though, so a commit older than the script has no script to run. A
+  plain entry that runs it fails there, and with it every `--commit` build
+  of that commit.
+- **Its environment.** The command gets the environment cargo gets
+  (brokkr's, the sweep's, the hold capability) with every configured name
+  removed, so no command reads a stale value of itself or another entry.
+  brokkr evaluates entries in name order, independently.
 - **Where it applies.** The table form names a path that must exist for the
-  entry to apply:
-
-  ```toml
-  [cargo_env]
-  BA_SOURCE_IDENTITY = { command = "python3 scripts/source_identity.py", if_exists = "scripts/source_identity.py" }
-  ```
-
-  `if_exists` is relative to the directory the command would run in, checked
-  per cargo invocation; a directory counts, a dangling symlink does not. Where
-  nothing exists there - a commit from before the script arrived - the
-  command is not run and the name is removed from that cargo's environment,
-  inherited value included, so the build sees the variable absent: the state
-  a plain `cargo` leaves it in, which its build scripts must handle anyway. The
-  run log says so (`cargo_env NAME unset: <path> does not exist in <dir>`,
-  on the console when no run log is open). A path whose existence cannot be
-  determined fails like an evaluation. Existence decides only whether the
-  entry applies: a script that is there and fails still fails. A plain string
-  entry applies to every tree. Under `include`, a layer that names an entry
-  replaces it whole, so a redefined command never inherits another layer's
-  `if_exists`.
-- **Failure is fatal.** A non-zero exit, 30 seconds without finishing, more than
-  4 KiB of output, output that is empty, not UTF-8, more than one line or
-  carries a control character, or output that did not close - any of these
-  fails that cargo spawn and is printed once, with the command, the directory
-  and its stderr. Every later cargo of the run is refused, and the command exits
-  non-zero even where a path that tolerates a failed build carried on.
-- **Build inputs, not test environment.** The value is set on cargo, so build
-  scripts and rustc see it, and a test `cargo test` runs inherits it; the
-  lanes that execute test binaries directly do not set it. Tests must not read
-  it at runtime.
-- **Refused at load:** a name that is not an environment variable name; one in
-  a namespace brokkr, cargo, rustc or the loader owns (`BROKKR_*`, `CARGO*`,
-  `RUST*`, `LD_*`, `PATH`, `HOME`); a blank command; a name a
-  [`capture_env`](#top-level-shape) pattern matches - capture reads brokkr's own
-  environment, which never carries the per-invocation value; and in the table
-  form a missing `command`, a blank or absolute `if_exists`, or any other key.
-- **Refused per invocation:** a cargo config `[env]` entry for the name, in the
-  chain that cargo reads or a `--config` it is given. `force = true` there
+  entry to apply. See "Conditional entries" below.
+- **Failure is fatal.** Any of these fails that cargo spawn: a non-zero exit,
+  30s without finishing, more than 4 KiB of output, output that is empty,
+  not UTF-8, more than one line or has a control character, or output that
+  didn't close. brokkr prints the failure once, with the command, the
+  directory and its stderr. Every later cargo of the run is refused, and the
+  command exits non-zero even where a path that tolerates a failed build
+  carried on.
+- **Build inputs, not test environment.** brokkr sets the value on cargo, so
+  build scripts and rustc see it, and a test `cargo test` runs inherits it.
+  The lanes that execute test binaries directly don't set it. Tests must not
+  read it at runtime.
+- **Refused at load:** a name that isn't an environment variable name; one
+  in a namespace brokkr, cargo, rustc or the loader owns (`BROKKR_*`,
+  `CARGO*`, `RUST*`, `LD_*`, `PATH`, `HOME`); a blank command; a name a
+  `capture_env` pattern matches, since capture reads brokkr's own
+  environment, which never has the per-invocation value; and in the table
+  form a missing `command`, a blank or absolute `if_exists`, or any other
+  key.
+- **Refused per invocation:** a cargo config `[env]` entry for the name, in
+  the chain cargo reads or a `--config` it is given. `force = true` there
   would replace what brokkr hands cargo, and a plain entry would be a second
   source for one input. This holds for an entry `if_exists` skipped too,
   since cargo would hand the build that entry's value where brokkr promised
   it absent.
 
-The values go to the run log, one line per variable per cargo invocation
-(`cargo_env NAME=value (12ms in <dir>, for cargo test)`). The user-wide config
-layer rejects the table: what a project's build scripts read is the project's
-to say. Code: `src/cargo_env.rs`.
+**Conditional entries.** The table form adds `if_exists`, a path that must
+exist for the entry to apply:
 
-## `[deps]` section
+```toml
+[cargo_env.BA_SOURCE_IDENTITY]
+command = "python3 scripts/source_identity.py"
+if_exists = "scripts/source_identity.py"
+```
 
-Tuning for the `brokkr deps` audit (optional; `deps` runs in any Rust+git repo).
+`if_exists` is relative to the directory the command would run in, checked
+per cargo invocation. A directory counts; a dangling symlink doesn't. Where
+nothing exists there, such as a commit from before the script arrived,
+brokkr doesn't run the command. It removes the name from that cargo's
+environment, inherited value included, so the build sees the variable
+absent. That is the state a plain `cargo` leaves it in, which its build
+scripts must handle anyway. The run log says so
+(`cargo_env NAME unset: PATH does not exist in DIR`), or the console when no
+run log is open.
+
+A path whose existence can't be determined fails like an evaluation.
+Existence decides only whether the entry applies: a script that is there and
+fails still fails. A plain string entry applies to every tree. Under
+`include`, a layer that names an entry replaces it whole, so a redefined
+command never inherits another layer's `if_exists`.
+
+**Logging and scope.** brokkr writes the values to the run log, one line per
+variable per cargo invocation
+(`cargo_env NAME=value (12ms in DIR, for cargo test)`). The user-wide config
+layer rejects the table: what a project's build scripts read is the
+project's to say.
+
+## deps
+
+The optional `[deps]` table tunes the `brokkr deps` audit, which runs in any
+Rust and git repo:
 
 ```toml
 [deps]
 workspace_dep_ignore = ["lychee", "cargo-*", "backtest"]
 ```
 
-- `workspace_dep_ignore` - workspace-dependency names the unused-workspace-dep
-  phase must not flag even when no member inherits them (dev tools, top-level
-  members whose use cargo metadata can't attribute). An entry ending in `*` is
-  a prefix match. Every entry must match a declared `[workspace.dependencies]`
-  key when `brokkr deps` runs; stale entries are refused. See
-  `docs/commands/deps.md`.
+- **`workspace_dep_ignore`**: workspace-dependency names the
+  unused-workspace-dep phase must not flag even when no member inherits
+  them, such as dev tools or top-level members whose use cargo metadata
+  can't attribute. An entry ending in `*` is a prefix match. Every entry
+  must match a declared `[workspace.dependencies]` key when `brokkr deps`
+  runs; brokkr refuses stale entries. See `brokkr man deps`.
 
-## `[bin]` section
+## bin
 
-Shared defaults for `brokkr run` and `brokkr install` (optional). Both
-commands discover their targets from cargo metadata - every workspace bin
-target (and, for `run`, executable example target) is runnable by name with no config at
-all. The section curates what discovery leaves ambiguous:
+The optional `[bin]` table sets shared defaults for `brokkr run` and
+`brokkr install`. Both commands discover their targets from cargo metadata:
+every workspace bin target, and for `run` every executable example target,
+is runnable by name with no config at all. The table curates what discovery
+leaves ambiguous:
 
 ```toml
 [bin]
-default = "app"              # bare `brokkr run` target (bin or example name)
-install = ["app", "runner"]  # packages `brokkr install` installs
-debug = true                 # dev profile for run + `--debug` for install
-# profile = "fast"           # or a cargo profile by name; wins over `debug`
+default = "app"
+install = ["app", "runner"]
+debug = true
 ```
 
-- `default` - the target name bare `brokkr run` launches. Without it, a sole
-  runnable runs; several runnables print an index and exit 0.
-- `install` - package names installed via `cargo install --locked --path
-  <pkg dir>`, in order. Without it, the workspace's sole bin-carrying package installs;
-  several is an error naming this key. A package with no bin target is a
-  config error.
-- `debug` - default both commands to the dev profile (`cargo run` without
-  `--release`, `cargo install --debug`). Unset means release for both,
-  matching `brokkr test`. CLI `--debug` / `--release` / `--profile`
+The keys:
+
+- **`default`**: the bin or example name bare `brokkr run` launches. Without
+  it, a sole runnable runs; several runnables print an index and exit 0.
+- **`install`**: package names `brokkr install` installs, in order, via
+  `cargo install --locked --path PKG_DIR`. Without it, the workspace's sole
+  bin-carrying package installs; several is an error naming this key. A
+  package with no bin target is a config error.
+- **`debug`**: default both commands to the dev profile (`cargo run`
+  without `--release`, `cargo install --debug`). Unset means release for
+  both, matching `brokkr test`. CLI `--debug`, `--release` and `--profile`
   (mutually exclusive) override in either direction.
-- `profile` - the cargo profile both commands default to, by name: `"dev"`,
-  `"release"`, or a custom `[profile.<name>]` from the workspace's
-  `Cargo.toml` (`cargo run --profile <name>`, `cargo install --profile
-  <name>`). Wins over `debug` when both are set - with a warning, since
-  `include` composition can leave both set from different layers - and
-  `"release"` or `"dev"` here overrides an inherited custom one. Names Cargo
-  or brokkr owns under the target directory (`debug`, `test`, `bench`,
-  `doc`, `tmp`, `verify`, `brokkr-worktrees`, and anything starting
-  `rustflags-`, `unify-` or `fixture-`) are refused at load. Cargo checks
-  that the profile exists when it builds.
-- `install_feature_check` - `"off"` / `"gate"` (the default) / `"always"`:
-  when `brokkr check` compiles the `install` packages' bins under
-  package-mode feature unification - the way `cargo install` resolves them,
-  without features sibling workspace members contribute - at the install
-  profile (release for a custom one: the check runs under dev or release
-  only, and the feature resolve it verifies does not depend on the
-  profile). `"gate"` means only under a `certifies = "complete"` profile.
-  Requires an explicit `install` list; the key without one is a load error.
-  This is the member-check phase run over the install set: a `[member_check]`
-  table (below) supersedes it, and setting both is a load error. See
-  `brokkr man test-lanes member_check`.
+- **`profile`**: the cargo profile both commands default to, by name:
+  `"dev"`, `"release"`, or a custom `[profile.NAME]` from the workspace's
+  `Cargo.toml` (`cargo run --profile NAME`, `cargo install --profile NAME`).
+  See "profile" below.
+- **`install_feature_check`**: when `brokkr check` compiles the `install`
+  packages' bins under package-mode feature unification. See
+  "install_feature_check" below.
 
-## `[[install]]` - post-install steps
+**profile.** `profile` wins over `debug` when both are set, with a warning,
+since `include` composition can leave both set from different layers.
+`"release"` or `"dev"` here overrides an inherited custom one. brokkr refuses
+at load names cargo or brokkr owns under the target directory: `debug`,
+`test`, `bench`, `doc`, `tmp`, `verify`, `brokkr-worktrees`, and anything
+starting `rustflags-`, `unify-` or `fixture-`. cargo checks that the profile
+exists when it builds.
 
-Steps `brokkr install` runs, in order, after every package installed
-(optional):
+**install_feature_check.** The values are `"off"`, `"gate"` (the default)
+and `"always"`; `"gate"` means only under a `certifies = "complete"`
+profile. Package-mode unification is how `cargo install` resolves the bins,
+without the features sibling workspace members contribute. The check runs at
+the install profile, or release for a custom one: the check runs under dev
+or release only, and the feature resolve it verifies doesn't depend on the
+profile. The key requires an explicit `install` list; without one it is a
+load error. This is the member-check phase run over the install set: a
+`[member_check]` table supersedes it, and setting both is a load error. See
+`brokkr man test-lanes member_check`.
+
+## install
+
+The optional `[[install]]` array lists post-install steps `brokkr install`
+runs, in order, after every package installed:
 
 ```toml
 [[install]]
@@ -654,114 +724,128 @@ name = "completions"
 run = { command = "orchestrate completions zsh > ~/.zfunc/_orchestrate" }
 ```
 
-- `name` - required and unique; it names the step in output and errors, and
-  an including file reusing it replaces the included entry.
-- exactly one action key per entry, each holding its own table:
-  - `copy` - `from` (relative, inside the project root) and `to` (absolute,
-    or starting with `~/`). Neither may hold an empty, `.` or `..`
-    component or a trailing slash. Unknown fields are refused.
-  - `run` - `command`, run as `sh -c` from the build root.
+Each entry has these keys:
 
-A blank name, a repeated name, an entry with no action or with both, a blank
-`command`, and a `from` or `to` breaking the rules above are load errors.
-Like `lint_sweep`, the key is claimed only as an array: an `[install]` table
-is still a hostname section.
-The user-wide layer cannot declare steps. What the steps do - exclusive
-ownership of a copy destination, the ownership check, atomic replacement and
-crash recovery - is in `brokkr man run install` (its "Post-install steps").
+- **`name`**: required and unique. It names the step in output and errors,
+  and an including file reusing it replaces the included entry.
+- **One action key**, each holding its own table:
+  - `copy`: `from` (relative, inside the project root) and `to` (absolute,
+    or starting with `~/`). Neither may hold an empty, `.` or `..` component
+    or a trailing slash. Unknown fields are refused.
+  - `run`: `command`, run as `sh -c` from the build root.
 
-## `[member_check]` section
+These are load errors: a blank name, a repeated name, an entry with no action
+or with both, a blank `command`, and a `from` or `to` breaking the rules
+above. Like `lint_sweep`, the key is claimed only as an array: an `[install]`
+table is still a hostname section. The user-wide layer can't declare steps.
+What the steps do (exclusive ownership of a copy destination, the ownership
+check, atomic replacement and crash recovery) is in `brokkr man run install`.
 
-Compile every workspace member's production targets under that member's own
-package-mode resolve - the `cargo install` boundary - one cargo invocation per
-member (optional):
+## member_check
+
+The optional `[member_check]` table compiles every workspace member's
+production targets under that member's own package-mode resolve, the
+`cargo install` boundary, with one cargo invocation per member:
 
 ```toml
 [member_check]
-when = "gate"               # "off" | "gate" (default) | "always"
-targets = ["lib", "bins"]   # default; any non-empty subset of lib, bins
-profile = "dev"             # "dev" (default) | "release"
+when = "gate"
+targets = ["lib", "bins"]
+profile = "dev"
 skip = [{ package = "xtask", reason = "tooling, never installed" }]
 ```
 
+`when` is `"off"`, `"gate"` (the default) or `"always"`. `targets` defaults
+to `["lib", "bins"]` and takes any non-empty subset of `lib` and `bins`.
+`profile` is `"dev"` (the default) or `"release"`.
+
 Without the table, a non-empty `[bin] install` implies the narrower install
-gate described under `[bin]`; with it, every member is checked and
-`[bin] install_feature_check` is a conflict. The semantics, refusals and what a green run claims are in
-`brokkr man test-lanes member_check`.
+gate (`brokkr man config bin`). With it, every member is checked and
+`[bin] install_feature_check` is a conflict. The semantics, refusals and
+what a green run claims are in `brokkr man test-lanes member_check`.
 
-## `[lints]` section
+## lints
 
-Lint suppressions, applied to **every phase that compiles** - `brokkr check`'s
-clippy phase and its test phase, plus `brokkr clippy` (optional).
-
-"Every phase that compiles" is the literal rule and includes the parts of a
-phase that are not the obvious cargo run: the sweep pre-builds, every lane's
-prebuild, and the `prepare` phase's `cargo test --no-run` builds (each lane's
-and each shape's universe). Anything that invokes the compiler fails on a lint the project's
-`-Dwarnings` promotes to an error, whether or not brokkr would have read its
-diagnostics.
-
-Spelled `[clippy]` before the test phase started reading it, and that spelling
-still parses. The two are a true alias: if both are present their lists are
-unioned, so a project part-way through the rename never has one section
-silently shadow the other.
+The optional `[lints]` table holds lint suppressions, applied to every phase
+that compiles: `brokkr check`'s clippy phase and test phase, and
+`brokkr clippy`.
 
 ```toml
 [lints]
-allow = ["clippy::unused_async_trait_impl", "clippy::default_constructed_unit_structs"]
+allow = ["clippy::unused_async_trait_impl"]
 allow_exact = ["clippy::unused_async_trait_impl@crates/system/src/kernel.rs"]
 ```
 
-- `allow` - lint names suppressed on every sweep. The clippy phase appends
-  `-A <lint>` after `--cap-lints=warn`; the test phase has no rustc
-  passthrough of its own and routes them through cargo's rustflags (see
-  the note below the list). The escape hatch for driving a
-  foreign checkout under `disable_toolchain`, where the host's newer compiler
-  surfaces lints the project's pinned-toolchain CI cannot see - and where a
-  `-Dwarnings` in the project's `.cargo/config.toml` turns each of them into a
-  hard compile error. Bare lint names only (`clippy::`-qualified or plain
-  rustc names) - a leading `-` or embedded whitespace is rejected at parse
-  time. Each phase announces the allowed lints at the start of every run.
-  Known limit in the clippy phase: a site carrying its own lint-level
-  attribute can defeat the injected `-A` - observed on clippy 1.98, where an
-  `#[expect]` for a sibling lint let the allowed lint through at error
-  severity despite `-A` and `--cap-lints=warn`. See `docs/commands/check.md`
-  for the full shape.
-- `allow_exact` - sited suppressions in the `"lint@path"` form, the remedy
-  for that known limit: matching diagnostics (same lint, `clippy::`
-  qualifier optional; same build-root-relative file, copied from the failing
-  diagnostic's location) are dropped at brokkr's JSON ingestion, after the
-  compiler has spoken, so no attribute at the site can defeat them. One lint
-  in one file - every occurrence in that file, but never workspace-wide, and
-  no `-A` is injected, so other sites of the same lint still fail. The
-  entries are announced up front, grouped by lint with a file count (a lint
-  with one site keeps its path); one that suppressed nothing draws a stale
-  notice, and that one is reported per entry, since it is the part a reader
-  has to act on. An entry whose path is absent suppresses nothing, and
-  `brokkr check --audit` names it without a build. Parse-time rejection mirrors `allow`, plus the `@` split:
-  exactly one `@`, non-empty halves, no whitespace, and a relative path.
-  Absolute paths are rejected. See `docs/commands/check.md`.
+"Every phase that compiles" is the literal rule. It includes the parts of a
+phase that aren't the obvious cargo run: the sweep pre-builds, every lane's
+prebuild, and the `prepare` phase's `cargo test --no-run` builds (each
+lane's and each shape's universe). Anything that invokes the compiler fails
+on a lint the project's `-Dwarnings` promotes to an error, whether or not
+brokkr would have read its diagnostics.
 
-  **The file scoping is clippy-phase only.** A lint that fails a *build* fails
-  it during compilation, before any diagnostic reaches brokkr to be filtered,
-  and `-A` has no path-scoped form - so in the test phase each entry
-  contributes its lint name build-wide, and the run says so on its notice
-  line. The narrow guarantee still holds everywhere it can be enforced. The
-  alternative was an `allow_exact` that silently does nothing about the build
-  failure it was written for.
+The table may also be spelled `[clippy]`. The two are a true alias: if both
+are present brokkr unions their lists, so neither silently shadows the
+other.
 
-In the test phase only rustc's own lints are injected (`clippy::`, `rustdoc::`
-and `cargo::` names never reach a build). Each injected allow changes every
-unit's fingerprint, so a lint the project can allow in its manifest's `[lints]`
-is better allowed there. brokkr adds the `-A` flags to whichever rustflags
-source cargo is already using - never by exporting `RUSTFLAGS`, which would
-discard the project's own flags - and prints the layer it chose:
+The keys:
 
-```
+- **`allow`**: lint names suppressed on every sweep. See "allow" below.
+- **`allow_exact`**: sited suppressions in the `"lint@path"` form. See
+  "allow_exact" below.
+
+**allow.** The clippy phase appends `-A LINT` after `--cap-lints=warn`. The
+test phase has no rustc passthrough of its own and routes them through
+cargo's rustflags (see "In the test phase" below). `allow` is the escape
+hatch for driving a foreign checkout under `disable_toolchain`. There the
+host's newer compiler surfaces lints the project's pinned-toolchain CI can't
+see, and a `-Dwarnings` in the project's `.cargo/config.toml` turns each into
+a hard compile error.
+
+Entries are bare lint names, `clippy::`-qualified or plain rustc names.
+brokkr rejects a leading `-` or embedded whitespace at parse time. Each phase
+announces the allowed lints at the start of every run.
+
+A known limit in the clippy phase: a site with its own lint-level attribute
+can defeat the injected `-A`. On clippy 1.98, an `expect` attribute for a
+sibling lint let the allowed lint through at error severity despite `-A` and
+`--cap-lints=warn`. See `brokkr man check` for the full shape.
+
+**allow_exact.** `allow_exact` is the remedy for that known limit. A
+matching diagnostic has the same lint (the `clippy::` qualifier is optional)
+and the same build-root-relative file, copied from the failing diagnostic's
+location. brokkr drops matching diagnostics at its JSON ingestion, after the
+compiler has spoken, so no attribute at the site can defeat them.
+
+An entry covers one lint in one file: every occurrence in that file, but
+never workspace-wide. brokkr injects no `-A`, so other sites of the same lint
+still fail. brokkr announces the entries up front, grouped by lint with a
+file count; a lint with one site keeps its path. An entry that suppressed
+nothing draws a stale notice, reported per entry, since that is the part you
+have to act on. An entry whose path is absent suppresses nothing, and
+`brokkr check --audit` names it without a build.
+
+Parse-time rejection mirrors `allow`, plus the `@` split: exactly one `@`,
+non-empty halves, no whitespace, and a relative path. brokkr rejects
+absolute paths. See `brokkr man check`.
+
+**The file scoping is clippy-phase only.** A lint that fails a build fails
+it during compilation, before any diagnostic reaches brokkr to be filtered,
+and `-A` has no path-scoped form. So in the test phase each entry contributes
+its lint name build-wide, and the run says so on its notice line. The narrow
+guarantee still holds everywhere brokkr can enforce it, and the entry still
+fixes the build failure it was written for.
+
+**In the test phase.** brokkr injects only rustc's own lints: `clippy::`,
+`rustdoc::` and `cargo::` names never reach a build. Each injected allow
+changes every unit's fingerprint, so a lint the project can allow in its
+manifest's `[lints]` is better allowed there. brokkr adds the `-A` flags to
+whichever rustflags source cargo already uses, never by exporting
+`RUSTFLAGS`, which would discard the project's own flags. It prints the layer
+it chose:
+
+```text
 test: allowing deprecated via --config target."cfg(all())".rustflags ([lints] allow)
 ```
 
-Do not use `[[check]] rustflags` to carry a lint allow; it isolates the sweep
-into its own target dir. How the layer is chosen is in
-`reference/check-internals.md`.
-
+Don't use `[[check]] rustflags` to carry a lint allow; it isolates the sweep
+into its own target dir.

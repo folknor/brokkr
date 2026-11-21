@@ -248,7 +248,8 @@ pub(crate) fn parse(
              build spec is now self-contained: drop the `[[check]]` entry \
              that the sweep referenced, then under `[ratatoskr.harness]` \
              declare `package = \"<crate>\"` (required), optional \
-             `binary = \"<bin>\"` (defaults to `package`), optional \
+             `binary = \"<bin>\"` (defaults to the package's sole bin, else \
+             the one named like the package), optional \
              `features = [...]`, and optional `debug = true`. See \
              docs/projects/ratatoskr.md."
                 .into(),
