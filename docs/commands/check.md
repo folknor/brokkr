@@ -136,9 +136,9 @@ Output:
   still shows which phases finished. A pre-test or post-test script-check
   stage keeps its own line. What a green run no longer prints - each sweep's
   shape and cargo argv, per-sweep counts and build/fan-out times, the
-  parallel plan, the process-isolated roll-call, config-derived skips and
-  build-shape dedupes - goes to the run log (below). Nothing is dropped, only
-  moved.
+  parallel plan, the process-isolated roll-call, config-derived skips,
+  build-shape dedupes and the feature-token drops of a narrowed run - goes to
+  the run log (below). Nothing is dropped, only moved.
 - **What still prints on green**, because each changes what the verdict
   means: an `invocation:` line up front naming what this run changed about
   the configured gate (`-p`, a bounded preview of forwarded `-- ...` args,
@@ -353,7 +353,9 @@ A package that depends on the others keeps their qualified tokens: under
 tokens; under `-p strategy` (depending on `vm`) it carries `vm/opcode-counts`
 and `strategy/hotpath` but not a `runner/...` token.
 
-Every drop is said once per lane, before any phase runs:
+Every drop is said once per lane, before any phase runs, in the run log and
+in `check --audit`'s plan, not on the console (`brokkr test` logs them the
+same way):
 
 ```
 sweep piners, -p piners-strategy: dropped piners-runner/trace (applies to piners-runner, piners-harness only)

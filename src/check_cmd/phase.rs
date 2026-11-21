@@ -458,7 +458,10 @@ fn announce_package_rules(sweeps: &[PlannedSweep], selections: &CheckSelections,
 /// Say once per lane which configured feature tokens a narrowed run does not
 /// carry, and which members route them - a `-p` run, a package-mode
 /// resolution or a support build compiles fewer features than the sweep
-/// declares, and that must not be silent. Silent when nothing was dropped.
+/// declares. Run log only: a drop is the expected consequence of narrowing,
+/// so on the console it repeated on every `-p` run; the log and
+/// `check --audit` keep it, and the shape line and a failing command render
+/// the projected features anyway. Silent when nothing was dropped.
 pub(crate) fn announce_feature_drops(phases: &[(&[PlannedSweep], &PhaseSelection)]) {
     narrate_feature_drops(phases, &Narrator::live());
 }
@@ -466,7 +469,7 @@ pub(crate) fn announce_feature_drops(phases: &[(&[PlannedSweep], &PhaseSelection
 /// [`announce_feature_drops`] through a planner's narrator.
 fn narrate_feature_drops(phases: &[(&[PlannedSweep], &PhaseSelection)], narrate: &Narrator) {
     for line in feature_drop_lines(phases) {
-        narrate.run_msg(&line);
+        narrate.detail(&line);
     }
 }
 
