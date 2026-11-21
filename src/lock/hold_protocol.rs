@@ -124,9 +124,12 @@ fn host_service(
 /// Refuse to start or continue an acquisition once this process has committed
 /// to stopping. Checked before re-entry, after the flock wait, after the queue
 /// claim, before the drain (which polls it too) and after it, so no path into
-/// a hold can bypass an accepted `brokkr kill`.
+/// a hold can bypass an accepted `brokkr kill`. The refusal stays
+/// [`DevError::Interrupted`], exit 130, as the stop's own unwind does; the
+/// stop line says it was a kill, not a Ctrl-C.
 fn refuse_if_stopping() -> Result<(), DevError> {
     if !crate::shutdown::admits_new_work() {
+        super::announce_stopped();
         return Err(DevError::Interrupted);
     }
     Ok(())

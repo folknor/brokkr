@@ -122,8 +122,10 @@ Every sentence must change what the reader understands or does:
 - Internal type and function names and source paths don't belong in
   `docs/`: the reader can't act on them. They belong in `reference/` or a
   code comment. `reference/` may name them, but not source line numbers.
-  The `docs-no-source-paths` textlint rule catches brokkr's module paths,
-  `crate::` and `DevError::` in `docs/`; it doesn't catch a bare type name.
+  The `docs-no-source-paths` script check catches brokkr's module paths,
+  `crate::`, `DevError::` and a backticked compound type name brokkr
+  defines (`MechanicalDb`) in `docs/`, reading the lists from `src/`. It
+  doesn't catch a single-word type name or an unquoted one.
 - `docs/` doesn't send readers to AGENTS.md, CLAUDE.md or `notes/`. Write
   the context in.
 - Design rationale ("we weighed X and passed over it") belongs in
@@ -257,6 +259,11 @@ Files stay plain ASCII and hard-wrapped:
   doesn't catch it, but it's the same dash in disguise: use a colon, comma
   or period.
 - Hard-wrap prose at about 78 columns.
+- Tables are exempt from the wrap: a Markdown row can't be broken across
+  lines. Keep cells short where nothing forces the length; a cell that quotes
+  a refusal message verbatim stays whole, since you search for it by its text.
+- A table whose cells need full sentences or more than one idea becomes a
+  list of `- **Term**: description` items instead.
 
 ## Before you commit a rewrite
 

@@ -508,6 +508,10 @@ guard binary; brokkr also warns at each locked command. `--install` refuses
 to overwrite a wrapper brokkr didn't write (sccache, say), and `--remove`
 unsets brokkr's own. The command works with no `brokkr.toml`.
 
+`brokkr-rustc-guard` exits 1 when it refuses a compile, 2 when called
+without a wrapped command, and 127 when it can't exec the wrapped compiler,
+including the version handshake on an old guard.
+
 ### Descendant refusal
 
 A locked brokkr started beneath a command that holds the lock refuses rather
@@ -544,6 +548,7 @@ fills in:
 | `lock: compilation leases did not drain within Ns` | A compile admitted before this hold still holds its lease (see "guard"). | Run `brokkr strays` to find it, stop it, and rerun. |
 | `lock: cannot record this command in the brokkr lock queue` | The queue directory couldn't be written. `cannot claim this command's place` and `cannot read or update the brokkr lock queue's admission order` are the same failure later in the wait. | Fix the cause in the parenthesized error, then rerun. |
 | `cancelled by brokkr kill while waiting for the brokkr lock; this command did not run` | A `brokkr kill` in this command's scope cancelled it while it was queued (see "kill"). | Rerun the command. |
+| `stopped by brokkr kill; this command starts no new work` | A `brokkr kill` stopped this command, and it then tried to take the lock or start work under it. It exits 130, as an interrupt does. | Rerun the command. |
 | `stopped by its time ceiling` | A `check` run or phase overran its ceiling (see "Time ceilings"). | Read the in-flight listing above it to find what was waiting, and fix that. |
 | `config: PATH already sets build.rustc-wrapper = "WRAPPER" - refusing to overwrite a wrapper brokkr did not write` | `guard --install` found another tool's wrapper, sccache say. | Remove that wrapper from the cargo config yourself, then rerun `brokkr guard --install`. |
 | `config: PATH already sets build.rustc-wrapper to a brokkr guard from another install` | Another brokkr install's guard is enrolled. | Run `brokkr guard --remove`, then `brokkr guard --install`. |

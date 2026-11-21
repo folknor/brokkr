@@ -240,11 +240,11 @@ pub(crate) fn refuse_measurement(what: &str) -> Result<(), DevError> {
             "{what} refuses inside a served program (this process carries {SERVE_ENV})"
         )));
     }
-    if crate::lockfile::current_hold().is_none() {
-        return Err(DevError::Internal(format!(
+    crate::lockfile::require_hold(|| {
+        DevError::Internal(format!(
             "{what} checked for live serves without holding the brokkr lock"
-        )));
-    }
+        ))
+    })?;
     let dir = registry_dir()?;
     let live = outstanding(&dir)?;
     if live.is_empty() {
@@ -616,11 +616,9 @@ fn valid_name(name: &str) -> bool {
 /// dispatch hold, which it needs: a generation is published only under it.
 pub(crate) fn start(req: &StartRequest<'_>) -> Result<(), DevError> {
     refuse_nested_start()?;
-    if crate::lockfile::current_hold().is_none() {
-        return Err(DevError::Internal(
-            "a serve started without holding the brokkr lock".into(),
-        ));
-    }
+    crate::lockfile::require_hold(|| {
+        DevError::Internal("a serve started without holding the brokkr lock".into())
+    })?;
     let target = req
         .program
         .file_name()

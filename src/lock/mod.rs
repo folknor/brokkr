@@ -616,7 +616,8 @@ pub(crate) fn acquire_for_command(
 }
 
 /// This process's live hold on the global lock, as one more guard on it, or
-/// `None` when the process holds nothing.
+/// `None` when the process holds nothing or a committed stop admits no new
+/// work under it ([`hold_for_new_work`] tells the two apart).
 ///
 /// The proof `build::cargo_build` demands before it runs cargo. Asking the
 /// registry rather than taking a `&LockGuard` parameter keeps the check at the
@@ -624,17 +625,66 @@ pub(crate) fn acquire_for_command(
 /// layers below the command that took the lock. The returned guard shares the
 /// hold (like a nested [`acquire`]), so it cannot outlive or split it.
 pub fn current_hold() -> Option<LockGuard> {
+    hold_for_new_work().ok()
+}
+
+/// Why [`hold_for_new_work`] offers no hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoHold {
+    /// A `brokkr kill` committed this process to stopping. The hold may still
+    /// be live, but it admits no further work. A caller that needed the hold
+    /// calls [`announce_stopped`] and returns [`DevError::Interrupted`], as
+    /// the acquisition's own refusal does.
+    Stopped,
+    /// The process holds no global lock.
+    Absent,
+}
+
+/// [`current_hold`] with the reason when there is none, so a caller can tell
+/// a stopped command from a missing lock.
+pub fn hold_for_new_work() -> Result<LockGuard, NoHold> {
     // A committed stop admits no further work under the hold it stopped.
     if !crate::shutdown::admits_new_work() {
-        return None;
+        return Err(NoHold::Stopped);
     }
-    let path = lock_path().ok()?;
+    let path = lock_path().map_err(|_| NoHold::Absent)?;
     let mut held = held_registry();
     held.retain(|w| w.strong_count() > 0);
     held.iter()
         .filter_map(Weak::upgrade)
         .find(|inner| inner.path == path)
         .map(|inner| LockGuard { inner })
+        .ok_or(NoHold::Absent)
+}
+
+/// [`hold_for_new_work`] for a caller that refuses without it: a committed
+/// stop announces itself and is [`DevError::Interrupted`], a missing hold is
+/// `absent`'s error.
+pub fn require_hold(absent: impl FnOnce() -> DevError) -> Result<LockGuard, DevError> {
+    match hold_for_new_work() {
+        Ok(hold) => Ok(hold),
+        Err(NoHold::Stopped) => {
+            announce_stopped();
+            Err(DevError::Interrupted)
+        }
+        Err(NoHold::Absent) => Err(absent()),
+    }
+}
+
+/// The line a command prints when a committed stop refuses it new work.
+/// Quoted in the refusal table of `docs/commands/check.hygiene.md`.
+pub(crate) const STOPPED_MESSAGE: &str =
+    "stopped by `brokkr kill`; this command starts no new work";
+
+static STOP_ANNOUNCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Say once why a stopped command refuses work: the exit status alone (130)
+/// reads as an ordinary Ctrl-C, and every later refusal in the same unwind
+/// would otherwise repeat it.
+pub(crate) fn announce_stopped() {
+    if !STOP_ANNOUNCED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        crate::output::lock_msg(STOPPED_MESSAGE);
+    }
 }
 
 /// The capability for the live global hold, without the admission check used

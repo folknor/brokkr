@@ -415,7 +415,7 @@ fn with_published_cargo<T>(
     on_spawn: Option<&dyn Fn(u32)>,
     run: impl FnOnce(&dyn Fn(u32)) -> Result<T, DevError>,
 ) -> Result<T, DevError> {
-    let hold = crate::lockfile::current_hold().ok_or_else(|| {
+    let hold = crate::lockfile::require_hold(|| {
         DevError::Lock(
             "refusing to run cargo outside the brokkr lock - this is a brokkr bug: \
              the command that reached this Cargo spawn must take the lock first"

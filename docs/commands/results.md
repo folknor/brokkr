@@ -23,7 +23,7 @@ stamped with a newer schema version than this brokkr knows is refused, by
 queries and writes alike; brokkr never lowers a stamp.
 
 The command behaves the same in every project except litehtml. There,
-`results.db` holds only the unrelated `MechanicalDb` schema, so `results`
+`results.db` holds only litehtml's own, unrelated schema, so `results`
 and `sidecar` read litehtml's script-bench runs alone and never open that
 file. `invalidate`, which reads nothing else, is hidden from litehtml's
 `--help`.

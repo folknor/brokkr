@@ -737,21 +737,17 @@ thing only a `brokkr.toml` provides is `install`'s post-install steps.
 
 ## Exit statuses
 
-Most commands return `0` on success and `1` on an ordinary failure. The
-table lists the codes with a shared or command-specific meaning; a code has
-no one meaning across every command.
+`run`, `build` and `install` exit with these codes:
 
 | Code | Meaning |
 | --- | --- |
 | `0` | Success, including the bare `brokkr run` target index. |
-| `1` | Ordinary failure; also a failed `check` or `test` verdict and a refused rustc compile. |
-| `2` | Command-specific: a clap usage failure, or `brokkr-rustc-guard` called without a wrapped command. |
-| `10` | A `check` or `test` run ended with a partial verdict. |
-| `124` | A `check`, `test` or `clippy` watchdog ceiling fired. |
-| `127` | `brokkr-rustc-guard` couldn't exec the wrapped compiler. |
+| `1` | A failed build or install, a refusal, or a target killed by a signal brokkr didn't send. |
+| `2` | A clap usage error. |
 | `130` | An accepted interrupt or graceful stop. |
 
-`brokkr run` passes the wrapped program's non-zero status through as it is,
-so its status can overlap with a brokkr outcome above; use the command
-output to tell them apart. See `brokkr man check` for the command-specific
-details.
+`brokkr run` passes the program's non-zero exit through as it is, so its
+code can coincide with one of brokkr's own; the command output tells them
+apart. The
+codes of `check`, `test` and `clippy` are on their own pages (`brokkr man
+check exit-codes`).
