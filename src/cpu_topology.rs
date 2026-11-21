@@ -188,31 +188,117 @@ pub(crate) fn cache_domain_cores_at(status_path: &Path, cpu_root: &Path) -> Opti
     (n > 0).then_some(n)
 }
 
-/// The cache domain's core count, or a usable number regardless.
+/// How a host-relative budget was counted, for the lane's plan line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CoreProbe {
+    /// The budget: the count below, capped by `quota` when that is lower.
+    pub(crate) budget: u32,
+    /// The topology count before the quota cap.
+    pub(crate) counted: u32,
+    /// The tightest visible cgroup v2 `cpu.max` cap, when one applies.
+    pub(crate) quota: Option<u32>,
+    /// True when no usable physical topology was found and `counted` came
+    /// from `available_parallelism()` (logical CPUs) or, when that fails
+    /// too, the fixed fallback.
+    pub(crate) topology_fallback: bool,
+}
+
+impl CoreProbe {
+    /// A detected physical count, or the logical fallback when there is
+    /// none, then the quota cap; never zero.
+    fn from_detected(detected: Option<usize>) -> Self {
+        let n = detected.unwrap_or_else(|| {
+            available_parallelism_or_default_with(
+                DEFAULT_CPU_TOPOLOGY_TUNABLES.fallback_parallelism,
+                std::thread::available_parallelism,
+            )
+        });
+        let counted = u32::try_from(n).unwrap_or(u32::MAX).max(1);
+        let quota = quota::cpu_budget();
+        Self {
+            budget: quota.map_or(counted, |q| counted.min(q)).max(1),
+            counted,
+            quota,
+            topology_fallback: detected.is_none(),
+        }
+    }
+}
+
+/// The unset `parallel` budget with its provenance: the cache-domain count,
+/// capped by visible cgroup v2 quotas, and a usable number regardless.
 ///
 /// The last resort is `available_parallelism()`, which can overcount on an SMT
 /// part - accepted because a default that is too high is a slow test run,
 /// while a default of zero is no test run at all.
-pub(crate) fn cache_domain_cores_or_default() -> u32 {
-    let cores = cache_domain_cores_or_default_at(
+pub(crate) fn cache_domain_probe() -> CoreProbe {
+    CoreProbe::from_detected(cache_domain_cores_at(
         Path::new(PROC_STATUS),
         Path::new(CPU_ROOT),
-        &DEFAULT_CPU_TOPOLOGY_TUNABLES,
-        std::thread::available_parallelism,
-    );
-    quota::cpu_budget().map_or(cores, |quota| cores.min(quota))
+    ))
 }
 
-pub(crate) fn cache_domain_cores_or_default_at(
-    status_path: &Path,
-    cpu_root: &Path,
-    tunables: &CpuTopologyTunables,
-    available: impl FnOnce() -> std::io::Result<std::num::NonZeroUsize>,
-) -> u32 {
-    let n = cache_domain_cores_at(status_path, cpu_root).unwrap_or_else(|| {
-        available_parallelism_or_default_with(tunables.fallback_parallelism, available)
-    });
-    u32::try_from(n).unwrap_or(u32::MAX).max(1)
+/// `budget = "cores"`: every physical core the calling thread may run on,
+/// across all cache domains, capped by visible cgroup v2 quotas.
+///
+/// Counted as distinct `core_cpus_list` sibling groups (older kernels:
+/// `thread_siblings_list`) that hold at least one allowed CPU, not as
+/// `(physical_package_id, core_id)` pairs: `core_id` is only unique within a
+/// die, so two dies in one package can reuse it, and the kernel supplies
+/// default ids on architectures without topology definitions. Fail-closed
+/// where the cache-domain probe degrades: if any allowed CPU has no readable
+/// sibling list, the count is not trusted at all and the lane falls back to
+/// `available_parallelism()`, which counts logical CPUs.
+pub(crate) fn all_cores_probe() -> CoreProbe {
+    CoreProbe::from_detected(all_physical_cores_at(
+        Path::new(PROC_STATUS),
+        Path::new(CPU_ROOT),
+    ))
+}
+
+/// Physical cores in the calling thread's online affinity set, or `None`
+/// when any allowed CPU's sibling group cannot be read.
+fn all_physical_cores_at(status_path: &Path, cpu_root: &Path) -> Option<usize> {
+    let allowed = allowed_cpus_at(status_path, cpu_root)?;
+    // `allowed_cpus_at` keeps the raw affinity when it misses the online
+    // list entirely; a physical count over CPUs the online snapshot
+    // excluded is not trusted here.
+    let online = online_cpus_at(cpu_root);
+    if !online.is_empty() && allowed.is_disjoint(&online) {
+        return None;
+    }
+    sibling_groups(&allowed, |cpu| {
+        let topo = cpu_root.join(format!("cpu{cpu}/topology"));
+        read_trimmed(&topo.join("core_cpus_list"))
+            .or_else(|| read_trimmed(&topo.join("thread_siblings_list")))
+    })
+}
+
+/// Distinct sibling groups holding an allowed CPU; `None` when any allowed
+/// CPU's list is unreadable or does not name the CPU itself, or when two
+/// groups overlap without matching (masks read mid-hotplug disagree).
+///
+/// Each mask is restricted to the allowed set before deduplicating, so a
+/// sibling outside the affinity going offline between two reads cannot turn
+/// one core into two.
+fn sibling_groups(
+    allowed: &BTreeSet<u32>,
+    siblings_of: impl Fn(u32) -> Option<String>,
+) -> Option<usize> {
+    let mut groups: BTreeSet<BTreeSet<u32>> = BTreeSet::new();
+    for cpu in allowed {
+        let siblings = allowed_domain(allowed, &parse_cpu_list(&siblings_of(*cpu)?));
+        if !siblings.contains(cpu) {
+            return None;
+        }
+        groups.insert(siblings);
+    }
+    let mut seen: BTreeSet<u32> = BTreeSet::new();
+    for group in &groups {
+        if group.iter().any(|cpu| !seen.insert(*cpu)) {
+            return None;
+        }
+    }
+    (!groups.is_empty()).then_some(groups.len())
 }
 
 /// Resolve the fallback with an injectable OS probe and its explicit default.
@@ -299,10 +385,49 @@ mod cpu_topology_tests {
         assert_eq!(domain_label("Apple M2"), "L3 domain");
     }
 
-    // The default feeds a test budget, so it must be usable on any machine
-    // this runs on - never zero, whatever sysfs did or did not say.
+    // SMT siblings and an affinity mask exposing only one sibling of a core:
+    // each sibling group holding an allowed CPU counts once.
     #[test]
-    fn the_default_is_always_at_least_one() {
-        assert!(cache_domain_cores_or_default() >= 1);
+    fn all_cores_count_sibling_groups_within_affinity() {
+        let allowed: BTreeSet<u32> = [0, 1, 2, 4].into_iter().collect();
+        let lists = |cpu: u32| {
+            Some(match cpu {
+                0 | 4 => "0,4".to_owned(),
+                n => format!("{n},{}", n + 4),
+            })
+        };
+        assert_eq!(sibling_groups(&allowed, lists), Some(3));
+    }
+
+    // A trimmed sysfs must not yield a plausible partial count.
+    #[test]
+    fn all_cores_fail_closed_on_a_missing_or_foreign_sibling_list() {
+        let allowed: BTreeSet<u32> = [0, 1].into_iter().collect();
+        assert_eq!(
+            sibling_groups(&allowed, |cpu| (cpu == 0).then(|| "0".to_owned())),
+            None
+        );
+        assert_eq!(sibling_groups(&allowed, |_| Some("0".to_owned())), None);
+        // Overlapping masks that disagree.
+        let three: BTreeSet<u32> = [0, 1, 2].into_iter().collect();
+        let lists = |cpu: u32| Some(if cpu == 2 { "1-2" } else { "0-1" }.to_owned());
+        assert_eq!(sibling_groups(&three, lists), None);
+    }
+
+    // A sibling outside the affinity vanishing between reads does not split
+    // one allowed core into two.
+    #[test]
+    fn all_cores_restrict_masks_to_the_allowed_set() {
+        let allowed: BTreeSet<u32> = [0, 1].into_iter().collect();
+        let lists = |cpu: u32| Some(if cpu == 0 { "0-2" } else { "0-1" }.to_owned());
+        assert_eq!(sibling_groups(&allowed, lists), Some(1));
+    }
+
+    #[test]
+    fn probes_are_always_at_least_one() {
+        // Both feed a test budget, so they must be usable on any machine
+        // this runs on - never zero, whatever sysfs did or did not say.
+        assert!(all_cores_probe().budget >= 1);
+        assert!(cache_domain_probe().budget >= 1);
     }
 }

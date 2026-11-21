@@ -446,7 +446,7 @@ fn run_test_lane(
             a.attempt,
             match sweep.lane_exec() {
                 LaneExec::Parallel { budget } => budget,
-                _ => 1,
+                _ => crate::profile::LaneBudget::fixed(1),
             },
             p,
             tap,

@@ -355,12 +355,13 @@ fn run_parallel_sweep(
     state_root: &Path,
     sweep: &PlannedSweep,
     attempt: &Attempt,
-    budget: u32,
+    lane_budget: crate::profile::LaneBudget,
     prepared: &PreparedLane,
     tap: &LaneTap,
     commands: bool,
     timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
+    let budget = lane_budget.count;
     let sweep_started = Instant::now();
     announce_sweep(
         &format!(
@@ -440,11 +441,12 @@ fn run_parallel_sweep(
     // should tell its reader.
     let build_elapsed = sweep_started.elapsed();
     let plan_line = format!(
-        "test {}: {} {}, budget {} in flight (claims {}-{})",
+        "test {}: {} {}, budget {}{} in flight (claims {}-{})",
         sweep.label,
         planned.len(),
         if planned.len() == 1 { "binary" } else { "binaries" },
         budget,
+        lane_budget.provenance(),
         planned.iter().map(|(_, c)| *c).min().unwrap_or(0),
         planned.iter().map(|(_, c)| *c).max().unwrap_or(0),
     );
@@ -1000,7 +1002,7 @@ mod parallel_lane_tests {
     #[test]
     fn promotion_pins_auto_to_the_workspace() {
         let mut parallel = bare_decl();
-        parallel.lane_exec = crate::profile::LaneExec::Parallel { budget: 4 };
+        parallel.lane_exec = crate::profile::LaneExec::Parallel { budget: crate::profile::LaneBudget::fixed(4) };
         let promoted = resolve_planned_sweep(parallel.clone(), true, None);
         assert!(promoted.unification_args().iter().any(|a| a.contains("feature-unification")));
         let ambient = resolve_planned_sweep(parallel, false, None);
@@ -1012,7 +1014,7 @@ mod parallel_lane_tests {
     #[test]
     fn direct_argv_is_libtest_only_with_threads_and_json() {
         let mut sweep = bare_decl();
-        sweep.lane_exec = crate::profile::LaneExec::Parallel { budget: 4 };
+        sweep.lane_exec = crate::profile::LaneExec::Parallel { budget: crate::profile::LaneBudget::fixed(4) };
         sweep.filters = crate::profile::LaneFilters {
             filters: vec![
                 crate::profile::Filter {
@@ -1049,7 +1051,7 @@ mod parallel_lane_tests {
         // A sweep that is not on the parallel lane never reaches this runner.
         assert!(direct_libtest_args(&bare_sweep(), 3, &[]).is_err());
         let mut parallel = bare_decl();
-        parallel.lane_exec = crate::profile::LaneExec::Parallel { budget: 4 };
+        parallel.lane_exec = crate::profile::LaneExec::Parallel { budget: crate::profile::LaneBudget::fixed(4) };
         let parallel = crate::profile::PlannedSweep::from(parallel);
         assert!(direct_libtest_args(&parallel, 3, &v(&["--test-threads", "2"])).is_err());
     }

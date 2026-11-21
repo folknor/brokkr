@@ -2534,7 +2534,7 @@ mod prepare_tests {
     fn sweep(label: &str) -> PlannedSweep {
         planned(crate::profile::SweepDecl {
             label: label.into(),
-            lane_exec: crate::profile::LaneExec::Parallel { budget: 4 },
+            lane_exec: crate::profile::LaneExec::Parallel { budget: crate::profile::LaneBudget::fixed(4) },
             ..crate::profile::SweepDecl::default()
         })
     }

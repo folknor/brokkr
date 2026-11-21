@@ -1352,7 +1352,15 @@ Serial cost is stored as integer milliseconds, not wall time, because wall time
 depends on the slots granted, and feeding that back oscillates.
 An unset budget (`parallel = {}`) resolves to the physical cores in one
 last-level cache domain that the calling thread is allowed to use -
-`brokkr env`'s `l3 domain:` line prints the number.
+`brokkr env`'s `l3 domain:` line prints the topology count - and
+`budget = "cores"` to every allowed physical core, counted as distinct SMT
+sibling groups restricted to the allowed set and failing closed to
+`available_parallelism()` when any allowed CPU's sibling list is unreadable
+or two lists overlap without matching. Both are capped by visible cgroup v2 quotas and
+resolve at profile resolution, where `LaneExec::resolve` keys only on the
+presence of `parallel`, so loading never depends on the host. `LaneBudget`
+carries the policy and probe to the plan line, which prints it after the
+number (`budget 12 (cores) in flight`); an explicit count prints bare.
 
 The lane writes two lines to the run log regardless of how many binaries run:
 

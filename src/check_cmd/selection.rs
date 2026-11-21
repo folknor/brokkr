@@ -2546,7 +2546,12 @@ mod tests {
         let facts =
             crate::check_cmd::DocFacts::for_members(&[("a", true), ("b", true), ("bin", false)]);
         let a = with_sweep(
-            with_exec(listed("a", &["a"]), LaneExec::Parallel { budget: 4 }),
+            with_exec(
+                listed("a", &["a"]),
+                LaneExec::Parallel {
+                    budget: crate::profile::LaneBudget::fixed(4),
+                },
+            ),
             |d| {
                 d.filters.include_ignored = true;
             },
@@ -2555,7 +2560,12 @@ mod tests {
             listed("a-serial", &["a"]),
             LaneExec::Nextest { threads: None },
         );
-        let b = with_exec(listed("b", &["b"]), LaneExec::Parallel { budget: 4 });
+        let b = with_exec(
+            listed("b", &["b"]),
+            LaneExec::Parallel {
+                budget: crate::profile::LaneBudget::fixed(4),
+            },
+        );
         let b_doc = with_exec(listed("b-doc", &["b"]), LaneExec::doc_only());
         let bin = listed("bin", &["bin"]);
         let curated = with_sweep(listed("cur", &["a"]), |d| {
@@ -2618,7 +2628,12 @@ mod tests {
     fn a_derived_carrier_label_never_collides() {
         let facts = crate::check_cmd::DocFacts::for_members(&[("a", true)]);
         let sweeps = vec![
-            with_exec(listed("a", &["a"]), LaneExec::Parallel { budget: 2 }),
+            with_exec(
+                listed("a", &["a"]),
+                LaneExec::Parallel {
+                    budget: crate::profile::LaneBudget::fixed(2),
+                },
+            ),
             with_sweep(listed("a (doctests)", &["a"]), |d| {
                 d.env.insert("X".into(), "1".into());
             }),
@@ -2639,7 +2654,9 @@ mod tests {
         let facts = crate::check_cmd::DocFacts::for_members(&[("a", true), ("bin", false)]);
         let lane = package_mode(with_exec(
             listed("pkg", &["a", "bin"]),
-            LaneExec::Parallel { budget: 2 },
+            LaneExec::Parallel {
+                budget: crate::profile::LaneBudget::fixed(2),
+            },
         ));
         let derived = derive(std::slice::from_ref(&lane), &facts);
         assert_eq!(derived.len(), 1);

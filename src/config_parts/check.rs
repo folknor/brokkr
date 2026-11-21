@@ -1,4 +1,4 @@
-use super::{CheckEntry, LintsConfig, ParallelBinaries, ProfilePin, SweepProfile};
+use super::{BudgetSpec, CheckEntry, LintsConfig, ParallelBinaries, ProfilePin, SweepProfile};
 
 /// The `-A <lint>` flag pairs the test phase injects into the build's
 /// rustflags: `allow` plus the lint names behind `allow_exact`, deduped and
@@ -256,10 +256,82 @@ pub fn rustflags_target_key(rustflags: &[String]) -> Option<String> {
 }
 
 impl ParallelBinaries {
-    /// The budget to run under: an explicit value, or this machine's cache
-    /// domain capped by the calling thread's visible cgroup v2 CPU quotas.
-    pub fn resolved_budget(self) -> u32 {
-        self.budget
-            .unwrap_or_else(crate::cpu_topology::cache_domain_cores_or_default)
+    /// The budget to run under: an explicit value, or a count of this
+    /// machine's physical cores - one cache domain when unset, all of them
+    /// for `"cores"` - capped by the calling thread's visible cgroup v2 CPU
+    /// quotas.
+    pub fn resolved_budget(self) -> LaneBudget {
+        match self.budget {
+            Some(BudgetSpec::Count(n)) => LaneBudget::fixed(n),
+            None => LaneBudget {
+                count: 0,
+                source: BudgetSource::CacheDomain,
+                probe: None,
+            }
+            .probed(crate::cpu_topology::cache_domain_probe()),
+            Some(BudgetSpec::Cores) => LaneBudget {
+                count: 0,
+                source: BudgetSource::Cores,
+                probe: None,
+            }
+            .probed(crate::cpu_topology::all_cores_probe()),
+        }
+    }
+}
+
+/// Which policy produced a parallel lane's budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetSource {
+    Explicit,
+    CacheDomain,
+    Cores,
+}
+
+/// A parallel lane's resolved in-flight budget and how it was reached, so
+/// the plan line can say what a host-relative number counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaneBudget {
+    pub count: u32,
+    pub source: BudgetSource,
+    probe: Option<crate::cpu_topology::CoreProbe>,
+}
+
+impl LaneBudget {
+    pub fn fixed(count: u32) -> Self {
+        Self {
+            count,
+            source: BudgetSource::Explicit,
+            probe: None,
+        }
+    }
+
+    fn probed(self, probe: crate::cpu_topology::CoreProbe) -> Self {
+        Self {
+            count: probe.budget,
+            probe: Some(probe),
+            ..self
+        }
+    }
+
+    /// The plan line's suffix: empty for an explicit count, otherwise the
+    /// policy, the fallback when topology was unusable, and the
+    /// quota cap when it bound.
+    pub fn provenance(&self) -> String {
+        let policy = match self.source {
+            BudgetSource::Explicit => return String::new(),
+            BudgetSource::CacheDomain => "cache domain",
+            BudgetSource::Cores => "cores",
+        };
+        let mut out = format!(" ({policy}");
+        if let Some(p) = self.probe {
+            if p.topology_fallback {
+                out.push_str("; no usable topology");
+            }
+            if p.budget < p.counted {
+                out.push_str(&format!("; quota capped from {}", p.counted));
+            }
+        }
+        out.push(')');
+        out
     }
 }

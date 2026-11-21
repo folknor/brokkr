@@ -18,6 +18,7 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use crate::config::ParallelBinaries;
+pub use crate::config::check::LaneBudget;
 use crate::config::check::{CargoUnification, EffectiveUnification, rustflags_target_key};
 use crate::config::{
     CheckEntry, FeatureUnification, Harness, Isolation, ProfileDef, SkipSpec, SweepProfile,
@@ -309,7 +310,7 @@ pub enum LaneExec {
     /// delegated to libtest.
     Serial { threads: Threads },
     /// Several binaries run concurrently under brokkr's in-flight budget.
-    Parallel { budget: u32 },
+    Parallel { budget: LaneBudget },
     /// Each selected test runs in its own cargo invocation.
     Isolated,
     /// Nextest owns process-per-test execution and its concurrency limit.
@@ -334,7 +335,7 @@ impl LaneExec {
         label: &str,
         harness: Harness,
         doc_only: bool,
-        parallel_budget: Option<u32>,
+        parallel_budget: Option<LaneBudget>,
         process_isolation: bool,
         configured_threads: Option<u32>,
         threads_from: Option<&str>,
@@ -2393,6 +2394,42 @@ isolation = "process"
         );
     }
 
+    /// `budget = "cores"` loads and resolves to a host-relative parallel lane
+    /// that names its policy; any other string is refused at load.
+    #[test]
+    fn a_cores_budget_resolves_from_the_host() {
+        let (checks, cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "all"
+parallel = { budget = "cores" }
+
+[test.profiles.p]
+sweeps = ["all"]
+"#,
+        );
+        let resolved = resolve(&cfg, &checks, "p").unwrap();
+        let LaneExec::Parallel { budget } = resolved[0].lane_exec else {
+            panic!("not parallel: {:?}", resolved[0].lane_exec);
+        };
+        assert!(budget.count >= 1);
+        assert!(
+            budget.provenance().starts_with(" (cores"),
+            "{}",
+            budget.provenance()
+        );
+        assert_eq!(LaneBudget::fixed(4).provenance(), "");
+
+        for bad in [
+            r#"parallel = { budget = "all" }"#,
+            "parallel = { budget = -1 }",
+        ] {
+            let v: toml::Value = toml::from_str(&format!("name = \"x\"\n{bad}\n")).unwrap();
+            let parsed: Result<CheckEntry, _> = v.try_into();
+            assert!(parsed.is_err(), "{bad}");
+        }
+    }
+
     /// Every count is refused over a parallel entry, not only `1`: zero and
     /// counts above one are never consulted there either. A child overriding
     /// an inherited count does not escape (TOML cannot unset it), and the
@@ -2454,7 +2491,12 @@ test_threads = 8
         assert!(err.contains("`test_threads = 0` is never"), "got: {err}");
 
         let resolved = resolve(&cfg, &checks, "unset").unwrap();
-        assert_eq!(resolved[0].lane_exec, LaneExec::Parallel { budget: 4 });
+        assert_eq!(
+            resolved[0].lane_exec,
+            LaneExec::Parallel {
+                budget: LaneBudget::fixed(4)
+            }
+        );
         assert_eq!(
             resolve(&cfg, &checks, "serial").unwrap()[0].lane_exec,
             LaneExec::Serial {

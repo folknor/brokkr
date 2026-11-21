@@ -240,8 +240,10 @@ Each binary claims a share of the budget proportional to its serial cost from
 the last run (`.brokkr/parallel-timings.toml`), so the first run of a tree
 weights by test count and budget changes need two runs to measure. An unset
 budget (`parallel = {}`) is the physical cores in one last-level cache domain
-(`brokkr env`'s `l3 domain:` line). Allocation rules and their rationale are in
-`docs/brokkr.toml.sweeps.md` (`parallel`).
+(`brokkr env`'s `l3 domain:` line), and `budget = "cores"` is every physical
+core the process may use; both are capped by cgroup v2 `cpu.max` quotas, and
+the plan line names which policy produced the number. Allocation rules and
+their rationale are in `docs/brokkr.toml.sweeps.md` (`parallel`).
 
 The lane writes its plan and result to the run log:
 

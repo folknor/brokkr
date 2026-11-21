@@ -2269,6 +2269,52 @@ pub struct ParallelBinaries {
     /// fabric latency on every shared line. Both look like parallelism
     /// without delivering it, and a default that overstates the machine
     /// turns a lane meant to save wall time into one that spends it.
+    ///
+    /// `"cores"` means every physical core the process may run on, across
+    /// cache domains, under the same affinity and quota caps: the spelling
+    /// for a suite the one-domain default starves that must still follow the
+    /// host, which a fixed number cannot.
     #[serde(default)]
-    pub budget: Option<u32>,
+    pub budget: Option<BudgetSpec>,
+}
+
+/// A `parallel.budget` value: a fixed count, or a host-relative policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetSpec {
+    /// `budget = N`: exactly N tests in flight on every host, uncapped.
+    Count(u32),
+    /// `budget = "cores"`: every physical core available to the process.
+    Cores,
+}
+
+impl<'de> Deserialize<'de> for BudgetSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = BudgetSpec;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a positive integer or \"cores\"")
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<BudgetSpec, E> {
+                u32::try_from(v)
+                    .map(BudgetSpec::Count)
+                    .map_err(|_| E::custom(format!("budget {v} is out of range; expected a positive integer or \"cores\"")))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<BudgetSpec, E> {
+                u32::try_from(v)
+                    .map(BudgetSpec::Count)
+                    .map_err(|_| E::custom(format!("budget {v} is out of range; expected a positive integer or \"cores\"")))
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<BudgetSpec, E> {
+                if v == "cores" {
+                    Ok(BudgetSpec::Cores)
+                } else {
+                    Err(E::custom(format!(
+                        "unknown budget \"{v}\"; expected a positive integer or \"cores\""
+                    )))
+                }
+            }
+        }
+        d.deserialize_any(Visitor)
+    }
 }

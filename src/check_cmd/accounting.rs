@@ -843,7 +843,7 @@ mod accounting_tests {
         assert!(lane_runs_doctests(&doc, false));
         let parallel = planned(SweepDecl {
             label: "p".into(),
-            lane_exec: crate::profile::LaneExec::Parallel { budget: 4 },
+            lane_exec: crate::profile::LaneExec::Parallel { budget: crate::profile::LaneBudget::fixed(4) },
             ..SweepDecl::default()
         });
         assert!(!lane_runs_doctests(&parallel, true));

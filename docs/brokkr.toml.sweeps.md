@@ -586,6 +586,14 @@ plan line is in the run log (`.brokkr/check-logs/`, see
 
 `budget = 0` is a load error. There is no spelling for "unlimited": an
 unbounded lane is precisely the mistake the key exists to make unspellable.
+The key takes a positive integer, `"cores"` (below), or nothing; any other
+value is a load error.
+
+The plan line in the run log names how a host-relative budget was reached:
+`budget 12 (cores) in flight`, `budget 6 (cache domain) in flight`, with
+`; no usable topology` when sysfs gave no usable count (the number is then
+`available_parallelism()`, or 4 when that fails too) and `; quota
+capped from N` when a cgroup quota bound. An explicit count prints bare.
 
 ### The default budget
 
@@ -600,6 +608,37 @@ calling thread's group and its visible ancestors: quota divided by period,
 rounded down, with a minimum of one. Unlimited, unreadable or malformed quota
 files add no cap. Ancestors hidden by a cgroup mount or namespace cannot be
 probed. An explicit `budget = N` bypasses this default and its quota cap.
+
+### `budget = "cores"`
+
+`parallel = { budget = "cores" }` resolves to **every physical core the process
+may run on**, across all cache domains: the online CPUs in the calling thread's
+affinity, collapsed onto their SMT sibling groups (`topology/core_cpus_list`,
+or `thread_siblings_list` on older kernels), then capped by the same cgroup v2
+`cpu.max` quotas as the default. With full affinity, readable topology and no
+binding quota, a 16-core part gets 16 whatever the chiplet layout and a 12-core
+part 12. It is the spelling for a suite the
+one-domain default starves (see the arithmetic floor below) that must still
+follow the host it runs on, which a fixed `budget = N` in a shared
+`brokkr.toml` cannot: one number is right for one machine and oversubscribes
+or underuses the others.
+
+The count fails closed: if any allowed CPU has no readable sibling list (a
+trimmed sysfs), or two CPUs' sibling lists disagree, the topology is not
+trusted and the budget falls back to `available_parallelism()`, which counts
+logical CPUs, and the plan line says so. Like the default it is resolved per run and log-only; whether a config
+loads never depends on it. Neither budget pins tests to a domain; the default
+only sizes the lane as if it ran in one, while `"cores"` sizes it for the
+whole part and accepts that more tests in flight means more of them pay
+cross-die latency - a cost a starved pole outweighs. A latency-bound suite that wants more than the core
+count still needs an explicit number.
+
+There is no per-host budget: host sections take host options only. A host
+that needs a different fixed number can include a machine-local file holding
+whole `[[check]]` entries (see `include` in `brokkr man config`). The entries
+must move out of the including `brokkr.toml`: a same-named entry there wins
+over the included one, so leaving it in place makes the local budget inert.
+Every checkout must then have that file, or the config fails to load.
 
 Deliberately not logical CPUs. Two tests on the SMT siblings of one core
 contend for that core's execution resources, and on a chiplet part two tests on
