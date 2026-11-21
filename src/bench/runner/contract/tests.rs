@@ -24,6 +24,7 @@ function bench(params, keys)
   if params.stop then options.stop_at = params.stop end
   local r = binary_with(options, "cat", {mode = params.mode}, params.variant.file, out):ok()
   if r.stopped_at then return "stopped at " .. r.stopped_at end
+  print("said " .. r.stdout)
   record.size = filesize(params.variant.file)
   record.n = json.decode(read(out)).n
   record.key = keys.variant
@@ -91,6 +92,7 @@ test(\"completes\", function()
   assert(r.record.n == 3 and r.record.size == 7 and r.record.key == \"indexed\")
   assert(r.record.said == \"ok\\n\")
   assert(r.verdict == nil)
+  assert(#r.printed == 1 and r.printed[1] == \"said ok\\n\", r.printed[1])
 end)
 test(\"stops where it asked to\", function()
   local s = spec({{params = {{\"--stop\", \"LOADED\"}}}})
@@ -98,6 +100,7 @@ test(\"stops where it asked to\", function()
   local r = run(s)
   assert(r.verdict == \"stopped at LOADED\", r.reason)
   assert(r.calls[1].stop_at == \"LOADED\")
+  assert(#r.printed == 0)
 end)
 test(\"a stop that never fires fails\", function()
   local s = spec({{params = {{\"--stop\", \"LOADED\"}}}})

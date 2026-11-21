@@ -383,6 +383,9 @@ The result's fields:
 - `preflight_calls` - every call `preflight()` made: `program`, `argv`,
   `env`, and `deadline` (seconds) when it gave one.
 - `modules` - every `bench_lib` module the run asked `require` for.
+- `printed` - every `print` the script made in `validate()`, `preflight()`
+  and `bench()`, one string per call, in order. A run's prints land here and
+  never reach the check output; the test file's own prints still do.
 
 A refusal or a failure is the script's, and is a result the test asserts.
 A fixture the script's behaviour contradicts is the test's, and fails the

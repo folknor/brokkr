@@ -2728,13 +2728,41 @@ fn lua_suite_test<D: Driver>(state: &mut State) -> Result<u8, Error> {
 }
 
 /// `print`, routed through brokkr's console channel rather than straight to
-/// brokkr's stdout as dellingr's default callbacks would.
+/// brokkr's stdout as dellingr's default callbacks would - or, inside
+/// [`capture_prints`], into that capture.
 struct Console;
 
 impl ::dellingr::HostCallbacks for Console {
     fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, message: &[u8]) {
-        crate::output::bench_msg(&String::from_utf8_lossy(message));
+        let message = String::from_utf8_lossy(message);
+        let captured = CAPTURED.with_borrow_mut(|captured| match captured {
+            Some(lines) => {
+                lines.push(message.to_string());
+                true
+            }
+            None => false,
+        });
+        if !captured {
+            crate::output::bench_msg(&message);
+        }
     }
+}
+
+thread_local! {
+    /// The prints of the capture this thread is inside, if any.
+    static CAPTURED: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `work` with every `print` from a State on this thread collected rather
+/// than sent to the console, one entry per call, in order. Every hook and
+/// sample runs its script on the calling thread, so a contract run's prints
+/// are all here. A capture inside a capture hands its prints to the inner one
+/// and restores the outer on return.
+pub(crate) fn capture_prints<T>(work: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let outer = CAPTURED.with_borrow_mut(|captured| captured.replace(Vec::new()));
+    let result = work();
+    let printed = CAPTURED.with_borrow_mut(|captured| std::mem::replace(captured, outer));
+    (result, printed.unwrap_or_default())
 }
 
 #[cfg(test)]

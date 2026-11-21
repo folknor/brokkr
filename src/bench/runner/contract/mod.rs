@@ -190,14 +190,18 @@ impl Context {
         let mut modules = std::collections::BTreeSet::new();
         let mut preflight_calls = Vec::new();
         let mut bench_calls = Vec::new();
-        let ended = self.lifecycle(
-            bench,
-            &spec,
-            &view,
-            &mut modules,
-            &mut preflight_calls,
-            &mut bench_calls,
-        )?;
+        // The script's prints are the run's result, not check output.
+        let (ended, printed) = lua::capture_prints(|| {
+            self.lifecycle(
+                bench,
+                &spec,
+                &view,
+                &mut modules,
+                &mut preflight_calls,
+                &mut bench_calls,
+            )
+        });
+        let ended = ended?;
         let mut fields = vec![
             ("stage".into(), Value::Text(ended.stage.into())),
             ("outcome".into(), Value::Text(ended.outcome.into())),
@@ -206,6 +210,10 @@ impl Context {
             (
                 "modules".into(),
                 Value::List(modules.into_iter().map(Value::Text).collect()),
+            ),
+            (
+                "printed".into(),
+                Value::List(printed.into_iter().map(Value::Text).collect()),
             ),
         ];
         if let Some(reason) = ended.reason {

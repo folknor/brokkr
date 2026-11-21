@@ -717,6 +717,29 @@ fn harness_failure_excerpt(stderr: &str) -> String {
     out.join("\n")
 }
 
+/// The last `max` lines, leading blanks dropped, of a directly launched binary's own
+/// stderr, for a binary that ended by a signal. No cargo wraps a direct launch,
+/// so [`filter_test`] finds none of cargo's crash lines and would drop the
+/// stream; whatever the binary wrote before it died (an abort guard's last
+/// word, a panic in a destructor) is at its end. `None` when it wrote nothing.
+pub(crate) fn signal_stderr_tail(stderr: &str, max: usize) -> Option<String> {
+    let lines: Vec<&str> = stderr.trim_end().lines().collect();
+    let start = lines.len().saturating_sub(max);
+    let tail = &lines[start..];
+    let first = tail.iter().position(|l| !l.trim().is_empty())?;
+    let tail = &tail[first..];
+    let mut out = if start > 0 {
+        format!("stderr, last {} of {} lines:", tail.len(), lines.len())
+    } else {
+        "stderr:".to_owned()
+    };
+    for line in tail {
+        out.push_str("\n  ");
+        out.push_str(line);
+    }
+    Some(out)
+}
+
 /// Format parsed test results as a compact summary line.
 fn format_test_summary(parsed: &ParsedTestResults) -> String {
     let mut parts = vec![format!("{} passed", parsed.passed)];
@@ -1221,6 +1244,21 @@ error: could not compile `pbfhogg` (test) due to 1 previous error
             "got: {result}"
         );
         assert!(!result.contains("could not compile"), "got: {result}");
+    }
+
+    // brokkr#207: a direct launch has no cargo crash line, so the abort
+    // guard's own last word is all there is, and the tail keeps it.
+    #[test]
+    fn signal_stderr_tail_keeps_the_last_lines() {
+        let line = "test v::apply: apply: no return within 15s; ending the test binary";
+        let tail = super::signal_stderr_tail(&format!("\nnoise\n{line}\n"), 40)
+            .expect("nonempty stderr has a tail");
+        assert!(tail.starts_with("stderr:"), "got: {tail}");
+        assert!(tail.ends_with(line), "got: {tail}");
+        let long: String = (0..50).map(|i| format!("line {i}\n")).collect();
+        let tail = super::signal_stderr_tail(&long, 3).expect("tail");
+        assert_eq!(tail, "stderr, last 3 of 50 lines:\n  line 47\n  line 48\n  line 49");
+        assert!(super::signal_stderr_tail("\n \n", 40).is_none());
     }
 
     #[test]

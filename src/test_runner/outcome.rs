@@ -308,6 +308,13 @@ impl ExecutionOutcome {
         self.streams.values().any(StreamOutcome::has_test_activity)
     }
 
+    /// True when any stream's process ended by a signal.
+    pub(crate) fn signalled(&self) -> bool {
+        self.streams
+            .values()
+            .any(|stream| matches!(stream.exit, Some((_, Some(_)))))
+    }
+
     pub(crate) fn failed_tests(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .streams

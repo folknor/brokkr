@@ -613,6 +613,9 @@ fn error_detail(e: &DevError) -> String {
     }
 }
 
+/// How much of a signal-killed binary's stderr its failure block shows.
+const SIGNAL_STDERR_LINES: usize = 40;
+
 /// Render every binary's buffered output and decide the sweep's verdict.
 ///
 /// Split from the fan-out above so the concurrency and the reporting can be
@@ -701,6 +704,14 @@ fn report_runs(
                 output::error(&test_runner::filter_test(&stdout, &stderr));
                 for reason in run.outcome.structural_reasons() {
                     output::error(&format!("test record: {reason}"));
+                }
+                // A direct launch has no cargo to print a crash line, so the
+                // filter above drops stderr; a binary ended by a signal (an
+                // abort guard, a destructor panic) said why at its end.
+                if run.outcome.signalled()
+                    && let Some(tail) = test_runner::signal_stderr_tail(&stderr, SIGNAL_STDERR_LINES)
+                {
+                    output::error(&tail);
                 }
                 ok = false;
                 continue;

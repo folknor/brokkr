@@ -256,6 +256,9 @@ binaries each claim the whole budget (budget above 1) they could not overlap,
 and that prints as a warning. A passing binary prints nothing of its own; a
 failing one prints its label, a copy-pasteable repro command and its output,
 reported after the join in plan order so concurrent failures never interleave.
+A binary that ended by a signal also prints the tail of its own stderr (its
+last 40 lines): no cargo wraps the launch to name the crash, and whatever the
+binary wrote before it died, such as an abort guard's message, is there.
 
 Mutually exclusive with `isolation = "process"`. Doctests cannot run on a
 parallel sweep: `[test] doctests = true` needs at least one non-parallel entry

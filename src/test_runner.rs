@@ -40,6 +40,7 @@ pub(crate) use outcome::{
 };
 pub(crate) use output::{
     Completeness, ParsedTestResults, filter_test, parse_test_output, parse_test_output_with_stderr,
+    signal_stderr_tail,
 };
 pub(crate) use plan::{
     BuildGate, GATE_PENDING_BOUND, GateState, LibraryDoctest, StrictPlan, canonical_package_dir,
