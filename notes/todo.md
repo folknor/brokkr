@@ -145,6 +145,13 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
+### The parallel-lane timing store is never pruned (2026-11-21)
+
+`.brokkr/parallel-timings.toml` keeps every binary key and entry it has
+ever recorded; nothing removes ones that no longer exist. piners' copy
+still holds `runner-features`, `vm-features` and old per-file keys. The
+only cost is growth. Surfaced while working the parallel-lane tail.
+
 ### The nextest lane inherits nextest-runner's cargo config loader (2026-11-20)
 
 `src/check_cmd/nextest_lane.rs` hands the cargo config chain to nextest-runner

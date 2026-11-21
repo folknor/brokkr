@@ -82,6 +82,15 @@ fn run_test_phase(
 
     let mut sweeps_run = 0usize;
     let mut outcome: Result<(), TestPhaseFailure> = Ok(());
+    // Lanes run strictly one after another, deliberately. Overlapping them
+    // under one budget was weighed and declined: by default it changes what a
+    // multi-entry config means (a non-parallel entry is the serial lane, the
+    // fail-fast order, an existing budget's in-flight count); even opt-in,
+    // lanes sharing a target dir overwrite each other's uplifted executables,
+    // a drifted lane would rebuild beside running tests, and two lanes over
+    // one package would run the same test beside itself. Disjoint
+    // package-scoped feature sweeps fold into one `feature_unification =
+    // "package"` entry instead; docs/brokkr.toml.sweeps.md says how.
     for (i, sweep) in sweeps.iter().enumerate() {
         // The CLI `-p` set intersected with the sweep's selection when the
         // selection was built: ruled-out packages are dropped with a note, and

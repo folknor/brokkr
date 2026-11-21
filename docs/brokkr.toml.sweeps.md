@@ -758,6 +758,56 @@ makes the coverage gate a third line of defence rather than the first.
 Both entries carry the same features, so they share a build shape and there is
 no second compile; the coverage ledger already reconciles multi-sweep selections.
 
+### Sweeps do not overlap: fold disjoint feature sweeps instead
+
+Because entries run one after another, a config of several small
+package-scoped feature sweeps pays every sweep's tail in series, and the run
+idles between them. brokkr does not test two entries at once. Weighed and
+declined: overlap by default changes what an existing multi-entry config
+means (the serial twin above, the fail-fast order, the in-flight count of an
+existing budget), and even opt-in it needs every lane's launch closure kept
+apart - lanes in one target dir overwrite each other's uplifted executables,
+and a lane that must rebuild cannot compile beside a running test - and it
+lets two lanes over one package run the same test beside itself, over the
+same `CARGO_TARGET_TMPDIR` and fixture paths, which nothing can verify. Any
+future pool would have to admit together only lanes that cannot run a test
+beside itself (disjoint test packages, or disjoint targets of one package)
+with separate launch closures.
+
+The case that motivated it is served by one entry. Sweeps that each select one
+different package with that package's own features fold into a single
+`feature_unification = "package"` entry whose `features` are the union as
+**bare** tokens: package mode runs one resolution per package, and a bare token
+reaches only a resolution whose package defines it (see
+[Feature projection](check.md#feature-projection)), so each resolution keeps
+its old feature set, and the parallel lane queues every resolution's binaries
+under one budget:
+
+```toml
+[[check]]
+name = "feature-sweeps"
+packages = ["app-vm", "app-bench"]
+feature_unification = "package"
+parallel = { budget = 16 }
+features = ["opcode-counts", "region-sampling", "hotpath"]
+```
+
+What the fold changes, so it is a decision and not a rename:
+
+- The entry lives in `target/unify-package`, a first compile there, and the
+  plain sweeps stop having their uplifted binaries overwritten by the feature
+  builds.
+- The claims and queue order are computed over the merged inventory, and the
+  timing store and coverage labels (`<entry>/<package>`) start under the new
+  name. A formerly serial entry folded in becomes a parallel one.
+- The equivalence holds for cargo's default resolution of a one-package
+  selection; an ambient `resolver.feature-unification = "workspace"` would
+  have changed the old sweeps and does not change this one.
+- A bare union couples the packages: a feature one package adds later under a
+  name in the list is enabled there too.
+- Two of the selected packages emitting a bin of the same name share one path
+  in the directory; keep uplifted names distinct.
+
 ## `[test]` section
 
 Optional. Project-wide test settings - a default cargo package, a default
