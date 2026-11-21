@@ -705,7 +705,7 @@ pub(crate) fn assemble_nextest_lane(
         // in the shape's universe, audited as not run.
         let unit = BinaryUnit::of(b);
         let (names, ignored) = selected.remove(&unit).unwrap_or_default();
-        let hash = hash_file(Path::new(&b.executable))
+        let hash = crate::test_runner::hash_file_at(crate::test_runner::HashSite::Nextest, Path::new(&b.executable))
             .map_err(|e| DevError::Build(format!("could not hash {}: {e}", b.executable)))?;
         // No benchmarks: the engine never runs `#[bench]` functions in test mode.
         binaries.push(PreparedBinary {

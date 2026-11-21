@@ -46,10 +46,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+use super::hash_file;
 use super::{
-    AttributionRefusal, BuildGate, Ceilings, Doorbell, GATE_PENDING_BOUND, GateState, HungTest,
-    JsonReconstructor, ObsEvent, ObservationSink, RunContext, StreamEnd, StreamSource, StreamTap,
-    StrictPlan, TestTracker, WATCHDOG_POLL, hash_file,
+    AttributionRefusal, BuildGate, Ceilings, Doorbell, GATE_PENDING_BOUND, GateState, HashSite,
+    HungTest, JsonReconstructor, ObsEvent, ObservationSink, RunContext, StreamEnd, StreamSource,
+    StreamTap, StrictPlan, TestTracker, WATCHDOG_POLL, hash_file_at,
 };
 use crate::error::DevError;
 use crate::process::{Pid, ProcStat, VerifiedProcess};
@@ -590,7 +592,7 @@ fn accept_one(stream: &UnixStream, s: &Arc<SessionState>) -> Result<(), Refusal>
                 // about to exec is the one the plan enumerated, byte for
                 // byte. A path match alone admits whatever a later build
                 // wrote there.
-                match hash_file(Path::new(&executable)) {
+                match hash_file_at(HashSite::Handshake, Path::new(&executable)) {
                     Ok(now) if &now == planned => {}
                     Ok(_) => {
                         return Err(Refusal::RebuiltExecutable { executable });

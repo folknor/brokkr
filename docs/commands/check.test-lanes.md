@@ -441,6 +441,16 @@ they changed, the lane is rebuilt and checked against the plan, and under a
 complete claim any difference is a hard error ("artifacts changed since the
 plan"), never a silent re-plan.
 
+Every one of these checks reads the files in full, so on a project with large
+debug test executables preparing costs read time proportional to their total
+size several times over. The run log names what each hash site read in the
+prepare phase and in the test phase (`prepare: hashed N files at <site>, <bytes>
+read in <time>`). Restore builds - `prepare: sweep '<label>': rebuilt before
+listing` - add more; they come from sweeps sharing one target dir and
+overwriting each other's uplifted binaries, and folding disjoint feature sweeps
+into one package-mode entry gives them a directory of their own (see the
+sweeps doc).
+
 A serial or doc-only lane makes no build of its own before it runs: the lane
 enters cargo once, for its `cargo test` (its `build_packages` support builds
 run again first only when a file the plan listed changed), and that run's own

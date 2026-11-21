@@ -345,7 +345,13 @@ fn run_test_lane(
     // the same answer, so a lane routed to verify at the shim gets the shim.
     let shim = matches!(kind, LaneKind::Serial | LaneKind::DocOnly)
         .then(|| SerialShim::decide(a.project_root, sweep, a.extra_args, &env.env));
-    let snapshot_holds = |p: &PreparedLane| p.snapshot.as_ref().is_some_and(|s| snapshot_drift(s).is_empty());
+    // A stop during the reads ends the lane as a stop, not as drift.
+    let snapshot_holds = |p: &PreparedLane| -> Result<bool, DevError> {
+        match p.snapshot.as_ref() {
+            Some(s) => Ok(snapshot_drift(s)?.is_empty()),
+            None => Ok(false),
+        }
+    };
 
     // A lane that executes its binaries directly runs its prepared snapshot:
     // when every executable it runs or hands its tests still has the content
@@ -354,7 +360,10 @@ fn run_test_lane(
     // project whose build scripts rerun on every build answers yes, which is
     // drift this lane never had. Any mismatch takes the rebuild-and-compare
     // path below.
-    let unchanged = prepared.is_some_and(|p| needs_selection && p.verify && p.unavailable.is_none() && snapshot_holds(p));
+    let unchanged = match prepared {
+        Some(p) if needs_selection && p.verify && p.unavailable.is_none() => snapshot_holds(p)?,
+        _ => false,
+    };
     // A serial or doc-only lane runs `cargo test`, which builds before it runs
     // anything, so it is the build that executes that gets verified: its own
     // artifact stream is held to the plan when it finishes, and the shim holds
@@ -370,7 +379,7 @@ fn run_test_lane(
         Some(p) if unchanged => Some(p),
         Some(p) if gated => {
             gated_support =
-                Some(if snapshot_holds(p) { p.support.clone() } else { build_lane_support(a, sweep, &env, owners)? });
+                Some(if snapshot_holds(p)? { p.support.clone() } else { build_lane_support(a, sweep, &env, owners)? });
             Some(p)
         }
         // A serial lane whose harnesses cannot be attributed: it runs through

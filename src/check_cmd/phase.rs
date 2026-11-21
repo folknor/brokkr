@@ -963,6 +963,10 @@ fn run_build_phases(
                 }
                 TestPhaseFailure::Error(other) => other.into(),
             });
+            // Lane-entry rechecks, rebuild comparisons and shim handshakes.
+            for line in crate::test_runner::hash_report("test") {
+                output::detail(&line);
+            }
         }
         // The test phase is over, however it ended: the journal says so. A
         // journal without this line was cut short.
@@ -1011,6 +1015,10 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
     a.background.join()?;
     let mut preparer = CargoPreparer::new(inputs, a.extra_args, builds);
     let prep = prepare_profile(a.tested(), &a.selections.test, a.doctests, certifying, &mut preparer);
+    // What the plan's content hashes cost, per site, whatever the outcome.
+    for line in crate::test_runner::hash_report("prepare") {
+        output::detail(&line);
+    }
     for marker in &prep.plan.incomplete {
         if certifying {
             output::error(&format!("prepare: {marker}"));

@@ -320,11 +320,13 @@ mod concurrency_tests {
             std::fs::write(p, b"before").unwrap();
         }
         let snap = take_snapshot([&same, &changed, &gone].map(|p| p.display().to_string())).unwrap();
-        assert!(snapshot_drift(&snap).is_empty());
+        assert!(snapshot_drift(&snap).unwrap().is_empty());
         std::fs::write(&changed, b"after").unwrap();
         std::fs::remove_file(&gone).unwrap();
-        let drift = snapshot_drift(&snap);
+        let drift = snapshot_drift(&snap).unwrap();
         assert_eq!(drift.len(), 2, "{drift:?}");
+        // In path order whatever order the parallel reads finished in.
+        assert!(drift[0].contains("changed") && drift[1].contains("gone"), "{drift:?}");
         assert!(drift.iter().any(|l| l.contains("changed") && l.contains("other content")));
         assert!(drift.iter().any(|l| l.contains("gone") && l.contains("could not be read")));
     }

@@ -37,7 +37,9 @@ impl Benches<'_> {
 }
 use reporter::Reporter;
 
+#[cfg(test)]
 use crate::test_runner::hash_file;
+use crate::test_runner::{HashSite, hash_file_at};
 #[cfg(test)]
 use verdict::verdict_context;
 use verdict::{FinishInput, finish_check, run_stop};

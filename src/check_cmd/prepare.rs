@@ -670,6 +670,7 @@ fn list_binary(
     runtime: &DirectRuntime,
     pkg_skipped: &mut usize,
     existence: bool,
+    digests: Digests<'_>,
 ) -> Result<Option<PreparedBinary>, DevError> {
     let args: Vec<&str> = filter_args.iter().map(String::as_str).collect();
     let Some(listed) = binary_list(binary, &args, env_refs, runtime)? else {
@@ -692,8 +693,7 @@ fn list_binary(
         }
         selected.push(t);
     }
-    let hash = hash_file(Path::new(&binary.executable))
-        .map_err(|e| DevError::Build(format!("could not hash {}: {e}", binary.executable)))?;
+    let hash = digests.of(&binary.executable, HashSite::Listing)?;
     let existence = if existence { existence_listing(binary, env_refs, runtime)? } else { None };
     Ok(Some(PreparedBinary {
         unit: BinaryUnit::of(binary),
@@ -721,12 +721,13 @@ fn list_binary_or_unlisted(
     runtime: &DirectRuntime,
     pkg_skipped: &mut usize,
     existence: bool,
+    digests: Digests<'_>,
 ) -> Result<PreparedBinary, DevError> {
     if inputs.certifying {
         // A certifying lane cannot keep an unenumerable binary (its tests
         // would be outside the claim): it lists every binary, a custom harness
         // included, and a listing that is not a libtest one fails the lane.
-        return list_binary(sweep, binary, filter_args, env_refs, runtime, pkg_skipped, false)?
+        return list_binary(sweep, binary, filter_args, env_refs, runtime, pkg_skipped, false, digests)?
             .ok_or_else(|| not_prepared(sweep));
     }
     // The one place preparation executes binaries where nothing listed them
@@ -736,15 +737,15 @@ fn list_binary_or_unlisted(
     // executed to ask - the manifest already answers the question. (Every
     // lane that listed binaries before preparation existed still does.)
     if let Some(why) = custom_harness_reason(binary) {
-        return unlisted_binary(binary, why);
+        return unlisted_binary(binary, why, digests);
     }
     let (listed, held) = output::capture_errors(|| {
-        list_binary(sweep, binary, filter_args, env_refs, runtime, pkg_skipped, existence)
+        list_binary(sweep, binary, filter_args, env_refs, runtime, pkg_skipped, existence, digests)
     });
     if let Some(p) = listed? {
         return Ok(p);
     }
-    unlisted_binary(binary, held.join(" - "))
+    unlisted_binary(binary, held.join(" - "), digests)
 }
 
 /// Why `binary` is known not to be a libtest harness from its manifest alone,
@@ -765,9 +766,8 @@ fn custom_harness_reason(binary: &TestBinary) -> Option<String> {
 
 /// A binary kept in the inventory with no tests and the reason: its identity
 /// (content hash) is still recorded.
-fn unlisted_binary(binary: &TestBinary, why: String) -> Result<PreparedBinary, DevError> {
-    let hash = hash_file(Path::new(&binary.executable))
-        .map_err(|e| DevError::Build(format!("could not hash {}: {e}", binary.executable)))?;
+fn unlisted_binary(binary: &TestBinary, why: String, digests: Digests<'_>) -> Result<PreparedBinary, DevError> {
+    let hash = digests.of(&binary.executable, HashSite::Listing)?;
     Ok(PreparedBinary {
         unit: BinaryUnit::of(binary),
         binary: binary.clone(),
@@ -795,17 +795,19 @@ pub(crate) fn prepare_lane(
     attempt: &Attempt,
     extra_args: &[String],
 ) -> Result<PreparedLane, DevError> {
-    prepare_lane_from(inputs, sweep, attempt, extra_args, None)
+    prepare_lane_from(inputs, sweep, attempt, extra_args, None, Digests::READ)
 }
 
 /// [`prepare_lane`], listing `prebuilt` when the lane's shape was already
-/// built (the prepare phase's build step) instead of building it here.
+/// built (the prepare phase's build step) instead of building it here, its
+/// digests taken from `digests`.
 fn prepare_lane_from(
     inputs: &LaneInputs<'_>,
     sweep: &PlannedSweep,
     attempt: &Attempt,
     extra_args: &[String],
     prebuilt: Option<ShapeBuild>,
+    digests: Digests<'_>,
 ) -> Result<PreparedLane, DevError> {
     refuse_target_sweep_args(sweep, &ForwardedArgs::parse(extra_args))?;
     let env = lane_env(inputs, sweep)?;
@@ -847,11 +849,18 @@ fn prepare_lane_from(
                 extra_args,
                 &env,
                 prebuilt.and_then(ShapeBuild::cargo),
+                digests,
             )?
         }
-        (LaneKind::Serial, prebuilt) => {
-            prepare_serial(inputs, sweep, attempt, extra_args, &env, prebuilt.and_then(ShapeBuild::cargo))?
-        }
+        (LaneKind::Serial, prebuilt) => prepare_serial(
+            inputs,
+            sweep,
+            attempt,
+            extra_args,
+            &env,
+            prebuilt.and_then(ShapeBuild::cargo),
+            digests,
+        )?,
     };
     prepared.verify = true;
     Ok(prepared)
@@ -1164,6 +1173,7 @@ pub(crate) fn workspace_doc_facts(project_root: &Path, env_refs: &[(&str, &str)]
 /// The serial lane's preparation: the same build `cargo test` will do, listed.
 /// A lane whose harnesses cannot be attributed is refused under a certifying
 /// claim and has no inventory otherwise - it still runs, through cargo.
+#[allow(clippy::too_many_arguments)]
 fn prepare_serial(
     inputs: &LaneInputs<'_>,
     sweep: &PlannedSweep,
@@ -1171,6 +1181,7 @@ fn prepare_serial(
     extra_args: &[String],
     env: &LaneEnv,
     prebuilt: Option<CargoBuilt>,
+    digests: Digests<'_>,
 ) -> Result<PreparedLane, DevError> {
     if let Some(u) = serial_unattributable(sweep, env, extra_args) {
         if inputs.certifying {
@@ -1183,12 +1194,32 @@ fn prepare_serial(
     let env_refs = env.refs();
     let doc_facts = workspace_doc_facts(inputs.project_root, &env_refs)?;
     let doc_required = doc_facts.obliged_resolutions(attempt);
-    let built = match prebuilt {
-        Some(b) => b,
-        None => build_serial(inputs, sweep, attempt, extra_args, env)?.ok_or_else(|| not_prepared(sweep))?,
+    let (built, digests) = match prebuilt {
+        Some(b) => (b, digests),
+        // A build made here is no snapshot's: its files are read.
+        None => (
+            build_serial(inputs, sweep, attempt, extra_args, env)?.ok_or_else(|| not_prepared(sweep))?,
+            Digests::READ,
+        ),
     };
     let CargoBuilt { built, index, by_resolution } = built;
-    let fingerprint = Some(index.fingerprint()?);
+    // The merged index and every resolution's are fingerprinted together,
+    // after every resolution was built and before anything is listed: one
+    // observation, so a bin shared between indexes is read once.
+    let mut memo: HashMap<String, String> = HashMap::new();
+    let mut digest = |exe: &str| -> Result<String, DevError> {
+        if let Some(h) = memo.get(exe) {
+            return Ok(h.clone());
+        }
+        let h = digests.of(exe, HashSite::RuntimeIndex)?;
+        memo.insert(exe.to_owned(), h.clone());
+        Ok(h)
+    };
+    let fingerprint = Some(index.fingerprint_with(&mut digest)?);
+    let mut resolution_fingerprints = HashMap::new();
+    for (resolution, index) in &by_resolution {
+        resolution_fingerprints.insert(resolution.clone(), index.fingerprint_with(&mut digest)?);
+    }
     let runtime =
         DirectRuntime::load_with_config(
             inputs.project_root,
@@ -1200,9 +1231,7 @@ fn prepare_serial(
     let filter_args = lane_filter_args(sweep, libtest_extra);
     let mut prepared = PreparedLane::bare(env.clone());
     prepared.runtime_fingerprint = fingerprint;
-    for (resolution, index) in &by_resolution {
-        prepared.resolution_fingerprints.insert(resolution.clone(), index.fingerprint()?);
-    }
+    prepared.resolution_fingerprints.extend(resolution_fingerprints);
     prepared.doc_required = doc_required;
     prepared.include_ignored = lane_runs_ignored(sweep, libtest_extra);
     prepared.libtest_extra = libtest_extra.to_vec();
@@ -1228,6 +1257,7 @@ fn prepare_serial(
                 &runtime,
                 &mut prepared.pkg_skipped,
                 existence,
+                digests,
             )?);
         }
         prepared.resolutions.push(PreparedResolution { resolution, selection, binaries: out });
@@ -1333,6 +1363,7 @@ fn build_direct(
 /// The direct-execution lanes' preparation (parallel and isolated): prebuild
 /// each resolution (unless `prebuilt` holds the build), reconstruct cargo's
 /// launch contract, list every binary.
+#[allow(clippy::too_many_arguments)]
 fn prepare_direct(
     inputs: &LaneInputs<'_>,
     sweep: &PlannedSweep,
@@ -1340,16 +1371,21 @@ fn prepare_direct(
     extra_args: &[String],
     env: &LaneEnv,
     prebuilt: Option<CargoBuilt>,
+    digests: Digests<'_>,
 ) -> Result<PreparedLane, DevError> {
     let Forwarded { selectors: extra_selectors, cargo: cargo_extra, libtest: libtest_extra } =
         direct_preflight(sweep, extra_args, env)?;
     let env_refs = env.refs();
-    let built = match prebuilt {
-        Some(b) => b,
-        None => build_direct(inputs, sweep, attempt, extra_args, env)?.ok_or_else(|| not_prepared(sweep))?,
+    let (built, digests) = match prebuilt {
+        Some(b) => (b, digests),
+        // A build made here is no snapshot's: its files are read.
+        None => (
+            build_direct(inputs, sweep, attempt, extra_args, env)?.ok_or_else(|| not_prepared(sweep))?,
+            Digests::READ,
+        ),
     };
     let CargoBuilt { built, index, .. } = built;
-    let fingerprint = Some(index.fingerprint()?);
+    let fingerprint = Some(index.fingerprint_with(&mut |exe| digests.of(exe, HashSite::RuntimeIndex))?);
     let runtime =
         DirectRuntime::load_with_config(
             inputs.project_root,
@@ -1370,7 +1406,7 @@ fn prepare_direct(
     prepared.cargo_extra = cargo_extra;
     prepared.libtest_extra = libtest_extra.clone();
     let existence = wants_existence(inputs.certifying, sweep, &libtest_extra);
-    list_direct_binaries(sweep, built, &mut prepared, &libtest_extra, &env_refs, &runtime, existence)?;
+    list_direct_binaries(sweep, built, &mut prepared, &libtest_extra, &env_refs, &runtime, existence, digests)?;
     prepared.runtime = Some(runtime);
     Ok(prepared)
 }
@@ -1385,6 +1421,7 @@ fn prepare_direct(
 /// drive every binary through libtest's protocol and run only the names a
 /// listing returned, so keeping an unlistable binary as unlisted would skip the
 /// target silently.
+#[allow(clippy::too_many_arguments)]
 fn list_direct_binaries(
     sweep: &PlannedSweep,
     built: BuiltResolutions,
@@ -1393,6 +1430,7 @@ fn list_direct_binaries(
     env_refs: &[(&str, &str)],
     runtime: &DirectRuntime,
     existence: bool,
+    digests: Digests<'_>,
 ) -> Result<(), DevError> {
     let filter_args = lane_filter_args(sweep, libtest_extra);
     refuse_stale_exclusions(
@@ -1407,7 +1445,7 @@ fn list_direct_binaries(
         let selected = filter_binaries(&binaries, &prepared.target_filters);
         for b in drop_excluded(selected, sweep.lane_filters()) {
             let Some(p) =
-                list_binary(sweep, b, &filter_args, env_refs, runtime, &mut prepared.pkg_skipped, existence)?
+                list_binary(sweep, b, &filter_args, env_refs, runtime, &mut prepared.pkg_skipped, existence, digests)?
             else {
                 return Err(not_prepared(sweep));
             };
@@ -1558,7 +1596,7 @@ impl DriftCheck<'_> {
         };
         for (resolution, binaries) in rebuilt {
             for b in drop_excluded(filter_binaries(binaries, self.target_filters), &exclusions) {
-                let hash = hash_file(Path::new(&b.executable))
+                let hash = crate::test_runner::hash_file_at(HashSite::Compare, Path::new(&b.executable))
                     .map_err(|e| DevError::Build(format!("could not hash {}: {e}", b.executable)))?;
                 current.push(ArtifactFingerprint::new(
                     resolution.as_deref(),
@@ -1742,26 +1780,133 @@ pub(crate) type Snapshot = Vec<(String, String)>;
 
 /// Hash every path once.
 fn take_snapshot(paths: impl IntoIterator<Item = String>) -> Result<Snapshot, DevError> {
-    let set: BTreeSet<String> = paths.into_iter().collect();
+    let set: Vec<String> = paths.into_iter().collect::<BTreeSet<String>>().into_iter().collect();
+    let hashes = hash_all(&set, HashSite::Snapshot)?;
     set.into_iter()
-        .map(|p| {
-            let h = hash_file(Path::new(&p)).map_err(|e| DevError::Build(format!("could not hash {p}: {e}")))?;
-            Ok((p, h))
+        .zip(hashes)
+        .map(|(p, h)| match h {
+            Ok(h) => Ok((p, h)),
+            Err(e) => Err(DevError::Build(format!("could not hash {p}: {e}"))),
         })
         .collect()
 }
 
-/// What no longer matches `snapshot`, one line per file. Empty when every
-/// file still has the content it was snapshotted with.
-pub(crate) fn snapshot_drift(snapshot: &Snapshot) -> Vec<String> {
-    snapshot
+/// What no longer matches `snapshot`, one line per file in path order. Empty
+/// when every file still has the content it was snapshotted with. A stop
+/// during the reads is `Interrupted`, never drift: an empty answer would let
+/// a lane run unverified and a non-empty one would send it into a rebuild.
+pub(crate) fn snapshot_drift(snapshot: &Snapshot) -> Result<Vec<String>, DevError> {
+    let paths: Vec<String> = snapshot.iter().map(|(p, _)| p.clone()).collect();
+    let hashes = hash_all(&paths, HashSite::Recheck)?;
+    Ok(snapshot
         .iter()
-        .filter_map(|(p, h)| match hash_file(Path::new(p)) {
+        .zip(hashes)
+        .filter_map(|((p, h), now)| match now {
             Ok(now) if &now == h => None,
             Ok(_) => Some(format!("{p} has other content")),
             Err(e) => Some(format!("{p} could not be read: {e}")),
         })
-        .collect()
+        .collect())
+}
+
+/// The most files hashed at once, across the whole process: the build step
+/// runs one chain per target dir concurrently, and each chain's snapshot
+/// draws on this one budget rather than bringing its own.
+fn hash_readers() -> &'static (std::sync::Mutex<usize>, std::sync::Condvar) {
+    static READERS: std::sync::OnceLock<(std::sync::Mutex<usize>, std::sync::Condvar)> =
+        std::sync::OnceLock::new();
+    READERS.get_or_init(|| {
+        let n = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get).clamp(1, 8);
+        (std::sync::Mutex::new(n), std::sync::Condvar::new())
+    })
+}
+
+/// Hash every path, the reads spread over the process-wide reader budget,
+/// each result at its path's index. Returns once every read has finished, so
+/// a caller's next build still starts after its snapshot. A stop is checked
+/// before each file is taken; once one is seen the batch is `Interrupted`.
+fn hash_all(paths: &[String], site: HashSite) -> Result<Vec<std::io::Result<String>>, DevError> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    if paths.len() <= 1 {
+        if crate::shutdown::is_shutdown_requested() {
+            return Err(DevError::Interrupted);
+        }
+        return Ok(paths.iter().map(|p| hash_file_at(site, Path::new(p))).collect());
+    }
+    let next = AtomicUsize::new(0);
+    let stopped = AtomicBool::new(false);
+    let slots: Vec<std::sync::Mutex<Option<std::io::Result<String>>>> =
+        paths.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    let (budget, freed) = hash_readers();
+    let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get).clamp(1, 8);
+    std::thread::scope(|scope| {
+        for _ in 0..workers.min(paths.len()) {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(path) = paths.get(i) else { return };
+                    if crate::shutdown::is_shutdown_requested() {
+                        stopped.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                    {
+                        let mut free = budget.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        while *free == 0 {
+                            free = freed.wait(free).unwrap_or_else(std::sync::PoisonError::into_inner);
+                        }
+                        *free -= 1;
+                    }
+                    let h = hash_file_at(site, Path::new(path));
+                    *budget.lock().unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+                    freed.notify_one();
+                    *slots[i].lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(h);
+                }
+            });
+        }
+    });
+    if stopped.load(Ordering::Relaxed) {
+        return Err(DevError::Interrupted);
+    }
+    Ok(slots
+        .into_iter()
+        .map(|s| {
+            s.into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(|| Err(std::io::Error::other("not hashed")))
+        })
+        .collect())
+}
+
+/// Where a lane's preparation takes the content digests its inventory and
+/// runtime fingerprint record. On the checked route ([`CargoPreparer::lane`])
+/// they come from the lane's snapshot, which was checked just before listing
+/// and is checked again after it before the inventory is accepted, so a
+/// digest read between the two would be the same observation read twice. A
+/// path outside the snapshot there is a plan whose inventory and
+/// verification set disagree, and is refused. Every other route (a lane
+/// prepared at lane entry) reads the file.
+#[derive(Clone, Copy)]
+pub(crate) struct Digests<'a> {
+    known: Option<&'a Snapshot>,
+}
+
+impl<'a> Digests<'a> {
+    pub(crate) const READ: Digests<'static> = Digests { known: None };
+
+    fn from_snapshot(snapshot: &'a Snapshot) -> Self {
+        Self { known: Some(snapshot) }
+    }
+
+    fn of(&self, path: &str, site: HashSite) -> Result<String, DevError> {
+        match self.known {
+            Some(snapshot) => snapshot
+                .binary_search_by(|(p, _)| p.as_str().cmp(path))
+                .map(|i| snapshot[i].1.clone())
+                .map_err(|_| DevError::Build(format!("{path} is not in the lane's snapshot: its plan would record a file no check covers"))),
+            None => hash_file_at(site, Path::new(path))
+                .map_err(|e| DevError::Build(format!("could not hash {path}: {e}"))),
+        }
+    }
 }
 
 /// One lane's products from the prepare phase's build step.
@@ -1943,7 +2088,7 @@ impl Preparer for CargoPreparer<'_> {
             }
             None => build_lane(&self.inputs, sweep, attempt, self.extra_args, None)?,
         };
-        let drift = snapshot_drift(&built.snapshot);
+        let drift = snapshot_drift(&built.snapshot)?;
         let built = if drift.is_empty() {
             built
         } else {
@@ -1969,10 +2114,20 @@ impl Preparer for CargoPreparer<'_> {
                 sweep.label
             )));
         }
-        let mut prepared = prepare_lane_from(&self.inputs, sweep, attempt, self.extra_args, built.shape)?;
+        // The inventory's digests are the snapshot's: it was checked just
+        // before listing and is checked again below before the inventory is
+        // accepted, so reading the files in between would observe them twice.
+        let mut prepared = prepare_lane_from(
+            &self.inputs,
+            sweep,
+            attempt,
+            self.extra_args,
+            built.shape,
+            Digests::from_snapshot(&built.snapshot),
+        )?;
         // The listings ran the lane's own binaries: the inventory belongs to
         // the snapshot only if they left every file as it was.
-        let changed = snapshot_drift(&built.snapshot);
+        let changed = snapshot_drift(&built.snapshot)?;
         if !changed.is_empty() {
             return Err(DevError::Build(format!(
                 "sweep '{}': files changed while the lane was listed - {}. Its inventory would describe \
@@ -1987,18 +2142,22 @@ impl Preparer for CargoPreparer<'_> {
 
     fn universe(&mut self, sweep: &PlannedSweep, run: &ResolutionRun, env: &LaneEnv) -> Result<Universe, DevError> {
         let key = (shape_id(sweep), Resolution::from_option(run.resolution.as_deref()));
-        let (built, snapshot) = match self.builds.universes.remove(&key) {
-            Some((built, snapshot)) if snapshot_drift(&snapshot).is_empty() => (built, snapshot),
+        let held = match self.builds.universes.remove(&key) {
+            Some((built, snapshot)) if snapshot_drift(&snapshot)?.is_empty() => Some((built, snapshot)),
+            _ => None,
+        };
+        let (built, snapshot) = match held {
+            Some(held) => held,
             // No build-step build, or one replaced since: build it now (alone,
             // nothing else compiles here) and list that.
-            _ => {
+            None => {
                 let built = build_universe(&self.inputs, sweep, run, env)?;
                 let snapshot = take_snapshot(built.tracked_paths())?;
                 (built, snapshot)
             }
         };
         let universe = list_universe(&self.inputs, sweep, env, built)?;
-        let changed = snapshot_drift(&snapshot);
+        let changed = snapshot_drift(&snapshot)?;
         if !changed.is_empty() {
             return Err(DevError::Build(format!(
                 "the universe of sweep '{}' changed while it was listed - {}",
@@ -2603,8 +2762,18 @@ mod prepare_tests {
             universe_selectors: &NO_UNIVERSE_SELECTORS,
         };
         let mut skipped = 0;
-        let p = list_binary_or_unlisted(&inputs, &planned(crate::profile::SweepDecl::default()), &target, &[], &[], &runtime, &mut skipped, false)
-            .unwrap();
+        let p = list_binary_or_unlisted(
+            &inputs,
+            &planned(crate::profile::SweepDecl::default()),
+            &target,
+            &[],
+            &[],
+            &runtime,
+            &mut skipped,
+            false,
+            Digests::READ,
+        )
+        .unwrap();
         assert!(!marker.exists(), "the harness = false executable was run");
         let why = p.unlisted.expect("kept as unlisted");
         assert!(why.contains("harness = false") && why.contains("not run"), "{why}");
@@ -2737,11 +2906,34 @@ mod prepare_tests {
             &[],
             &runtime,
             false,
+            Digests::READ,
         )
         .unwrap();
         let b = &prepared.resolutions[0].binaries[0];
         assert_eq!(b.selected, vec!["alpha".to_owned()]);
         assert!(b.unlisted.is_none() && b.executed(false).count() == 1);
+    }
+
+    /// On the checked route a listed binary's identity is the snapshot's
+    /// digest, not a fresh read, and a binary outside the snapshot is refused:
+    /// its digest would be one no check covers.
+    #[test]
+    fn a_checked_listing_records_the_snapshots_digest_and_refuses_an_uncovered_binary() {
+        let (_dir, _calls, target, runtime) = listing_harness("checked_listing_digest");
+        let sweep = planned(crate::profile::SweepDecl { label: "par".into(), ..Default::default() });
+        let built = || vec![(None, vec!["-p".to_owned(), "core".to_owned()], vec![target.clone()])];
+        let snapshot: Snapshot = vec![(target.executable.clone(), "from-the-snapshot".to_owned())];
+        let mut prepared = PreparedLane::bare(LaneEnv::default());
+        list_direct_binaries(&sweep, built(), &mut prepared, &[], &[], &runtime, false, Digests::from_snapshot(&snapshot))
+            .unwrap();
+        assert_eq!(prepared.resolutions[0].binaries[0].hash, "from-the-snapshot");
+
+        let elsewhere: Snapshot = vec![("/elsewhere".to_owned(), "h".to_owned())];
+        let mut prepared = PreparedLane::bare(LaneEnv::default());
+        let err = list_direct_binaries(&sweep, built(), &mut prepared, &[], &[], &runtime, false, Digests::from_snapshot(&elsewhere))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not in the lane's snapshot"), "{err}");
     }
 
     /// A custom harness that does not answer `--list` with a libtest listing
@@ -2759,6 +2951,7 @@ mod prepare_tests {
             &[],
             &runtime,
             false,
+            Digests::READ,
         )
         .unwrap_err()
         .to_string();
@@ -2781,6 +2974,7 @@ mod prepare_tests {
             &runtime,
             &mut skipped,
             false,
+            Digests::READ,
         )
         .unwrap();
         assert_eq!(p.selected, vec!["alpha".to_owned()]);

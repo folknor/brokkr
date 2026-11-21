@@ -124,6 +124,19 @@ impl BuildRuntimeIndex {
     /// the link-search DIRECTORIES (a dylib a build script dropped there) are
     /// not hashed - those are files no artifact stream names.
     pub(crate) fn fingerprint(&self) -> Result<Vec<String>, DevError> {
+        self.fingerprint_with(&mut |exe| {
+            crate::test_runner::hash_file_at(crate::test_runner::HashSite::RuntimeIndex, Path::new(exe))
+                .map_err(|e| DevError::Build(format!("could not hash support bin {exe}: {e}")))
+        })
+    }
+
+    /// [`Self::fingerprint`], each support bin's digest taken from `digest`:
+    /// a caller that already observed the bins' content in the same
+    /// observation (a snapshot the same check covers) hands that in.
+    pub(crate) fn fingerprint_with(
+        &self,
+        digest: &mut dyn FnMut(&str) -> Result<String, DevError>,
+    ) -> Result<Vec<String>, DevError> {
         let mut out = Vec::new();
         for (pkg, runs) in &self.build_scripts {
             for run in runs {
@@ -135,8 +148,7 @@ impl BuildRuntimeIndex {
         }
         for (pkg, bins) in &self.bin_exes {
             for (name, exe) in bins {
-                let hash = crate::test_runner::hash_file(Path::new(exe))
-                    .map_err(|e| DevError::Build(format!("could not hash support bin {exe}: {e}")))?;
+                let hash = digest(exe)?;
                 out.push(format!("bin {pkg} {name} {exe} {hash}"));
             }
         }

@@ -43,8 +43,8 @@ pub(crate) use output::{
     signal_stderr_tail,
 };
 pub(crate) use plan::{
-    BuildGate, GATE_PENDING_BOUND, GateState, LibraryDoctest, StrictPlan, canonical_package_dir,
-    hash_file,
+    BuildGate, GATE_PENDING_BOUND, GateState, HashSite, LibraryDoctest, StrictPlan,
+    canonical_package_dir, hash_file, hash_file_at, hash_report,
 };
 pub(crate) use procgroup::{Chunk, read_chunk};
 pub(crate) use run::{

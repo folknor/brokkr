@@ -68,6 +68,10 @@ pub(crate) fn run(
         sweep_filter,
         timings.then_some(&collected),
     );
+    // What the plan's content hashes cost, per site, however the run ended.
+    for line in crate::test_runner::hash_report("test") {
+        output::detail(&line);
+    }
     // Printed however the run ended: a failing, stopped or capped run's
     // timings are exactly the ones a slow-test hunt is after.
     if timings {

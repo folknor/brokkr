@@ -1522,6 +1522,24 @@ must never share the machine with a compile:
 Listings must not modify the files they are listed from. Hashing either side of
 a listing catches a net change, not a file replaced and put back while it ran.
 
+Every check is a full content read; no digest is ever served from a file stamp
+(inode, size, mtime, ctime). A settled stamp says an ordinary write would have
+been noticed, not that the bytes are the same: a store through a live writable
+shared mapping changes them with no timestamp update. What is not repeated is a
+read within one observation. A lane listed from its build-step snapshot records
+the snapshot's digests as its inventory's executable identities and in its
+runtime-index fingerprint, since the snapshot was checked just before the
+listings and is checked again after them before the inventory is accepted; a
+path the inventory names that the snapshot does not hold is refused. A serial
+lane's merged and per-resolution fingerprints share one digest per bin. A lane
+prepared at lane entry has no snapshot and reads its files. The reads of one
+snapshot or recheck are spread over a process-wide budget of a few readers and
+joined before the caller goes on, so the next build in a chain still starts
+after its snapshot; drift lines stay in path order, and a stop during the reads
+is a stop, never drift. The run log carries one line per hash site for the
+prepare phase and for the test phase (files, bytes read, read time summed over
+readers).
+
 The plan is written to `.brokkr/accounting/<run id>/plan.json` (under the
 config dir; retention is below) before the first test executes,
 and a journal beside it, `journal.jsonl`, receives every observation as it
@@ -1835,12 +1853,15 @@ What preparing costs on a partial check, per serial lane, on top of the lane
 itself: the lane's `build_packages` support builds; one `cargo metadata`; one
 `cargo test --no-run` build per cargo resolution; two `--list` executions of
 every listable binary (the selection, then the ignored-only subset); a content
-hash of every executable. Then, when the lane's turn comes, the support builds
-run **again**, the same `--no-run` build runs again and every executable is
-hashed again (the verification that proves the lane is about to run what was
-planned - each is a no-op build when nothing changed, and a support-bin
-re-uplift when another lane's build replaced one), before the lane's own `cargo
-test` builds a third time. Every run writes a record.
+hash of every executable at the snapshot, before the listings and after them.
+Then, when the lane's turn comes and the harness shim is attached, the snapshot
+is hashed again, the support builds rerun only when it no longer holds, and the
+lane's own `cargo test` build is held to the plan from its stream, every
+executable hashed once more. Without the shim the lane takes the rebuild path
+instead: the support builds and the same `--no-run` build run again (a no-op
+build when nothing changed, a support-bin re-uplift when another lane's build
+replaced one) and every executable is hashed again before the lane's own `cargo
+test`. Every run writes a record.
 
 Whether a lane runs `#[ignore]`d tests (`--include-ignored` or `--ignored`) is
 resolved from the lane's **complete** launch argv: the sweep's own libtest args

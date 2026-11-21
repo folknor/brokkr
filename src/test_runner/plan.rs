@@ -10,19 +10,152 @@ use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// xxh3-64 of a file's contents, hex, streamed: the identity a plan records
-/// for an executable, and checks again before it runs.
+/// for an executable, and checks again before it runs. Counted under
+/// [`HashSite::Other`]; production callers name their site through
+/// [`hash_file_at`].
 pub(crate) fn hash_file(path: &Path) -> std::io::Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
-    let mut buf = vec![0_u8; 1 << 20];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
+    hash_file_at(HashSite::Other, path)
+}
+
+/// [`hash_file`], its read counted under `site` for [`hash_report`].
+///
+/// Every call reads the whole file. A digest is never served from a stamp
+/// (inode, size, mtime, ctime): a settled stamp is evidence that an ordinary
+/// write would have been noticed, not that the bytes are the same - a store
+/// through a live writable shared mapping changes them with no timestamp
+/// update - and every check a plan makes is a content check by contract.
+/// What is cut instead is rereading within one observation: a caller that
+/// already holds a digest the same check covers forwards it.
+pub(crate) fn hash_file_at(site: HashSite, path: &Path) -> std::io::Result<String> {
+    let started = Instant::now();
+    let mut read = 0_u64;
+    let result = (|| {
+        let mut file = fs::File::open(path)?;
+        let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+        let mut buf = vec![0_u8; 1 << 20];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            read += n as u64;
+            hasher.update(&buf[..n]);
         }
-        hasher.update(&buf[..n]);
+        Ok(format!("{:016x}", hasher.digest()))
+    })();
+    HASH_STATS[site as usize].add(read, started.elapsed());
+    result
+}
+
+/// Where a plan's content hash was taken, for the run log's per-site
+/// account of what preparing and verifying read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HashSite {
+    /// A lane's (or universe's) snapshot, straight after its build.
+    Snapshot,
+    /// A snapshot checked again: before listing, after listing, at lane entry.
+    Recheck,
+    /// A test executable's identity read where no snapshot covers it.
+    Listing,
+    /// The runtime index's `CARGO_BIN_EXE_*` bins, where no snapshot covers them.
+    RuntimeIndex,
+    /// The support executables' fingerprint.
+    Support,
+    /// A lane's build compared with its plan (rebuild at lane entry, serial gate).
+    Compare,
+    /// The nextest lane's binaries.
+    Nextest,
+    /// A strict harness shim's handshake.
+    Handshake,
+    /// Anything else (`brokkr test`'s plan, tests).
+    Other,
+}
+
+impl HashSite {
+    const ALL: [HashSite; 9] = [
+        Self::Snapshot,
+        Self::Recheck,
+        Self::Listing,
+        Self::RuntimeIndex,
+        Self::Support,
+        Self::Compare,
+        Self::Nextest,
+        Self::Handshake,
+        Self::Other,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Snapshot => "snapshot",
+            Self::Recheck => "recheck",
+            Self::Listing => "listing",
+            Self::RuntimeIndex => "runtime index",
+            Self::Support => "support",
+            Self::Compare => "compare",
+            Self::Nextest => "nextest",
+            Self::Handshake => "handshake",
+            Self::Other => "other",
+        }
     }
-    Ok(format!("{:016x}", hasher.digest()))
+}
+
+/// One site's running totals: files, bytes read, nanoseconds spent reading
+/// (summed over threads, so it can exceed wall time when reads overlap).
+struct SiteStats {
+    files: std::sync::atomic::AtomicU64,
+    bytes: std::sync::atomic::AtomicU64,
+    nanos: std::sync::atomic::AtomicU64,
+}
+
+impl SiteStats {
+    const fn new() -> Self {
+        use std::sync::atomic::AtomicU64;
+        Self {
+            files: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            nanos: AtomicU64::new(0),
+        }
+    }
+
+    fn add(&self, bytes: u64, took: Duration) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.files.fetch_add(1, Relaxed);
+        self.bytes.fetch_add(bytes, Relaxed);
+        self.nanos
+            .fetch_add(u64::try_from(took.as_nanos()).unwrap_or(u64::MAX), Relaxed);
+    }
+
+    fn take(&self) -> (u64, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.files.swap(0, Relaxed),
+            self.bytes.swap(0, Relaxed),
+            self.nanos.swap(0, Relaxed),
+        )
+    }
+}
+
+static HASH_STATS: [SiteStats; 9] = [const { SiteStats::new() }; 9];
+
+/// What every site hashed since the last report, one line per site that read
+/// anything, and the counters reset. `phase` names the span in each line.
+/// The time is read time summed over threads, not wall.
+pub(crate) fn hash_report(phase: &str) -> Vec<String> {
+    HashSite::ALL
+        .iter()
+        .filter_map(|&site| {
+            let (files, bytes, nanos) = HASH_STATS[site as usize].take();
+            (files > 0).then(|| {
+                format!(
+                    "{phase}: hashed {} at {}, {} read in {}",
+                    crate::output::count(usize::try_from(files).unwrap_or(usize::MAX), "file"),
+                    site.label(),
+                    crate::output::format_bytes(bytes),
+                    crate::output::format_duration(Duration::from_nanos(nanos))
+                )
+            })
+        })
+        .collect()
 }
 
 /// What a strict session admits.

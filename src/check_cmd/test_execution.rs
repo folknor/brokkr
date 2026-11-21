@@ -235,7 +235,7 @@ pub(crate) fn support_artifacts(stdout: &str, package: &str) -> Vec<SupportArtif
 pub(crate) fn support_fingerprint(artifacts: &[SupportArtifact]) -> Result<Vec<String>, DevError> {
     let mut out = Vec::with_capacity(artifacts.len());
     for a in artifacts {
-        let hash = crate::test_runner::hash_file(Path::new(&a.executable))
+        let hash = crate::test_runner::hash_file_at(crate::test_runner::HashSite::Support, Path::new(&a.executable))
             .map_err(|e| DevError::Build(format!("could not hash support executable {}: {e}", a.executable)))?;
         out.push(format!("support {} {} {} {hash}", a.package, a.target, a.executable));
     }
