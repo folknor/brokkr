@@ -73,6 +73,14 @@ impl PreflightHost {
                 .map_err(|e| Abort::Machinery(format!("cannot admit {name}: {e}")))?;
         let env: Vec<(&str, &str)> = env.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
         let arg_refs = lease.arg_refs();
+        let hold = match super::host::launch_hold() {
+            Ok(hold) => hold,
+            Err(abort) => {
+                // Never spawned: the lease has no holder to wait for.
+                drop(lease.finish());
+                return Err(abort);
+            }
+        };
         let guard = crate::shutdown::SigtermGuard::install();
         let command = crate::process::spawn::ChildPolicy::plain().exact(
             &program_str,
@@ -117,7 +125,6 @@ impl PreflightHost {
                 };
             }
         };
-        let hold = crate::lockfile::current_hold();
         if let Some(hold) = &hold {
             hold.set_child_pid(child.id());
         }

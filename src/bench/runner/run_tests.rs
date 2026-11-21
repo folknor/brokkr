@@ -1328,3 +1328,45 @@ fn a_run_that_cannot_be_stored_ends_the_invocation() {
     assert_eq!(server.publishes.load(Ordering::SeqCst), 1);
     assert!(server.stored(fixture.detection.project.name()).is_empty());
 }
+
+/// Set in the child process of the committed-stop test below: the stop is
+/// sticky and process-wide, so it is committed only in a process of its own.
+const STOP_CHILD: &str = "BROKKR_TEST_COMMITTED_STOP_CHILD";
+
+/// A launch takes its hold before the spawn, so a stop committed between the
+/// spawn and the stamp still records the child where `kill --hard` reads it;
+/// a launch after the stop is refused instead of spawning.
+#[test]
+fn a_committed_stop_refuses_a_launch_but_not_its_stamp() {
+    if std::env::var_os(STOP_CHILD).is_some() {
+        let roots = crate::project::detect_roots().unwrap();
+        let _hold = crate::lockfile::test_hold(&roots.0, &roots.1);
+        let hold = super::host::launch_hold().unwrap().expect("the test hold");
+        crate::shutdown::commit_stop();
+        assert!(matches!(
+            super::host::launch_hold(),
+            Err(crate::bench::lua::Abort::Interrupted)
+        ));
+        assert!(crate::lockfile::current_hold().is_none());
+        let me = std::process::id();
+        hold.set_child_pid(me);
+        let info = crate::lockfile::status().unwrap().expect("a held lock");
+        assert!(info.children.iter().any(|(pid, _)| *pid == me), "{:?}", info.children);
+        return;
+    }
+    let ran = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "bench::runner::run_tests::a_committed_stop_refuses_a_launch_but_not_its_stamp",
+            "--nocapture",
+        ])
+        .env(STOP_CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(
+        ran.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+}

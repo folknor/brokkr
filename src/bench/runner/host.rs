@@ -521,8 +521,8 @@ impl IterationHost {
         let prepared = self
             .prepare_cache(call, stdin.as_ref())
             .and_then(|prepared| stopping().map(|()| prepared));
-        let cache = match prepared {
-            Ok(cache) => cache,
+        let (cache, hold) = match prepared.and_then(|cache| launch_hold().map(|hold| (cache, hold))) {
+            Ok(ready) => ready,
             Err(abort) => {
                 // Never spawned: the borrow has no holder to wait for.
                 drop(admitted.finish());
@@ -554,7 +554,6 @@ impl IterationHost {
             }
         };
         let pid = child.id();
-        let hold = crate::lockfile::current_hold();
         if let Some(hold) = &hold {
             hold.set_child_pid(pid);
         }
@@ -1051,6 +1050,20 @@ fn call_outcome(
 /// Whether a stop is pending: Ctrl-C, `brokkr kill`, or a committed stop.
 pub(super) fn stop_pending() -> bool {
     crate::shutdown::should_unwind() || !crate::shutdown::admits_new_work()
+}
+
+/// The hold a launch records its child on, taken right before the spawn so a
+/// stop committed between the spawn and the stamp cannot hide the child from
+/// the lock record `brokkr kill --hard` reads: a guard already in hand stamps
+/// whatever the stop state. A stop committed before this lookup refuses the
+/// launch. `None` when the process holds no lock (unit tests), so the child
+/// goes unrecorded as it always did there.
+pub(super) fn launch_hold() -> Result<Option<crate::lockfile::LockGuard>, Abort> {
+    match crate::lockfile::hold_for_new_work() {
+        Ok(hold) => Ok(Some(hold)),
+        Err(crate::lockfile::NoHold::Stopped) => Err(Abort::Interrupted),
+        Err(crate::lockfile::NoHold::Absent) => Ok(None),
+    }
 }
 
 /// Every builtin's first step: a pending stop ends the sample here.
