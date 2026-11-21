@@ -237,21 +237,27 @@ pub(super) fn acquire_at_with(
         fd: owned,
         path: path.to_owned(),
         ticket: None,
+        waited: false,
     };
     match wait {
         FlockWait::Block => {
             let inherited = crate::hold::inherited_capability_hash();
-            let queue = super::queue_dir().ok_or_else(|| {
+            let queue = super::queue_dir_for(path).ok_or_else(|| {
                 DevError::Lock(LockError::acquisition(AcquireRefusal::QueueJoin {
-                    source: std::io::Error::other("$HOME is not set or is empty"),
+                    source: std::io::Error::other("the lock file has no parent directory"),
                 }))
             })?;
-            flocked.ticket =
-                wait_for_flock(flocked.fd.as_raw_fd(), inherited.as_ref(), &queue, &|| {
-                    waiter_record(ctx)
-                })?;
+            let (ticket, waited) = wait_for_flock(
+                flocked.fd.as_raw_fd(),
+                path,
+                inherited.as_ref(),
+                &queue,
+                &|| waiter_record(ctx),
+            )?;
+            flocked.ticket = Some(ticket);
+            flocked.waited = waited;
         }
-        FlockWait::NonBlocking => try_flock(flocked.fd.as_raw_fd())?,
+        FlockWait::NonBlocking => try_flock(flocked.fd.as_raw_fd(), path)?,
     }
     // A stop accepted while this thread waited on the flock.
     refuse_if_stopping()?;
@@ -283,6 +289,9 @@ struct Flocked {
     /// the flock until the holder record is published, then claimed
     /// ([`Gated::drain`]).
     ticket: Option<super::queue::Ticket>,
+    /// Whether the acquisition waited, so it printed the wait line and owes
+    /// the acquired one.
+    waited: bool,
 }
 
 /// The pre-live owner's duty to invalidate the lock record it wrote: armed
@@ -375,6 +384,8 @@ impl Gated {
             }
             // A stop accepted over the socket since the publish.
             refuse_if_stopping()?;
+        }
+        if self.0.waited {
             // Wording fixed on purpose - do not shorten or "improve" it.
             // These two lines have been revised many times, and every terser
             // version was misread by agents: without "you now hold the global
@@ -468,6 +479,7 @@ impl Authorized {
             fd,
             path,
             ticket: _,
+            waited: _,
         } = self.flocked;
         // The live owner invalidates on release from here on.
         unpublish.armed = false;
@@ -543,77 +555,104 @@ pub(super) const LOCK_POLL: std::time::Duration = std::time::Duration::from_mill
 ///
 /// # The queue
 ///
-/// The first failed attempt joins the lock queue in `queue` with the record
-/// `record` builds, before the wait line is printed, so every waiter that has
-/// announced itself is one `brokkr kill` can see and cancel
-/// (`super::queue`). A join that fails refuses: no waiter waits unrecorded.
-/// Each round checks whether a kill cancelled it. On winning the flock the
-/// ticket is returned, unclaimed, for the caller to claim once its holder
-/// record is published; `None` means the flock was free at once, and the
-/// fixed acquired line is the caller's to print only for a ticket.
+/// The acquirer joins the lock queue in `queue` with the record `record`
+/// builds before its first attempt, so every waiter is one `brokkr kill` can
+/// see and cancel, and admission follows the queue's order
+/// (`super::queue`, Admission order): the exclusive try runs only on this
+/// waiter's turn. A join that fails refuses: no waiter waits unrecorded. Each
+/// round checks for a cancel, a stop and a holder that is this process's
+/// ancestor, independent of whose turn it is, then refreshes the heartbeat.
+/// On winning the flock the ticket is returned, unclaimed, for the caller to
+/// claim once its holder record is published, with whether this acquisition
+/// had to wait: the wait line and the fixed acquired line are printed only
+/// for one that did.
 pub(super) fn wait_for_flock(
     fd: RawFd,
+    path: &Path,
     inherited: Option<&AuthHash>,
     queue: &Path,
     record: &dyn Fn() -> super::queue::WaiterRecord,
-) -> Result<Option<super::queue::Ticket>, DevError> {
-    let mut ticket: Option<super::queue::Ticket> = None;
+) -> Result<(super::queue::Ticket, bool), DevError> {
+    let ticket = super::queue::Ticket::join(queue, &record()).map_err(|source| {
+        DevError::Lock(LockError::acquisition(AcquireRefusal::QueueJoin { source }))
+    })?;
+    let mut waited = false;
     loop {
-        // This is acquisition, not observation: it must establish exclusive
-        // ownership. The shared probe used by status and the rustc guard would
-        // allow two brokkr commands to proceed together.
-        let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-        if ret == 0 {
-            return Ok(ticket);
-        }
-        let err = std::io::Error::last_os_error();
-        match err.raw_os_error() {
-            Some(libc::EWOULDBLOCK) => {}
-            Some(libc::EINTR) => continue,
-            _ => {
+        match ticket.cancelled() {
+            Ok(false) => {}
+            Ok(true) => {
+                announce_cancelled();
+                return Err(DevError::Interrupted);
+            }
+            Err(source) => {
                 return Err(DevError::Lock(LockError::acquisition(
-                    AcquireRefusal::LockFlock { source: err },
+                    AcquireRefusal::QueueClaim { source },
                 )));
             }
         }
-        let holder = read_lock_contents(fd);
-        if let (Some(mine), Some(info)) = (inherited, &holder)
-            && info.auth.as_ref() == Some(mine)
+        if let Some(mine) = inherited
+            && let Some(info) = ancestor_holder(fd, path, mine)
         {
-            return Err(DevError::Lock(LockError::acquisition(nested_refusal(info))));
+            return Err(DevError::Lock(LockError::acquisition(nested_refusal(&info))));
         }
-        match &ticket {
-            None => {
-                let joined = super::queue::Ticket::join(queue, &record()).map_err(|source| {
-                    DevError::Lock(LockError::acquisition(AcquireRefusal::QueueJoin { source }))
-                })?;
-                ticket = Some(joined);
-                // Deliberately terse, and fixed wording (see the acquired line
-                // in `Gated::drain`): who holds the lock and how busy it is
-                // lives in `brokkr lock`, which re-samples on every invocation.
-                crate::output::lock_msg("waiting for the brokkr lock ...");
-                if let Some(hint) = holder.as_ref().and_then(same_agent_hint) {
-                    crate::output::lock_msg(&hint);
-                }
+        // Best effort: a heartbeat that cannot be written risks only this
+        // waiter's place, never another's.
+        drop(ticket.heartbeat());
+        // This is acquisition, not observation: it must establish exclusive
+        // ownership. The shared probe used by status and the rustc guard would
+        // allow two brokkr commands to proceed together.
+        let admitted = ticket
+            .admit(&mut || exclusive_try(fd))
+            .map_err(|source| {
+                DevError::Lock(LockError::acquisition(AcquireRefusal::QueueAdmit { source }))
+            })?;
+        if admitted {
+            return Ok((ticket, waited));
+        }
+        if !waited {
+            waited = true;
+            // Deliberately terse, and fixed wording (see the acquired line
+            // in `Gated::drain`): who holds the lock and how busy it is
+            // lives in `brokkr lock`, which re-samples on every invocation.
+            crate::output::lock_msg("waiting for the brokkr lock ...");
+            if let Some(hint) = read_lock_contents(fd).as_ref().and_then(same_agent_hint) {
+                crate::output::lock_msg(&hint);
             }
-            Some(waiting) => match waiting.cancelled() {
-                Ok(false) => {}
-                Ok(true) => {
-                    announce_cancelled();
-                    return Err(DevError::Interrupted);
-                }
-                Err(source) => {
-                    return Err(DevError::Lock(LockError::acquisition(
-                        AcquireRefusal::QueueClaim { source },
-                    )));
-                }
-            },
         }
         if crate::shutdown::should_unwind() {
             return Err(DevError::Interrupted);
         }
         std::thread::sleep(LOCK_POLL);
     }
+}
+
+/// One non-blocking exclusive try on `fd`: `Ok(true)` taken, `Ok(false)` held.
+fn exclusive_try(fd: RawFd) -> std::io::Result<bool> {
+    loop {
+        // SAFETY: an fd the acquisition owns for the duration of the call.
+        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(true);
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EINTR) => {}
+            Some(libc::EWOULDBLOCK) => return Ok(false),
+            _ => return Err(err),
+        }
+    }
+}
+
+/// The live holder's record when it publishes `mine`, the hash this process
+/// inherited: a holder this process descends from. Liveness is a shared
+/// probe through a descriptor of its own, since a record alone can be a dead
+/// holder's residue; any failure to establish it is "no", and the next round
+/// looks again.
+fn ancestor_holder(fd: RawFd, path: &Path, mine: &AuthHash) -> Option<LockInfo> {
+    let probe = std::fs::File::open(path).ok()?;
+    if super::lock_probe::try_shared(probe.as_raw_fd()).ok()? {
+        return None;
+    }
+    read_lock_contents(fd).filter(|info| info.auth.as_ref() == Some(mine))
 }
 
 /// Say why a waiter is giving up: the exit status alone (130) does not tell an
@@ -651,29 +690,28 @@ fn waiter_record(ctx: &LockContext<'_>) -> super::queue::WaiterRecord {
     }
 }
 
-/// One exclusive flock attempt. A held lock is the typed busy refusal, naming
-/// the holder's command when its record can be read.
-fn try_flock(fd: RawFd) -> Result<(), DevError> {
-    loop {
-        let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-        if ret == 0 {
-            return Ok(());
+/// One exclusive flock attempt that does not wait, and does not pass a
+/// waiter that holds a live place in the queue (`super::queue`, Admission
+/// order). A held lock is the typed busy refusal, naming the holder's command
+/// when its record can be read; a waiter ahead, or admission busy, is
+/// [`AcquireRefusal::QueueBusy`]. Without a queue directory nobody can be
+/// waiting, so the try is plain.
+fn try_flock(fd: RawFd, path: &Path) -> Result<(), DevError> {
+    let mut try_lock = || exclusive_try(fd);
+    let outcome = match super::queue_dir_for(path) {
+        Some(queue) => super::queue::admit_nonblocking(&queue, &mut try_lock),
+        None => try_lock().map(Some),
+    };
+    match outcome {
+        Ok(Some(true)) => Ok(()),
+        Ok(Some(false)) => {
+            let holder = read_lock_contents(fd).map(|info| info.command);
+            Err(DevError::Lock(LockError::acquisition(AcquireRefusal::Busy { holder })))
         }
-        let err = std::io::Error::last_os_error();
-        match err.raw_os_error() {
-            Some(libc::EINTR) => {}
-            Some(libc::EWOULDBLOCK) => {
-                let holder = read_lock_contents(fd).map(|info| info.command);
-                return Err(DevError::Lock(LockError::acquisition(
-                    AcquireRefusal::Busy { holder },
-                )));
-            }
-            _ => {
-                return Err(DevError::Lock(LockError::acquisition(
-                    AcquireRefusal::LockFlock { source: err },
-                )));
-            }
-        }
+        Ok(None) => Err(DevError::Lock(LockError::acquisition(AcquireRefusal::QueueBusy))),
+        Err(source) => Err(DevError::Lock(LockError::acquisition(
+            AcquireRefusal::LockFlock { source },
+        ))),
     }
 }
 

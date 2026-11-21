@@ -478,6 +478,16 @@ pub(crate) fn queue_dir() -> Option<PathBuf> {
     crate::user_dirs::queue_dir_at(lock_home().as_deref())
 }
 
+/// The queue that orders acquisitions of the lock file `lock`: the `queue`
+/// directory beside it. For the global lock this is [`queue_dir`], since both
+/// live in the state directory. The queue is per directory, so this assumes
+/// one lock file per directory: two in one would share an order and forfeit
+/// each other's places on unrelated flocks. Scratch locks in tests each get a
+/// directory of their own for that reason.
+pub(super) fn queue_dir_for(lock: &Path) -> Option<PathBuf> {
+    lock.parent().map(|dir| dir.join("queue"))
+}
+
 /// The bench cell cursor (`crate::bench::host_trace`), in the lock's
 /// namespace: only a holder of this lock writes it.
 pub(crate) fn cell_cursor_path() -> Option<PathBuf> {
@@ -844,11 +854,12 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Per-test scratch lock file. Each test gets its own path so parallel
-    /// test threads never contend (or falsely nest) with each other, and
-    /// none of them ever touch the real global lock.
+    /// Per-test scratch lock file. Each test gets its own directory, so
+    /// parallel test threads never contend (or falsely nest) with each other,
+    /// nor wait in one admission order through the queue beside the lock
+    /// ([`queue_dir_for`]), and none of them ever touch the real global lock.
     fn tmp_lock(name: &str) -> PathBuf {
-        crate::test_scratch::scratch_path("lockfile", name)
+        crate::test_scratch::scratch("lockfile", &format!("{name}.d")).join("lock")
     }
 
     /// A holder on `path` publishing `auth`, as a second descriptor of this
@@ -894,9 +905,21 @@ mod tests {
         fd: &OwnedFd,
         inherited: Option<&AuthHash>,
         queue: &Path,
-    ) -> Result<Option<queue::Ticket>, DevError> {
-        wait_for_flock(fd.as_raw_fd(), inherited, queue, &waiter_record)
+    ) -> Result<(queue::Ticket, bool), DevError> {
+        // Only the descendant check reads the lock path, through a probe of
+        // its own; the fd names the same file in every caller here.
+        let path = std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+            .map_err(|e| DevError::Lock(LockError::from(e.to_string())))?;
+        wait_for_flock(fd.as_raw_fd(), &path, inherited, queue, &waiter_record)
     }
+
+    /// The global lock's queue is the one beside it, so `brokkr kill` and
+    /// `brokkr lock` read the queue acquisition orders by.
+    #[test]
+    fn the_global_locks_queue_is_the_one_beside_it() {
+        assert_eq!(queue_dir_for(&lock_path().unwrap()), queue_dir());
+    }
+
 
     // A waiter joins the queue before it announces itself, and a cancel
     // committed while it waits ends the wait as interrupted, without the lock.
@@ -974,8 +997,8 @@ mod tests {
             drop(holder);
         });
         let dir = crate::test_scratch::scratch("lockfile", "unrelated-queue");
-        let ticket = wait(&me, Some(&my_auth), &dir).unwrap();
-        assert!(ticket.is_some(), "a waiter that waited holds a ticket");
+        let (_ticket, waited) = wait(&me, Some(&my_auth), &dir).unwrap();
+        assert!(waited, "a waiter that waited says so");
         release.join().unwrap();
     }
 

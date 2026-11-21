@@ -68,6 +68,9 @@ pub enum AcquireRefusal {
     Busy {
         holder: Option<String>,
     },
+    /// A non-blocking acquisition found a queued waiter ahead of it, or
+    /// admission busy, so taking the lock would pass a waiter.
+    QueueBusy,
     InsideCompilation {
         marker: &'static str,
     },
@@ -117,6 +120,11 @@ pub enum AcquireRefusal {
     QueueClaim {
         source: io::Error,
     },
+    /// A waiter could not read or update the admission index, so it cannot
+    /// tell whether its turn has come.
+    QueueAdmit {
+        source: io::Error,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -150,6 +158,9 @@ impl fmt::Display for AcquireRefusal {
             Self::Busy { holder: None } => {
                 f.write_str("the brokkr lock is held and this command does not wait for it")
             }
+            Self::QueueBusy => f.write_str(
+                "commands are queued for the brokkr lock and this command does not wait for it",
+            ),
             Self::InsideCompilation { marker } => write!(
                 f,
                 "refusing to take the brokkr lock from inside a compilation brokkr admitted \
@@ -221,6 +232,11 @@ impl fmt::Display for AcquireRefusal {
                 "cannot claim this command's place in the brokkr lock queue ({source}); it does not \
                  proceed without knowing whether `brokkr kill` cancelled it"
             ),
+            Self::QueueAdmit { source } => write!(
+                f,
+                "cannot read or update the brokkr lock queue's admission order ({source}); it does \
+                 not take the lock without knowing whether a waiter is ahead of it"
+            ),
         }
     }
 }
@@ -236,9 +252,11 @@ impl std::error::Error for AcquireRefusal {
             | Self::SocketBind { source, .. }
             | Self::ServiceThread { source }
             | Self::QueueJoin { source }
-            | Self::QueueClaim { source } => Some(source),
+            | Self::QueueClaim { source }
+            | Self::QueueAdmit { source } => Some(source),
             Self::NestedDescendant { .. }
             | Self::Busy { .. }
+            | Self::QueueBusy
             | Self::InsideCompilation { .. }
             | Self::DiskGate(_)
             | Self::DrainTimeout { .. }

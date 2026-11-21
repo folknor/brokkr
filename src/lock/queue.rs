@@ -33,6 +33,33 @@
 //! No signal is sent, so a cancel works across PID namespaces, and a waiter
 //! that is stopped (SIGSTOP) when its cancel commits can never run. Only "no
 //! such file" is a verdict; any other error is reported as one.
+//!
+//! # Admission order
+//!
+//! The record above is the waiter's stable identity: cancellation and claim
+//! act on it alone and it never moves. Order lives in a separate index: one
+//! empty `<seq>-<token>.ticket` file per waiter that holds a place, created,
+//! deleted and (for any decision) scanned only under the `admit.lock` flock,
+//! which is never unlinked. A waiter's seq is one past the largest ticket
+//! present when it was created, so arrival is ticket creation.
+//!
+//! A waiter tries the exclusive flock on `brokkr.lock` only under
+//! `admit.lock`, and only when every older ticket belongs to a waiter that is
+//! gone (record absent, cancelled, or unflocked) or stale: its record's mtime,
+//! which a live waiter refreshes every poll round ([`Ticket::heartbeat`]), is
+//! older than [`HEARTBEAT_GRACE`] as observed under the mutex. Stale tickets
+//! are forfeited (deleted) only when that try succeeds, together with the
+//! winner's own, so a failed try costs nobody a place. A waiter that finds its
+//! ticket gone has forfeited and rejoins at the tail; its record, and so its
+//! cancellability, never changed. The invariant: at a successful exclusive
+//! try, every older ticket was already gone or was observed stale under the
+//! mutex.
+//!
+//! A waiter reads the index without the mutex first and takes it (never
+//! blocking on it) only when that read says it may be next, so younger
+//! waiters do not crowd the head out of the mutex. A process stopped while it
+//! holds `admit.lock` stops admission until it resumes or dies; cancellation
+//! does not need the mutex and keeps working.
 
 use std::fs::File;
 use std::io::{self, Write as _};
@@ -51,6 +78,15 @@ const CANCEL_EXT: &str = "cancel";
 /// A record between creation and its flock; renamed to [`QUEUED_EXT`] once
 /// complete and locked.
 const PENDING_EXT: &str = "pending";
+
+/// A waiter's place in the admission order (see the module doc).
+const TICKET_EXT: &str = "ticket";
+/// The admission mutex, under the queue directory. Never unlinked.
+const ADMIT_LOCK: &str = "admit.lock";
+
+/// How long a waiter's heartbeat may go unrefreshed before a waiter behind it
+/// may take the lock past it. Waiters refresh it every poll round.
+pub(super) const HEARTBEAT_GRACE: Duration = Duration::from_secs(1);
 
 /// How old an unlocked `.pending` file must be before a sweep deletes it.
 const PENDING_GRACE: Duration = Duration::from_secs(60);
@@ -166,7 +202,7 @@ pub(super) struct Ticket {
     dir: PathBuf,
     token: RunToken,
     /// Holds the exclusive flock that proves this waiter is alive.
-    _file: File,
+    file: File,
 }
 
 /// Why one join attempt failed.
@@ -224,7 +260,7 @@ impl Ticket {
             Ok(()) => Ok(Self {
                 dir: dir.to_owned(),
                 token,
-                _file: file,
+                file,
             }),
             // A sweep removed the pending name before this attempt locked it.
             Err(e) if e.kind() == io::ErrorKind::NotFound => Err(JoinFailure::Raced),
@@ -254,6 +290,206 @@ impl Ticket {
             Err(e) => Err(e),
         }
     }
+
+    /// Refresh this waiter's heartbeat: its record's mtime, through the held
+    /// descriptor, so it works whichever name the record has.
+    pub(super) fn heartbeat(&self) -> io::Result<()> {
+        // SAFETY: a null times pointer sets both stamps to now; the fd is ours.
+        if unsafe { libc::futimens(self.file.as_raw_fd(), std::ptr::null()) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    /// One admission round: `try_lock` is the non-blocking exclusive try on
+    /// `brokkr.lock`, run only when this waiter is next (see the module doc).
+    /// `Ok(true)` means it succeeded; `Ok(false)` that this waiter is not next,
+    /// the mutex was busy, or the lock is held. Joins the index on the first
+    /// round that gets the mutex, and rejoins at the tail after a forfeit.
+    pub(super) fn admit(&self, try_lock: &mut dyn FnMut() -> io::Result<bool>) -> io::Result<bool> {
+        // The lockless look: only a waiter that may be next takes the mutex.
+        let lookahead = index(&self.dir)?;
+        if let Some(mine) = lookahead.iter().position(|(_, token)| token == &self.token) {
+            for (_, token) in &lookahead[..mine] {
+                if place(&self.dir, token)? == Place::Fresh {
+                    return Ok(false);
+                }
+            }
+        }
+        let Some(_admit) = Admit::try_take(&self.dir)? else {
+            return Ok(false);
+        };
+        let mut index = settled_index(&self.dir)?;
+        let mine = match index.iter().position(|(_, token)| token == &self.token) {
+            Some(mine) => mine,
+            None => {
+                // First round under the mutex, or a forfeit: take the tail.
+                // Arrival is this creation, so the turn is evaluated at once.
+                let seq = index.last().map_or(0, |(seq, _)| seq + 1);
+                create_ticket(&self.dir, seq, &self.token)?;
+                index.push((seq, self.token.clone()));
+                index.len() - 1
+            }
+        };
+        let ahead = &index[..mine];
+        for (_, token) in ahead {
+            if place(&self.dir, token)? == Place::Fresh {
+                return Ok(false);
+            }
+        }
+        if !try_lock()? {
+            return Ok(false);
+        }
+        for (seq, token) in &index[..=mine] {
+            remove_ticket(&self.dir, *seq, token)?;
+        }
+        Ok(true)
+    }
+}
+
+/// A non-blocking acquisition's admission: `try_lock` runs only when no live
+/// waiter holds a fresh place. `Ok(Some(true))` it succeeded and every stale
+/// place was forfeited, `Ok(Some(false))` the lock is held, `Ok(None)` a
+/// waiter is ahead or the mutex is busy. The directory is created if missing:
+/// an empty queue is decided under the mutex like any other, since a waiter
+/// may be creating it at the same moment.
+pub(super) fn admit_nonblocking(
+    dir: &Path,
+    try_lock: &mut dyn FnMut() -> io::Result<bool>,
+) -> io::Result<Option<bool>> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    let Some(_admit) = Admit::try_take(dir)? else {
+        return Ok(None);
+    };
+    let index = settled_index(dir)?;
+    for (_, token) in &index {
+        if place(dir, token)? == Place::Fresh {
+            return Ok(None);
+        }
+    }
+    if !try_lock()? {
+        return Ok(Some(false));
+    }
+    for (seq, token) in &index {
+        remove_ticket(dir, *seq, token)?;
+    }
+    Ok(Some(true))
+}
+
+/// The held admission mutex; dropping it releases the flock.
+struct Admit {
+    _file: File,
+}
+
+impl Admit {
+    fn try_take(dir: &Path) -> io::Result<Option<Self>> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(dir.join(ADMIT_LOCK))?;
+        Ok(try_flock(&file, libc::LOCK_EX)?.then_some(Self { _file: file }))
+    }
+}
+
+fn ticket_path(dir: &Path, seq: u64, token: &RunToken) -> PathBuf {
+    dir.join(format!("{seq:020}-{}.{TICKET_EXT}", token.as_str()))
+}
+
+fn create_ticket(dir: &Path, seq: u64, token: &RunToken) -> io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(ticket_path(dir, seq, token))
+        .map(drop)
+}
+
+fn remove_ticket(dir: &Path, seq: u64, token: &RunToken) -> io::Result<()> {
+    match std::fs::remove_file(ticket_path(dir, seq, token)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Every ticket under `dir`, in seq order.
+fn index(dir: &Path) -> io::Result<Vec<(u64, RunToken)>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let name = entry?.file_name();
+        let Some(stem) = name
+            .to_str()
+            .and_then(|n| n.strip_suffix(TICKET_EXT))
+            .and_then(|n| n.strip_suffix('.'))
+        else {
+            continue;
+        };
+        let Some((seq, token)) = stem.split_once('-') else {
+            continue;
+        };
+        if let (Ok(seq), Some(token)) = (seq.parse::<u64>(), RunToken::parse(token)) {
+            out.push((seq, token));
+        }
+    }
+    out.sort_by(|a, b| (a.0, a.1.as_str()).cmp(&(b.0, b.1.as_str())));
+    Ok(out)
+}
+
+/// The index with every gone waiter's ticket removed. Called under the mutex.
+fn settled_index(dir: &Path) -> io::Result<Vec<(u64, RunToken)>> {
+    let mut out = Vec::new();
+    for (seq, token) in index(dir)? {
+        if place(dir, &token)? == Place::Gone {
+            remove_ticket(dir, seq, &token)?;
+        } else {
+            out.push((seq, token));
+        }
+    }
+    Ok(out)
+}
+
+/// Where a ticket's waiter stands, read from its stable record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// Live, heartbeat within [`HEARTBEAT_GRACE`].
+    Fresh,
+    /// Live, heartbeat older than the grace: may be passed.
+    Stale,
+    /// Exited, cancelled or claimed: holds no place.
+    Gone,
+}
+
+fn place(dir: &Path, token: &RunToken) -> io::Result<Place> {
+    let file = match File::open(entry_path(dir, token, QUEUED_EXT)) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Place::Gone),
+        Err(e) => return Err(e),
+    };
+    if try_flock(&file, libc::LOCK_SH)? {
+        return Ok(Place::Gone);
+    }
+    let age = file
+        .metadata()?
+        .modified()?
+        .elapsed()
+        .unwrap_or(Duration::ZERO);
+    Ok(if age >= HEARTBEAT_GRACE {
+        Place::Stale
+    } else {
+        Place::Fresh
+    })
 }
 
 impl Drop for Ticket {
@@ -330,7 +566,7 @@ pub struct Entry {
     pub record: Result<WaiterRecord, String>,
 }
 
-/// Every live entry under `dir`, oldest first (unreadable ones last). Reads
+/// Every live entry under `dir`, in admission order (unreadable ones last). Reads
 /// only: nothing is swept. A missing directory is an empty queue; one that
 /// cannot be read is an error.
 pub fn list(dir: &Path) -> io::Result<Vec<Entry>> {
@@ -387,8 +623,18 @@ pub fn list(dir: &Path) -> io::Result<Vec<Entry>> {
             record,
         });
     }
+    // Admission order: a waiter with a place by its seq, then those without
+    // one (joining, forfeited, or just admitted) by when they joined. Best
+    // effort: `brokkr kill` cancels from this list, and needs only the
+    // records, so an unreadable index costs the order and nothing else.
+    let seqs: std::collections::HashMap<String, u64> = index(dir)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(seq, token)| (token.as_str().to_owned(), seq))
+        .collect();
     out.sort_by_key(|e| {
         (
+            seqs.get(e.token.as_str()).copied().unwrap_or(u64::MAX),
             e.record.as_ref().map_or(u64::MAX, |r| r.joined),
             e.token.as_str().to_owned(),
         )
@@ -555,6 +801,126 @@ mod tests {
             "a claimed waiter is no longer queued"
         );
         assert!(matches!(cancel(&dir, &token).unwrap(), Cancel::Left));
+    }
+
+    /// A `try_lock` that records whether it was called and answers `answer`.
+    fn try_lock(calls: &std::cell::Cell<usize>, answer: bool) -> impl FnMut() -> io::Result<bool> {
+        move || {
+            calls.set(calls.get() + 1);
+            Ok(answer)
+        }
+    }
+
+    fn tokens(dir: &Path) -> Vec<RunToken> {
+        index(dir).unwrap().into_iter().map(|(_, t)| t).collect()
+    }
+
+    /// Set a ticket's heartbeat back past the grace, as a stopped waiter's.
+    fn age(ticket: &Ticket) {
+        let old = std::time::SystemTime::now() - HEARTBEAT_GRACE * 5;
+        ticket.file.set_modified(old).unwrap();
+    }
+
+    /// The younger of two placed waiters never tries the lock while the older
+    /// one is live, however the lock stands; the older one then takes it.
+    #[test]
+    fn waiters_are_admitted_in_arrival_order() {
+        let dir = scratch("fifo");
+        let calls = std::cell::Cell::new(0);
+        let older = Ticket::join(&dir, &record("p")).unwrap();
+        assert!(!older.admit(&mut try_lock(&calls, false)).unwrap());
+        let younger = Ticket::join(&dir, &record("p")).unwrap();
+        assert!(!younger.admit(&mut try_lock(&calls, false)).unwrap());
+        assert_eq!(calls.get(), 1, "the younger waiter was not next");
+        assert_eq!(tokens(&dir), [older.token.clone(), younger.token.clone()]);
+        // The lock is free now; still only the older waiter may try.
+        assert!(!younger.admit(&mut try_lock(&calls, true)).unwrap());
+        assert_eq!(calls.get(), 1);
+        assert!(older.admit(&mut try_lock(&calls, true)).unwrap());
+        assert_eq!(tokens(&dir), std::slice::from_ref(&younger.token));
+        assert!(younger.admit(&mut try_lock(&calls, true)).unwrap());
+    }
+
+    /// A stale head keeps its place through a failed try, loses it only to a
+    /// successful one, and rejoins behind every waiter placed meanwhile.
+    #[test]
+    fn a_stale_head_is_passed_only_by_a_taken_lock_and_rejoins_at_the_tail() {
+        let dir = scratch("stale-head");
+        let calls = std::cell::Cell::new(0);
+        let head = Ticket::join(&dir, &record("p")).unwrap();
+        assert!(!head.admit(&mut try_lock(&calls, false)).unwrap());
+        let passer = Ticket::join(&dir, &record("p")).unwrap();
+        assert!(!passer.admit(&mut try_lock(&calls, false)).unwrap());
+        age(&head);
+        // The lock is held: the passer tries and fails, and nobody forfeits.
+        assert!(!passer.admit(&mut try_lock(&calls, false)).unwrap());
+        assert_eq!(tokens(&dir), [head.token.clone(), passer.token.clone()]);
+        assert!(passer.admit(&mut try_lock(&calls, true)).unwrap());
+        assert!(tokens(&dir).is_empty(), "the stale place was forfeited");
+        let third = Ticket::join(&dir, &record("p")).unwrap();
+        assert!(!third.admit(&mut try_lock(&calls, false)).unwrap());
+        // The head resumes: its place is gone, so it takes the tail.
+        head.heartbeat().unwrap();
+        let before = calls.get();
+        assert!(!head.admit(&mut try_lock(&calls, true)).unwrap());
+        assert_eq!(calls.get(), before, "the rejoined head is not next");
+        assert_eq!(tokens(&dir), [third.token.clone(), head.token.clone()]);
+    }
+
+    /// A non-blocking try refuses behind a live place even with the lock
+    /// free, and on an absent queue decides under the mutex and tries.
+    #[test]
+    fn a_nonblocking_try_does_not_pass_a_waiter() {
+        let dir = scratch("nonblocking");
+        let calls = std::cell::Cell::new(0);
+        let absent = dir.join("absent");
+        assert_eq!(
+            admit_nonblocking(&absent, &mut try_lock(&calls, true)).unwrap(),
+            Some(true)
+        );
+        assert!(absent.join(ADMIT_LOCK).exists());
+        let waiter = Ticket::join(&dir, &record("p")).unwrap();
+        assert!(!waiter.admit(&mut try_lock(&calls, false)).unwrap());
+        let before = calls.get();
+        assert_eq!(
+            admit_nonblocking(&dir, &mut try_lock(&calls, true)).unwrap(),
+            None
+        );
+        assert_eq!(calls.get(), before, "it never tried the lock");
+        // A stale waiter is passed, and only by a taken lock.
+        age(&waiter);
+        assert_eq!(
+            admit_nonblocking(&dir, &mut try_lock(&calls, false)).unwrap(),
+            Some(false)
+        );
+        assert_eq!(tokens(&dir), std::slice::from_ref(&waiter.token));
+        assert_eq!(
+            admit_nonblocking(&dir, &mut try_lock(&calls, true)).unwrap(),
+            Some(true)
+        );
+        assert!(tokens(&dir).is_empty());
+    }
+
+    /// A dead or cancelled waiter's place is swept, not waited behind.
+    #[test]
+    fn a_gone_waiters_place_does_not_block() {
+        let dir = scratch("gone");
+        let calls = std::cell::Cell::new(0);
+        let dead = Ticket::join(&dir, &record("p")).unwrap();
+        assert!(!dead.admit(&mut try_lock(&calls, false)).unwrap());
+        let cancelled = Ticket::join(&dir, &record("p")).unwrap();
+        assert!(!cancelled.admit(&mut try_lock(&calls, false)).unwrap());
+        let me = Ticket::join(&dir, &record("p")).unwrap();
+        drop(dead);
+        assert!(matches!(
+            cancel(&dir, &cancelled.token).unwrap(),
+            Cancel::Committed(_)
+        ));
+        assert!(me.admit(&mut try_lock(&calls, true)).unwrap());
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        crate::test_scratch::scratch("lock_queue", name)
     }
 
     /// A dead waiter's record (its flock gone) is not listed and is swept by

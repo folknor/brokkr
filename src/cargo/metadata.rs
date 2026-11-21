@@ -187,6 +187,10 @@ fn clone_lock_refusal(refusal: &crate::error::AcquireRefusal) -> crate::error::A
         AcquireRefusal::Busy { holder } => AcquireRefusal::Busy {
             holder: holder.clone(),
         },
+        AcquireRefusal::QueueBusy => AcquireRefusal::QueueBusy,
+        AcquireRefusal::QueueAdmit { source } => AcquireRefusal::QueueAdmit {
+            source: clone_io(source),
+        },
         AcquireRefusal::InsideCompilation { marker } => {
             AcquireRefusal::InsideCompilation { marker }
         }

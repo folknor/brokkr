@@ -289,8 +289,17 @@ another PID namespace cannot be sampled from here, and `brokkr lock` says so.
 `BROKKR_EXEC` is reserved like the hold variables below: a sweep env value for
 it is ignored. A nextest lane's processes share one launch token for the lane.
 
+Waiters take the lock in the order they joined the queue: a command passes an
+older waiter only when that waiter has stopped polling for a second (stopped,
+or starved of CPU), and the one passed loses its place and rejoins at the back
+when it resumes. A command that does not wait for the lock refuses while a
+waiter is ahead of it, even in the moment after a release. Admission is
+serialized by a small mutex beside the queue; a command stopped while it holds
+that mutex stops admission until it resumes or dies, though `brokkr kill`
+still cancels waiters.
+
 After the holder's lines, or `no active lock`, `brokkr lock` prints one
-`queued:` line per brokkr command waiting for the lock, oldest first: its
+`queued:` line per brokkr command waiting for the lock, in admission order: its
 project and invocation, how long it has waited, its state root, and its PID
 where that means the same thing to the caller. A command with no `brokkr.toml`
 shows as `(no brokkr.toml)` in place of a project, the holder too. A waiter
