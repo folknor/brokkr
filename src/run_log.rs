@@ -68,8 +68,12 @@ impl RunLog {
                 true
             }
         };
-        // A reservation made inside an existing hold needs no fresh acquisition.
-        if crate::lockfile::current_hold().is_some() {
+        // A reservation made inside an existing hold needs no fresh
+        // acquisition. A stopped hold activates it too: the log records the
+        // command, its refusal and its unwind included, and starts no work.
+        // The guard keeps the hold live, and the flock held, across the
+        // activation's pruning.
+        if let Some(_hold) = crate::lockfile::live_hold() {
             activate_run_log();
         }
         Self { owner }

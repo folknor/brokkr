@@ -161,6 +161,9 @@ impl Service {
     /// Bind and start serving. The socket is only reachable once this returns,
     /// so it is never published before it can answer.
     pub fn start(id: &AcqId, identity: Identity) -> Result<Self, DevError> {
+        // Map the launch gate before any stop can be accepted, so committing
+        // one never waits on a launcher mapping it first.
+        crate::shutdown::launch_gate();
         let path = socket_path(&socket_dir()?, id);
         // `bind` refuses an existing path; a collision on a fresh 128-bit id is
         // a bug, not something to unlink over.

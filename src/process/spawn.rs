@@ -12,6 +12,13 @@
 //! the policy after caller configuration. Process-group isolation
 //! (`ChildIsolation::ProcessGroup`) can be chosen only while a `SigtermGuard`
 //! is borrowed.
+//!
+//! Every launch through [`spawn`], [`spawn_exact`] and [`spawn_detached`] is
+//! admitted against a committed stop (`brokkr kill`), in the parent before
+//! the fork and in the child just before its exec ([`LaunchGuard`]). Nothing
+//! is exempt: every supervisor already ends its child at its first poll of a
+//! committed stop, so a launch after one could never do its work, and the
+//! unwind restores state through filesystem operations, not subprocesses.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -193,19 +200,149 @@ impl ChildPolicy {
 /// attributed to the activity and acquisition it actually ran under. Without
 /// a hold, both are left as the command already carries them (an inherited
 /// cohort stays: the child still belongs to it).
+///
+/// Every launch through here is admitted against a committed stop
+/// ([`LaunchGuard`]): refused before the fork, and again by the child as the
+/// last step before its exec, as [`DevError::Interrupted`].
 pub(crate) fn spawn(
     mut command: Command,
     on_spawn: Option<&dyn Fn(u32)>,
 ) -> Result<std::process::Child, DevError> {
     let program = command.get_program().to_string_lossy().into_owned();
     stamp(&mut command);
+    let gate = LaunchGuard::arm(&mut command, &program)?;
     let child = command
         .spawn()
-        .map_err(|error| DevError::Spawn { program, error })?;
+        .map_err(|error| gate.classify(DevError::Spawn { program, error }))?;
     if let Some(on_spawn) = on_spawn {
         on_spawn(child.id());
     }
     Ok(child)
+}
+
+/// The byte a child writes to its gate pipe when the launch gate refuses it.
+const GATE_REFUSED: u8 = b's';
+
+/// The admission of one launch against a committed stop (`brokkr kill`).
+///
+/// A stop commits by closing a byte of memory every child shares
+/// (`crate::shutdown::launch_gate`) and only then its in-process state. The
+/// parent refuses a launch whose stop is already committed before it forks;
+/// the child loads the shared byte as its last step before the exec and, if
+/// closed, writes [`GATE_REFUSED`] to a close-on-exec pipe and fails the
+/// spawn, so its program never starts. A child whose load precedes the commit
+/// was admitted before the stop and is an ordinary tracked child: every
+/// supervisor ends its child at its first poll of the stop. The stop service
+/// never waits on a launch: committing is one store, so a wedged fork or exec
+/// cannot hang it.
+///
+/// Only the marker tells a refusal from any other spawn failure, so a real
+/// setup or exec error that races a stop keeps its meaning.
+struct LaunchGuard {
+    reader: std::os::fd::OwnedFd,
+}
+
+impl LaunchGuard {
+    /// Refuse a launch under a committed stop, else register the child's gate
+    /// as the command's last `pre_exec` step.
+    fn arm(command: &mut Command, program: &str) -> Result<Self, DevError> {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+        let (gate, reader, writer) = gate_parts(program)?;
+        let signal = writer.as_raw_fd();
+        // SAFETY: the closure runs between fork and exec and calls only an
+        // atomic load and write(2) on memory and a descriptor prepared before
+        // the fork. The writer is close-on-exec and dropped by the parent
+        // with the command, after the spawn.
+        unsafe {
+            command.pre_exec(move || {
+                let _keep = &writer;
+                if crate::shutdown::gate_open(gate) {
+                    return Ok(());
+                }
+                libc::write(signal, [GATE_REFUSED].as_ptr().cast(), 1);
+                Err(std::io::Error::from_raw_os_error(libc::ECANCELED))
+            });
+        }
+        Ok(Self { reader })
+    }
+
+    /// A failed spawn's error: [`DevError::Interrupted`] when the child's
+    /// gate refused it, else `error` as it is.
+    fn classify(&self, error: DevError) -> DevError {
+        if read_marker(&self.reader) == Some(GATE_REFUSED) {
+            DevError::Interrupted
+        } else {
+            error
+        }
+    }
+}
+
+/// The gate a launch checks and a non-blocking close-on-exec pipe for the
+/// child's marker, after refusing a launch whose stop is already committed.
+/// Non-blocking: a child another thread forks meanwhile may inherit the write
+/// end, so a closed write end in this process is no promise of EOF.
+fn gate_parts(
+    program: &str,
+) -> Result<
+    (
+        &'static std::sync::atomic::AtomicU8,
+        std::os::fd::OwnedFd,
+        std::os::fd::OwnedFd,
+    ),
+    DevError,
+> {
+    use std::os::fd::{FromRawFd as _, OwnedFd};
+    let gate = crate::shutdown::launch_gate().ok_or_else(|| DevError::Spawn {
+        program: program.to_owned(),
+        error: std::io::Error::other("cannot map the launch gate"),
+    })?;
+    if parent_admission() && (!crate::shutdown::gate_open(gate) || !crate::shutdown::admits_new_work())
+    {
+        return Err(DevError::Interrupted);
+    }
+    let mut fds = [0; 2];
+    // SAFETY: a valid two-element buffer for the call's duration.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
+        return Err(DevError::Spawn {
+            program: program.to_owned(),
+            error: std::io::Error::last_os_error(),
+        });
+    }
+    // SAFETY: pipe2 just returned these two descriptors, owned by nobody else.
+    let (reader, writer) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    Ok((gate, reader, writer))
+}
+
+/// Set by the launch-gate test to skip the parent's check, standing for a
+/// stop committed after the parent admitted the launch and before its child
+/// reaches the gate.
+#[cfg(test)]
+static SKIP_PARENT_ADMISSION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the parent checks admission before the fork: always, except in
+/// the test that reaches the child's gate past it.
+fn parent_admission() -> bool {
+    #[cfg(test)]
+    {
+        !SKIP_PARENT_ADMISSION.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
+/// The one byte a failed child left in its marker pipe, if any. Once spawn
+/// has returned, the child's marker is in the pipe or never will be, so the
+/// non-blocking read is final.
+fn read_marker(reader: &std::os::fd::OwnedFd) -> Option<u8> {
+    use std::os::fd::AsRawFd as _;
+    let mut byte = [0u8; 1];
+    // SAFETY: a valid one-byte buffer.
+    let read = unsafe { libc::read(reader.as_raw_fd(), byte.as_mut_ptr().cast(), 1) };
+    (read == 1).then_some(byte[0])
 }
 
 /// The variables that tie a process to a hold, a run or a sidecar. A process
@@ -280,9 +417,12 @@ pub(crate) fn spawn_detached(
             Ok(())
         });
     }
+    // Detachment decides who owns the process, not whether it may start: a
+    // serve launched after a committed stop is refused like any launch.
+    let gate = LaunchGuard::arm(&mut command, &program)?;
     let child = command
         .spawn()
-        .map_err(|error| DevError::Spawn { program, error })?;
+        .map_err(|error| gate.classify(DevError::Spawn { program, error }))?;
     drop(cgroup);
     Ok(child)
 }
@@ -325,9 +465,11 @@ pub(crate) enum ExactSpawnError {
 /// environment the command carries, so libc's lookup and its `/bin/sh`
 /// fallback for a file in no executable format never apply. Which stage
 /// failed is told apart by a close-on-exec pipe the child writes one byte to
-/// as it reaches the exec: a byte means the exec itself refused.
+/// as it reaches the exec: an `x` means the exec itself refused. The launch
+/// gate ([`LaunchGuard`]) runs just before that write and marks its refusal
+/// with a byte of its own, which is [`DevError::Interrupted`].
 pub(crate) fn spawn_exact(command: ExactCommand) -> Result<std::process::Child, ExactSpawnError> {
-    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::fd::AsRawFd as _;
     use std::os::unix::process::CommandExt as _;
 
     let mut command = command.inner;
@@ -340,23 +482,21 @@ pub(crate) fn spawn_exact(command: ExactCommand) -> Result<std::process::Child, 
     };
     stamp(&mut command);
     let exact = Exact::of(&command).map_err(setup)?;
-    let mut fds = [0; 2];
-    // Non-blocking: a child another thread forks meanwhile may inherit the
-    // write end, so a closed write end in this process is no promise of EOF.
-    // SAFETY: a valid two-element buffer for the call's duration.
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
-        return Err(setup(std::io::Error::last_os_error()));
-    }
-    // SAFETY: pipe2 just returned these two descriptors, owned by nobody else.
-    let (reader, writer) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    // The launch gate ([`LaunchGuard`]) shares this pipe: a refusal writes
+    // its own byte where the exec stage writes `x`.
+    let (gate, reader, writer) = gate_parts(&program).map_err(ExactSpawnError::Setup)?;
     let signal = writer.as_raw_fd();
     // SAFETY: the closure runs between fork and exec and calls only
-    // async-signal-safe functions (write, execve) on memory prepared before
-    // the fork; it is registered last, so every other setup has run. A
-    // marker that cannot be written fails the spawn unmarked, as a setup
-    // failure: brokkr's, never a refusal of the program.
+    // async-signal-safe functions (an atomic load, write, execve) on memory
+    // prepared before the fork; it is registered last, so every other setup
+    // has run. A marker that cannot be written fails the spawn unmarked, as
+    // a setup failure: brokkr's, never a refusal of the program.
     unsafe {
         command.pre_exec(move || {
+            if !crate::shutdown::gate_open(gate) {
+                libc::write(signal, [GATE_REFUSED].as_ptr().cast(), 1);
+                return Err(std::io::Error::from_raw_os_error(libc::ECANCELED));
+            }
             if libc::write(signal, b"x".as_ptr().cast(), 1) != 1 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -368,18 +508,11 @@ pub(crate) fn spawn_exact(command: ExactCommand) -> Result<std::process::Child, 
     drop(writer);
     match spawned {
         Ok(child) => Ok(child),
-        Err(error) => {
-            let mut byte = [0u8; 1];
-            // SAFETY: a valid one-byte buffer. Once spawn has returned, the
-            // failed child's marker is in the pipe or never will be, and the
-            // read does not block.
-            let read = unsafe { libc::read(reader.as_raw_fd(), byte.as_mut_ptr().cast(), 1) };
-            if read == 1 {
-                Err(ExactSpawnError::Exec(error))
-            } else {
-                Err(setup(error))
-            }
-        }
+        Err(error) => match read_marker(&reader) {
+            Some(GATE_REFUSED) => Err(ExactSpawnError::Setup(DevError::Interrupted)),
+            Some(_) => Err(ExactSpawnError::Exec(error)),
+            None => Err(setup(error)),
+        },
     }
 }
 
@@ -543,6 +676,102 @@ mod exact_tests {
         // $PWD is the directory as the kernel resolved it, through any link.
         let canonical = std::fs::canonicalize(&dir).unwrap();
         assert_eq!(text, format!("set|arg|{}", canonical.display()));
+    }
+
+    /// A blocking pipe, read end first, as raw descriptors the test leaks.
+    fn blocking_pipe() -> (i32, i32) {
+        let mut fds = [0; 2];
+        // SAFETY: a valid two-element buffer.
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        (fds[0], fds[1])
+    }
+
+    /// Set in the child process of the launch-gate test: closing the gate is
+    /// sticky and process-wide, so it happens only in a process of its own.
+    const GATE_CHILD: &str = "BROKKR_TEST_LAUNCH_GATE_CHILD";
+
+    /// A launch the parent admitted is refused by its child's gate once the
+    /// gate closes, through every spawn entry, as `Interrupted` and with the
+    /// program never run; with the parent's check back, a committed stop
+    /// refuses before the fork.
+    #[test]
+    fn a_closed_launch_gate_refuses_the_child_before_its_exec() {
+        if std::env::var_os(GATE_CHILD).is_some() {
+            let dir = crate::test_scratch::scratch("spawn_gate", "child");
+            let ran = dir.join("ran");
+            let script = format!("touch {}", ran.display());
+            let mut open = ChildPolicy::plain_command("/bin/sh");
+            open.args(["-c", "true"]);
+            let open = spawn(open, None).unwrap().wait().unwrap();
+            assert!(open.success(), "an open gate admits");
+            // The gate closes after the fork: the child, parked in an earlier
+            // hook, sees the parent's store only through the shared page.
+            let (forked_r, forked_w) = blocking_pipe();
+            let (release_r, release_w) = blocking_pipe();
+            let mut parked = ChildPolicy::plain_command("/bin/sh");
+            parked.args(["-c", &script]);
+            // SAFETY: write and read on descriptors made before the fork.
+            unsafe {
+                use std::os::unix::process::CommandExt as _;
+                parked.pre_exec(move || {
+                    let mut byte = [0u8; 1];
+                    libc::write(forked_w, b"f".as_ptr().cast(), 1);
+                    libc::read(release_r, byte.as_mut_ptr().cast(), 1);
+                    Ok(())
+                });
+            }
+            let closer = std::thread::spawn(move || {
+                let mut byte = [0u8; 1];
+                // SAFETY: a valid one-byte buffer and descriptors this test owns.
+                unsafe {
+                    libc::read(forked_r, byte.as_mut_ptr().cast(), 1);
+                    crate::shutdown::close_launch_gate_only();
+                    libc::write(release_w, b"r".as_ptr().cast(), 1);
+                }
+            });
+            assert!(matches!(spawn(parked, None), Err(DevError::Interrupted)));
+            closer.join().unwrap();
+            assert!(!ran.exists(), "a child forked before the close never runs");
+            // Past the parent's check: only the child's gate can refuse.
+            SKIP_PARENT_ADMISSION.store(true, std::sync::atomic::Ordering::SeqCst);
+            let mut plain = ChildPolicy::plain_command("/bin/sh");
+            plain.args(["-c", &script]);
+            assert!(matches!(spawn(plain, None), Err(DevError::Interrupted)));
+            assert!(matches!(
+                spawn_exact(exact("/bin/sh", &["-c", &script], &dir)),
+                Err(ExactSpawnError::Setup(DevError::Interrupted))
+            ));
+            let mut detached = ChildPolicy::plain_command("/bin/sh");
+            detached.args(["-c", &script]);
+            assert!(matches!(
+                spawn_detached(detached, 2),
+                Err(DevError::Interrupted)
+            ));
+            assert!(!ran.exists(), "a refused child never runs its program");
+            SKIP_PARENT_ADMISSION.store(false, std::sync::atomic::Ordering::SeqCst);
+            assert!(crate::shutdown::admits_new_work(), "only the gate is closed");
+            crate::shutdown::commit_stop();
+            let mut late = ChildPolicy::plain_command("/bin/sh");
+            late.args(["-c", &script]);
+            assert!(matches!(spawn(late, None), Err(DevError::Interrupted)));
+            assert!(!ran.exists());
+            return;
+        }
+        let ran = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "process::spawn::exact_tests::a_closed_launch_gate_refuses_the_child_before_its_exec",
+                "--nocapture",
+            ])
+            .env(GATE_CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            ran.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&ran.stdout),
+            String::from_utf8_lossy(&ran.stderr)
+        );
     }
 
     /// A file exec refuses is the exec's refusal, never run through a shell;

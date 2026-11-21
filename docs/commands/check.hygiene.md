@@ -242,6 +242,18 @@ by one. Each is killed only if it has the hold's launch cohort (`BROKKR_EXEC`)
 and still sits in that group: a group number is reused once its members are
 all gone, so a group signal could reach a stranger.
 
+A child missing from the record kill read, because brokkr started it after
+the read or had not recorded it yet, is found by the walk while it lives
+beneath brokkr. If it leads a group of its own, that group's members that
+left brokkr's tree are swept the same way. A group whose leader already
+exited or left the tree is reachable only through the record.
+
+A cooperative stop admits no new launch. Once the holder accepts it, every
+launch is refused, before its fork or by the child itself as its last step
+before the exec, and the command unwinds as interrupted. A child that passed
+that last step before the stop may still start its program just after it.
+It is an ordinary child, which the unwind stops.
+
 Against any other SIGKILL (the OOM killer), the runners' direct child has a
 parent-death SIGKILL. That reaches the test binary on the parallel lane but
 only cargo on the others. Whatever survives below cargo is killed by the

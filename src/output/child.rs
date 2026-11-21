@@ -1424,6 +1424,11 @@ fn run_prepared_plain(
     );
     let child = crate::process::spawn::spawn(command, None).map_err(|error| match error {
         DevError::Spawn { error, .. } => error,
+        // The launch gate refused it under a committed stop: the same kind
+        // the supervisor reports for a child it ended on the stop.
+        DevError::Interrupted => {
+            std::io::Error::new(std::io::ErrorKind::Interrupted, "child interrupted")
+        }
         error => std::io::Error::other(error.to_string()),
     })?;
     let run = supervise_child(

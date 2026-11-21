@@ -413,7 +413,7 @@ pub fn cargo_build(config: &BuildConfig, project_root: &Path) -> Result<BuiltArt
 /// cargo's process group.
 ///
 /// **Every build runs under the lock, and publishes its cargo PID into it.**
-/// The hold is looked up here ([`crate::lockfile::current_hold`]) and a build
+/// The hold is looked up here ([`crate::lockfile::require_hold`]) and a build
 /// with none is refused: an unlocked build competes with a measurement, and on
 /// a guarded host it fails anyway at cargo's first rustc probe, in words that
 /// never mention the lock. Checking at this one choke point covers call paths

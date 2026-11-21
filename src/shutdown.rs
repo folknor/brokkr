@@ -34,6 +34,10 @@
 //!    attempt's own scratch output as it unwinds, still under the command's
 //!    hold, and `main` exits 130.
 //!
+//! A committed stop also closes the launch gate ([`launch_gate`]), memory
+//! shared with every forked child, which `crate::process::spawn` checks in the
+//! parent before the fork and in the child just before its exec.
+//!
 //! `brokkr kill --hard` bypasses this entirely: it SIGSTOPs the brokkr PID,
 //! SIGKILLs the recorded child PID and every identity-checked descendant of
 //! brokkr ([`kill_descendants`], so a test binary under cargo is not
@@ -268,7 +272,74 @@ fn terminal_foreground_pgrp() -> Option<libc::pid_t> {
 /// committed stop survives guard transitions because the requester was told
 /// the command is stopping.
 pub fn commit_stop() {
+    // The launch gate closes first, so a closed gate is a superset of a
+    // committed state at every instant: a launch that passed the parent's
+    // admission check can still be refused by its child's gate, never the
+    // reverse.
+    if let Some(gate) = launch_gate() {
+        gate.store(GATE_CLOSED, Ordering::SeqCst);
+    }
     transition(ShutdownState::commit);
+}
+
+/// The launch gate's value once a stop is committed. A fresh mapping is
+/// zeroed, which is open.
+const GATE_CLOSED: u8 = 1;
+
+/// One byte of memory shared with every child brokkr forks
+/// (`MAP_SHARED | MAP_ANONYMOUS`), so a child between its fork and its exec
+/// sees a stop committed after the fork. A child's copy of [`STATE`] is a
+/// snapshot taken at the fork; this byte is not.
+struct LaunchGate(&'static std::sync::atomic::AtomicU8);
+
+static LAUNCH_GATE: std::sync::OnceLock<Option<LaunchGate>> = std::sync::OnceLock::new();
+
+/// The launch gate, mapped on first use. Both [`commit_stop`] and every gated
+/// launch reach the page through this one initialisation, so no commit can
+/// see an absent page that a launch then maps open. `None` when the mapping
+/// failed: a commit still stops the process, and a gated launch refuses.
+pub(crate) fn launch_gate() -> Option<&'static std::sync::atomic::AtomicU8> {
+    LAUNCH_GATE
+        .get_or_init(|| {
+            // SAFETY: an anonymous shared mapping of one page, no file and no
+            // fixed address; checked against MAP_FAILED below.
+            let page = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    4096,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            if page == libc::MAP_FAILED {
+                return None;
+            }
+            // SAFETY: a page-aligned, zeroed, never-unmapped mapping, valid
+            // for the process's life and accessed only atomically.
+            Some(LaunchGate(unsafe {
+                &*page.cast::<std::sync::atomic::AtomicU8>()
+            }))
+        })
+        .as_ref()
+        .map(|gate| gate.0)
+}
+
+/// Close the launch gate alone, leaving the process state as it is: the
+/// instant inside [`commit_stop`] after the gate closes, where only a
+/// child's own gate can refuse a launch the parent admitted.
+#[cfg(test)]
+pub(crate) fn close_launch_gate_only() {
+    if let Some(gate) = launch_gate() {
+        gate.store(GATE_CLOSED, Ordering::SeqCst);
+    }
+}
+
+/// Whether `gate` admits a launch. Async-signal-safe: a single atomic load,
+/// the check a child makes as the last step before its exec.
+pub(crate) fn gate_open(gate: &std::sync::atomic::AtomicU8) -> bool {
+    gate.load(Ordering::SeqCst) != GATE_CLOSED
 }
 
 /// Whether work may still be admitted under the current process state.

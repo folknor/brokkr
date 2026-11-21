@@ -531,7 +531,7 @@ fn lock_home() -> Option<PathBuf> {
 
 /// A hold on this test process's scratch lock ([`lock_home`]) with no host
 /// effects: no control service, no drain, no capability of its own, no reap,
-/// no tree policy and no disk gate. It is what [`current_hold`] finds, so code
+/// no tree policy and no disk gate. It is what [`hold_for_new_work`] finds, so code
 /// under test may build; a cargo it starts keeps the capability the test
 /// process inherited, which is what admits its compilers.
 #[cfg(test)]
@@ -630,17 +630,17 @@ pub(crate) fn acquire_for_command(
     )
 }
 
-/// This process's live hold on the global lock, as one more guard on it, or
-/// `None` when the process holds nothing or a committed stop admits no new
-/// work under it ([`hold_for_new_work`] tells the two apart).
-///
-/// The proof `build::cargo_build` demands before it runs cargo. Asking the
-/// registry rather than taking a `&LockGuard` parameter keeps the check at the
-/// one choke point every build passes through, including call paths several
-/// layers below the command that took the lock. The returned guard shares the
-/// hold (like a nested [`acquire`]), so it cannot outlive or split it.
-pub fn current_hold() -> Option<LockGuard> {
-    hold_for_new_work().ok()
+/// This process's live hold, as one more guard on it, whatever the stop
+/// state: for what records a stopping command rather than starting work for
+/// it (its run log). Work asks [`hold_for_new_work`].
+pub(crate) fn live_hold() -> Option<LockGuard> {
+    let path = lock_path().ok()?;
+    let mut held = held_registry();
+    held.retain(|w| w.strong_count() > 0);
+    held.iter()
+        .filter_map(Weak::upgrade)
+        .find(|inner| inner.path == path)
+        .map(|inner| LockGuard { inner })
 }
 
 /// Why [`hold_for_new_work`] offers no hold.
@@ -655,21 +655,22 @@ pub enum NoHold {
     Absent,
 }
 
-/// [`current_hold`] with the reason when there is none, so a caller can tell
-/// a stopped command from a missing lock.
+/// This process's live hold on the global lock, as one more guard on it, for
+/// new work: refused when the process holds nothing or a committed stop
+/// admits no new work under it, with the reason, so a caller can tell a
+/// stopped command from a missing lock.
+///
+/// The proof `build::cargo_build` demands before it runs cargo. Asking the
+/// registry rather than taking a `&LockGuard` parameter keeps the check at the
+/// one choke point every build passes through, including call paths several
+/// layers below the command that took the lock. The returned guard shares the
+/// hold (like a nested [`acquire`]), so it cannot outlive or split it.
 pub fn hold_for_new_work() -> Result<LockGuard, NoHold> {
     // A committed stop admits no further work under the hold it stopped.
     if !crate::shutdown::admits_new_work() {
         return Err(NoHold::Stopped);
     }
-    let path = lock_path().map_err(|_| NoHold::Absent)?;
-    let mut held = held_registry();
-    held.retain(|w| w.strong_count() > 0);
-    held.iter()
-        .filter_map(Weak::upgrade)
-        .find(|inner| inner.path == path)
-        .map(|inner| LockGuard { inner })
-        .ok_or(NoHold::Absent)
+    live_hold().ok_or(NoHold::Absent)
 }
 
 /// [`hold_for_new_work`] for a caller that refuses without it: a committed
@@ -703,7 +704,7 @@ pub(crate) fn announce_stopped() {
 }
 
 /// The capability for the live global hold, without the admission check used
-/// by `current_hold`. A committed stop forbids new work, but retaining the
+/// by `hold_for_new_work`. A committed stop forbids new work, but retaining the
 /// capability until the hold drops preserves the child-stamping contract for
 /// any spawn already in progress.
 pub(crate) fn current_capability() -> Option<Nonce> {

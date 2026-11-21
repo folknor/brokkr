@@ -762,7 +762,15 @@ fn hard_kill(info: &lockfile::LockInfo) -> Result<(), DevError> {
     if let Err(e) = signal_target(&holder, libc::SIGSTOP) {
         failed.push(format!("SIGSTOP brokkr PID {}: {e}", info.pid));
         output::lock_msg(&format!("SIGSTOP brokkr PID {}: failed ({e})", info.pid));
+    } else {
+        await_stopped(&holder);
     }
+    // Every descendant leading a group of its own, read before any signal:
+    // a child spawned after the record was read, or between its spawn and
+    // its stamp, is recorded nowhere, and the descendant sweep below kills
+    // its leader alone. Its group's members that left the tree are then
+    // swept like a recorded leader's.
+    let unrecorded_leaders = unrecorded_group_leaders(info.pid, &targets);
 
     // Kill children first, then brokkr - otherwise there's a brief window
     // where brokkr is dead but the tool it was measuring is still alive
@@ -809,6 +817,15 @@ fn hard_kill(info: &lockfile::LockInfo) -> Result<(), DevError> {
             output::count(swept, "process")
         ));
     }
+    for identity in unrecorded_leaders {
+        kill_leaderless_group(
+            info,
+            "child",
+            identity.pid().get(),
+            identity.start(),
+            &mut failed,
+        );
+    }
     let delivery = signal_target(&holder, libc::SIGKILL);
     if let Err(e) = &delivery {
         failed.push(format!("SIGKILL brokkr PID {}: {e}", info.pid));
@@ -827,6 +844,68 @@ fn hard_kill(info: &lockfile::LockInfo) -> Result<(), DevError> {
             failed.join("; ")
         ))))
     }
+}
+
+/// The descendants of `holder` that lead a process group of their own and
+/// are not among the recorded `targets`, each re-read under the identity the
+/// walk saw, so a reused pid never lends its group to an old start time.
+fn unrecorded_group_leaders(
+    holder: u32,
+    targets: &[KillTarget],
+) -> Vec<crate::process::ProcIdentity> {
+    crate::shutdown::descendants(holder)
+        .into_iter()
+        .filter(|identity| {
+            !targets
+                .iter()
+                .any(|target| target.process.identity() == *identity)
+                && crate::process::ProcStat::read(identity.pid()).is_ok_and(|stat| {
+                    stat.identity() == *identity && stat.group() == Some(identity.pid())
+                })
+        })
+        .collect()
+}
+
+/// Wait, for at most a second, until `/proc` shows every thread of the holder
+/// stopped, so the descendant reads that follow see a tree brokkr no longer
+/// adds to: the leader can show stopped before its other threads finish the
+/// group stop. Best effort: a holder that exits, changes identity or stays
+/// running past the bound is killed all the same, and its descendants run on
+/// until their own signal whatever the holder's state.
+fn await_stopped(holder: &KillTarget) {
+    let identity = holder.process.identity();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match crate::process::ProcStat::read(identity.pid()) {
+            Ok(stat) if stat.identity() == identity => {}
+            _ => return,
+        }
+        if all_tasks_stopped(identity.pid().get()) || std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Whether every task of `pid` reads as stopped (`T`). An empty scan, or a
+/// task or directory entry that cannot be read, is not a confirmed stop.
+fn all_tasks_stopped(pid: u32) -> bool {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return false;
+    };
+    let mut seen = false;
+    let all = tasks.into_iter().all(|task| {
+        seen = true;
+        let Ok(task) = task else { return false };
+        std::fs::read_to_string(task.path().join("stat")).is_ok_and(|stat| {
+            // The state follows the parenthesized command name, which may
+            // itself hold parentheses: read after the last one.
+            stat.rfind(')')
+                .and_then(|end| stat[end + 1..].trim_start().chars().next())
+                == Some('T')
+        })
+    });
+    seen && all
 }
 
 /// The all-or-nothing refusal: name the unverifiable target and state that

@@ -57,8 +57,17 @@ impl Since {
         if let Some(answer) = self.answers.get(sha) {
             return Ok(*answer);
         }
-        let failed = |e: DevError| Abort::Failed(format!("since({sha:?}): {e}"));
+        // A git the stop ended or refused is the stop's, not a failure;
+        // every other error keeps its meaning, a stop racing it or not.
+        let failed = |e: DevError| match e {
+            DevError::Spawn { error, .. } if error.kind() == std::io::ErrorKind::Interrupted => {
+                Abort::Interrupted
+            }
+            DevError::Interrupted => Abort::Interrupted,
+            e => Abort::Failed(format!("since({sha:?}): {e}")),
+        };
         let ancestor = crate::git::resolve_commit(&self.repo, sha).map_err(failed)?;
+        stopping()?;
         let answer =
             crate::git::is_ancestor(&self.repo, &ancestor, &self.under_test).map_err(failed)?;
         self.answers.insert(sha.to_owned(), answer);
@@ -492,6 +501,9 @@ impl IterationHost {
     fn launch(&mut self, call: &Declared) -> Result<CallOutcome, Abort> {
         let argv = call.words.as_slice();
         let failed = |what: &str, e: &dyn std::fmt::Display| Abort::Failed(format!("{what}: {e}"));
+        // The hold first, before any lease, spool or cache is made for a
+        // launch it would refuse.
+        let hold = launch_hold()?;
         let (program, executable) = self.target(call)?;
         let program_str = program.display().to_string();
         let short = program
@@ -521,8 +533,8 @@ impl IterationHost {
         let prepared = self
             .prepare_cache(call, stdin.as_ref())
             .and_then(|prepared| stopping().map(|()| prepared));
-        let (cache, hold) = match prepared.and_then(|cache| launch_hold().map(|hold| (cache, hold))) {
-            Ok(ready) => ready,
+        let cache = match prepared {
+            Ok(cache) => cache,
             Err(abort) => {
                 // Never spawned: the borrow has no holder to wait for.
                 drop(admitted.finish());
@@ -550,6 +562,10 @@ impl IterationHost {
                 drop(guard);
                 // Never spawned: the borrow has no holder to wait for.
                 drop(admitted.finish());
+                // The launch gate refused it under a committed stop.
+                if matches!(error, DevError::Interrupted) {
+                    return Err(Abort::Interrupted);
+                }
                 return Err(failed(&format!("cannot start {short}"), &error));
             }
         };
@@ -1047,22 +1063,32 @@ fn call_outcome(
     })
 }
 
-/// Whether a stop is pending: Ctrl-C, `brokkr kill`, or a committed stop.
+/// Whether a stop is pending: Ctrl-C, `brokkr kill`, or a committed stop
+/// (every committed state unwinds).
 pub(super) fn stop_pending() -> bool {
-    crate::shutdown::should_unwind() || !crate::shutdown::admits_new_work()
+    crate::shutdown::should_unwind()
 }
 
-/// The hold a launch records its child on, taken right before the spawn so a
-/// stop committed between the spawn and the stamp cannot hide the child from
-/// the lock record `brokkr kill --hard` reads: a guard already in hand stamps
-/// whatever the stop state. A stop committed before this lookup refuses the
-/// launch. `None` when the process holds no lock (unit tests), so the child
-/// goes unrecorded as it always did there.
+/// The hold a launch records its child on, taken before anything is made for
+/// the launch: a guard in hand stamps the child whatever the stop state, so a
+/// stop committed between the spawn and the stamp cannot hide it from the
+/// lock record `brokkr kill --hard` reads. A stop committed before this lookup
+/// refuses the launch, and one committed after it is refused at the spawn
+/// (`crate::process::spawn`'s launch gate). A bench runs only under the
+/// lock, so a missing hold is brokkr's own bug; unit tests alone launch
+/// without one, their children unrecorded.
 pub(super) fn launch_hold() -> Result<Option<crate::lockfile::LockGuard>, Abort> {
     match crate::lockfile::hold_for_new_work() {
         Ok(hold) => Ok(Some(hold)),
         Err(crate::lockfile::NoHold::Stopped) => Err(Abort::Interrupted),
+        #[cfg(test)]
         Err(crate::lockfile::NoHold::Absent) => Ok(None),
+        #[cfg(not(test))]
+        Err(crate::lockfile::NoHold::Absent) => Err(Abort::Machinery(
+            "a bench launch outside the brokkr lock - this is a brokkr bug: \
+             `brokkr bench` takes the lock before it runs a script"
+                .to_owned(),
+        )),
     }
 }
 

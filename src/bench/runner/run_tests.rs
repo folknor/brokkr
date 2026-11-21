@@ -1347,7 +1347,8 @@ fn a_committed_stop_refuses_a_launch_but_not_its_stamp() {
             super::host::launch_hold(),
             Err(crate::bench::lua::Abort::Interrupted)
         ));
-        assert!(crate::lockfile::current_hold().is_none());
+        assert!(crate::lockfile::hold_for_new_work().is_err());
+        assert!(crate::lockfile::live_hold().is_some(), "the run log still finds it");
         let me = std::process::id();
         hold.set_child_pid(me);
         let info = crate::lockfile::status().unwrap().expect("a held lock");
