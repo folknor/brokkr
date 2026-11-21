@@ -5,8 +5,7 @@ command. "Time ceilings" covers the run, phase and idle ceilings on `check`,
 `test` and `clippy`, and the per-test cap. "lock" covers what `brokkr lock`
 shows about the holder and the queue, "kill" what `brokkr kill` stops,
 "Strays" the stray and orphan reaps, and "guard" the rustc guard.
-"Refusals" lists what these commands refuse and how to get past each. Their
-internals are in `reference/check-internals.md`.
+"Refusals" lists what these commands refuse and how to get past each.
 
 ## Time ceilings
 
@@ -214,11 +213,6 @@ Stopping on a timeout has a price in two lanes:
   the failure list is. Its `grace-period` is `0s`, because a grace period
   SIGTERMs at the ceiling and SIGKILLs only afterwards, which lets a test that
   blocks SIGTERM outlive its budget.
-
-How the watchdog wakes and freezes a run, what the cap can prove on a shared
-stream, the fail-closed rule for missing evidence, and the per-lane clock
-table are in `reference/check-internals.md`.
-
 ### Interrupts
 
 Interrupting brokkr stops the tests too. The libtest runners put their
@@ -467,9 +461,6 @@ The reap finds them by the run token every test child has, not by name.
 
 `brokkr strays` is the by-hand form. Bare, it lists; with `--kill`, it lists
 then kills. It doesn't list orphans, and it works with no `brokkr.toml`.
-Ownership rules, PID-namespace handling and the orphan token protocol are in
-`reference/check-internals.md`.
-
 ## guard
 
 The rustc guard stops strays compiling at all, where the reap removes them
@@ -523,10 +514,6 @@ capability and refuses at once, naming the holder.
 Run the inner command outside the outer one; for brokkr itself, invoke the
 built `target/debug/brokkr` directly. A brokkr started from inside an
 admitted compile (a proc macro shelling out to cargo) refuses the same way.
-
-Admission, the compile lease, the decision order, the version handshake and
-the guard decision probe are in `reference/check-internals.md`.
-
 ## Refusals
 
 The table lists what the lock, `kill` and `guard` refuse, with the text

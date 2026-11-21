@@ -126,8 +126,11 @@ Every sentence must change what the reader understands or does:
   `crate::`, `DevError::` and a backticked compound type name brokkr
   defines (`MechanicalDb`) in `docs/`, reading the lists from `src/`. It
   doesn't catch a single-word type name or an unquoted one.
-- `docs/` doesn't send readers to AGENTS.md, CLAUDE.md or `notes/`. Write
-  the context in.
+- `docs/` doesn't send readers to AGENTS.md, CLAUDE.md, `notes/` or
+  `reference/`. Write the context in. `reference/` isn't shipped with
+  `brokkr man`, so a man reader can't follow a citation into it; the
+  `docs-never-cite-reference` textlint rule refuses one. `reference/` may
+  cite `docs/`.
 - Design rationale ("we weighed X and passed over it") belongs in
   `reference/` when it constrains future changes, and in the commit message
   otherwise. `docs/` states what happens.

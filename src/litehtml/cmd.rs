@@ -1,4 +1,10 @@
 //! Command dispatch for litehtml visual reference testing.
+//!
+//! Runs the pipeline and the Chrome capture, whose `capture.js` is bundled
+//! into the binary and written to the per-user runtime cache. One resolver,
+//! `LitehtmlFixture::resolved_viewport_width`, feeds both the capture
+//! viewport and the pipeline's `--width`, so a result is never scored at a
+//! width other than its reference's.
 
 use std::path::{Path, PathBuf};
 

@@ -1,3 +1,18 @@
+//! The global brokkr lock: state and API, flock acquisition, same-process
+//! re-entry and release.
+//!
+//! The fresh-hold order is in `hold_protocol`, the waiter queue in `queue`,
+//! lock-file I/O in `record`, and holder uptime and hints in `presentation`.
+//! The control socket, `service.rs` here, is mounted as `crate::lock_service`.
+//! The holder report is built from
+//! `observe`, `activity`, `collector`, `cgroup` and `report`. The wire
+//! literals, probe and record format shared with the standalone rustc guard
+//! are the crate-root `lock_*.rs` files included below.
+//!
+//! Under `cfg(test)` the lock and the compile lease live under one scratch
+//! home per test process ([`lock_home`]), so no test takes, reads or drains
+//! the real ones.
+
 use std::collections::HashMap;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};

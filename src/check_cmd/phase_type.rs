@@ -1,3 +1,8 @@
+// `Phase`, the check phases, and the facts each one has: its name and label,
+// whether a profile may skip it, whether it runs on a prose-only tree, its
+// time ceiling, its cargo verb and which lints it judges. `PhaseFailure`
+// tags an error with the phase it failed in.
+
 /// A check phase. Cargo environment failures may be tagged with one, but the
 /// phase identity and its policy belong to the check command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

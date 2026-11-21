@@ -13,7 +13,6 @@ These files are not auto-loaded - read them on demand based on what the user ask
 The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bare `brokkr man` lists the current project's topics), project-filtered by the CLI's `Visibility`; the `reference/` files are not. When editing this list, update `TOPICS` to match. A doc with 8+ `##` sections is section-addressed (`brokkr man conventions script_check`; bare `brokkr man conventions` lists them), slugs derived from the headings (`src/man/sections.rs`), so keep one subject per `##`.
 
 - `reference/how-to-write-docs.md` - house rules for prose and headings in `docs/` and `reference/`. Read before editing either tree.
-- `reference/architecture.md` - the full module map. Read before changing a module you have not touched this session.
 - `reference/output.md` - operator output channel conventions.
 - `docs/brokkr.toml.md` - config core: location, the user-wide layer, `include`, host sections and the top-level keys and tables.
 - `docs/brokkr.toml.conventions.md` - convention gates: gremlins, textlint, script checks, manifest, rustdoc, fixture lints, dependency rules.
@@ -41,7 +40,7 @@ The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bar
 
 ## Architecture
 
-Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-results-server` bins, which include shared sources by path. No workspace. The per-file map lives in `reference/architecture.md`; the landmarks:
+Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-results-server` bins, which include shared sources by path. No workspace. Each file's `//!` module doc (a `//` head comment in an `include!`d file) says what it owns; read it before changing the file. The landmarks:
 
 - `src/main.rs`, `src/main_parts/` - startup and dispatch. `src/cli/` - clap schema, and `visibility.rs`'s `CommandSpec` catalogue, which drives the project gate, help visibility, lock policy, worktree selection and man topics.
 - `src/check_cmd/`, `src/test_runner/`, `src/test_cmd/`, `src/build_purpose/` - the check/test/clippy pipeline.

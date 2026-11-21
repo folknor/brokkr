@@ -4,8 +4,8 @@
 //!
 //! # The record and its liveness proof
 //!
-//! A waiter joins on its first failed flock attempt, before it prints the
-//! wait line, so every waiter that has announced itself is recorded. It
+//! A blocking acquirer joins before its first flock attempt, so every waiter
+//! is recorded, whether or not it ever prints the wait line. It
 //! creates `<token>.pending`, takes an exclusive flock on it, writes its
 //! record and renames it to `<token>.queued`. The flock is the liveness proof,
 //! as in `crate::test_orphans`: the kernel drops it however the waiter dies,
@@ -60,6 +60,9 @@
 //! waiters do not crowd the head out of the mutex. A process stopped while it
 //! holds `admit.lock` stops admission until it resumes or dies; cancellation
 //! does not need the mutex and keeps working.
+//!
+//! A lock file's queue is the directory beside it, so a scratch test lock
+//! gets a queue of its own.
 
 use std::fs::File;
 use std::io::{self, Write as _};

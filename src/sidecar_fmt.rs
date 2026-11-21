@@ -1,4 +1,8 @@
-//! Formatting and filtering helpers for sidecar timeline / marker output.
+//! Formatting and filtering helpers for `brokkr sidecar`'s timeline and
+//! marker views, over [`sidecar::Timeline`]. [`Process`] decides how a
+//! stream is bounded; [`HostProjection`] places a bench child's iteration
+//! host trace on the child's clock, so the phase summary and `--compare` show
+//! each phase's host window. `compare.rs` is `--compare`.
 
 use crate::db;
 use crate::error::DevError;

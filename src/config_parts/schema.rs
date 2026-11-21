@@ -1,3 +1,6 @@
+// The shared serde schemas: `DevConfig`, `HarnessConfig`, `ResolvedPaths`
+// and the tables they hold. `include!`d into `config.rs`.
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;

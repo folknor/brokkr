@@ -1,3 +1,13 @@
+//! `brokkr check` and the investigative `brokkr clippy`.
+//!
+//! Only `activation`, `selection`, `conventions`, `reporter`, `verdict` and
+//! `fixture_lint` are real submodules. Every other `check_cmd/*.rs` file is
+//! `include!`d into this one module and shares its imports and private
+//! items, so a file in that set can't hide an item from the rest, and an
+//! import one file drops may still be read by another. The included files
+//! open with a plain `//` comment, since an inner doc comment is not allowed
+//! there.
+
 mod activation;
 pub(crate) mod selection;
 use crate::output::format_duration as fmt_wall;

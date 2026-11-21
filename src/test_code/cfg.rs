@@ -8,6 +8,10 @@
 //! procedure: `all(feature = "x", not(feature = "x"))` is impossible but
 //! evaluates Unknown, which keeps the node in play. Anything that does not
 //! parse as a well-formed predicate proves nothing.
+//!
+//! The with-`test` proof, used for the test selection only, also reads the
+//! `cfg`s a `cfg_attr` introduces. The module also collects the `path`
+//! alternatives a `cfg_attr` may select.
 
 use syn::ext::IdentExt;
 use syn::parse::{ParseStream, Parser};

@@ -1,5 +1,12 @@
-// Lane eligibility, activation refusals, identities and repro rendering for check/test.
-// Build requests cross into build_purpose only after lane selection is settled.
+//! Lane selection for `check` and `brokkr test`: eligibility, package
+//! admission, dedupe, reach accounting, identities and repro rendering.
+//!
+//! Build requests cross into `build_purpose` only after selection is
+//! settled. `RunSweeps` holds a check run's lanes, the tested sweeps then
+//! the `[[lint_sweep]]` lanes; `CheckSelections` selects clippy and rustdoc
+//! over all of them and the test phase over the tested prefix.
+//! `derive_doctest_carriers` derives a complete claim's carriers.
+//! `reference/check-internals.md` ("Invocation selection") states the rules.
 
 use std::fmt::{self, Display, Formatter};
 use std::path::Path;

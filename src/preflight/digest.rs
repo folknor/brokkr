@@ -1,4 +1,10 @@
 //! Parsed digest values and cached file/tree hashing.
+//!
+//! Parsed XXH128 and SHA-256 values, the file and tree digest distinction,
+//! and a stamp-keyed hash cache. On a miss a file is read through one
+//! descriptor; if its stamp moves during the read, or its path names another
+//! file afterwards, the digest is refused and not cached. A FIFO, device or
+//! socket is refused, whether it is the path digested or inside a tree.
 
 use std::fmt;
 use std::io::Read;

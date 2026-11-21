@@ -1,7 +1,10 @@
-//! Unified measurement types for the CLI redesign.
-//!
-//! Replaces the separate `BenchRequest` / `HotpathRequest` / `ProfileRequest`
-//! structs with a single `MeasureRequest` carrying a `MeasureMode`.
+//! The typed measurement session: one `MeasureRequest` carrying a
+//! `MeasureMode` (run, bench, hotpath, alloc), and `BenchHarness` with its
+//! external-run entry points. The submodules split the rest: `execution`
+//! the measurement loop, `wall` timing, `capture` measured child capture,
+//! `kv` the stderr protocol, `record` row building and persistence, `argv`
+//! the executed invocation. `crate::harness` is the public facade;
+//! `reference/measure-harness.md` describes the design.
 
 use crate::build::BuildKind;
 use std::path::Path;

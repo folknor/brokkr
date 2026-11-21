@@ -60,6 +60,9 @@
 //!   (whose `force = true` would replace what brokkr hands cargo, and whose
 //!   plain form would mean two sources for one input) is refused, checked
 //!   against each invocation's own config chain and `--config` arguments.
+//! - **Atomic across layers.** Composition replaces an entry whole
+//!   (`compose::is_atomic`), so a redefined command never inherits another
+//!   layer's `if_exists` guard.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

@@ -1,3 +1,6 @@
+//! The output policy of the shared diagnostics pipeline: `Check { commands }`
+//! for `brokkr check`, `Clippy` for `brokkr clippy`.
+
 use crate::output;
 
 /// The audience and output policy for the shared diagnostic pipeline.

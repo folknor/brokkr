@@ -3,6 +3,12 @@
 //! non-test build, the constructs that would put the classification outside
 //! its source model, and the evidence the tripwire and the bare-`#[test]`
 //! rule need.
+//!
+//! It is a `syn` visitor over one file under one inherited `Context`
+//! (test-only, dead in test builds) and resolution `Entry` (directory plus
+//! pending non-mod-rs stem). It yields module and literal-`include!` edges,
+//! masked and test-dead spans, bare-`#[test]` spans and their shadowing
+//! sites, refusals and tripwire evidence.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};

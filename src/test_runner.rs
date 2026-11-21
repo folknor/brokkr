@@ -3,7 +3,12 @@
 //! Public paths stay here as a facade; implementation lives by concern in
 //! `context`, `events`, `outcome`, `plan`, `deadline`, `libtest_json`,
 //! `procgroup`, `run`, `hung`, and `output` (the display-only libtest text
-//! parser and compact failure rendering).
+//! parser and compact failure rendering). `harness_shim` isolates each
+//! cargo-launched harness and rustdoc stream; startup checks for its entry
+//! point first (`maybe_run_harness_shim`).
+//!
+//! Every libtest lane reads the JSON event stream
+//! (`-Z unstable-options --format json`), so nightly is required.
 
 pub(crate) mod ceilings;
 mod context;

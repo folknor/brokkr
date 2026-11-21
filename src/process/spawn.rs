@@ -3,7 +3,15 @@
 //! Callers choose a policy by purpose instead of repeating cargo environment,
 //! OOM, parent-death, orphan-token, and hold-capability setup. The environment
 //! renderer is also used by nextest's generated Cargo config, whose engine
-//! builds process commands without exposing them to brokkr.
+//! builds process commands without exposing them to brokkr: nextest gets one
+//! `BROKKR_EXEC` cohort per lane.
+//!
+//! The hold capability is stamped last, after caller env, so nothing
+//! displaces it. Probes and downloads with their own command builders go
+//! through `output::child::command_output` and `command_status`, which apply
+//! the policy after caller configuration. Process-group isolation
+//! (`ChildIsolation::ProcessGroup`) can be chosen only while a `SigtermGuard`
+//! is borrowed.
 
 use std::path::Path;
 use std::process::{Command, Stdio};

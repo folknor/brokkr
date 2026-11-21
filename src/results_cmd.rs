@@ -1,6 +1,7 @@
 //! Implementation of the `results` command - query the results DB and render
 //! rows as a compact table (or as a detailed block when a UUID prefix
-//! resolves to a single row).
+//! resolves to a single row). Script-bench runs are delegated to
+//! `bench::results`.
 
 use std::path::Path;
 

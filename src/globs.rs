@@ -1,6 +1,9 @@
 //! Small wrapper over `globset` for the path-glob lists shared by the `[header]`,
 //! `[[textlint]]`, and `[manifest]` checks and `[gremlins].include`. These name
 //! which files a rule applies to or is excused from.
+//!
+//! It also has the scanned-extension policy, matched case-insensitively,
+//! that gremlins scans by and `scope::dirt`'s prose-only shortcut reads.
 
 use std::path::{Path, PathBuf};
 

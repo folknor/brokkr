@@ -1,3 +1,24 @@
+//! Build entry points and the profile types every config table and result
+//! row shares.
+//!
+//! `cargo_build` returns the executable and the profile cargo resolved, the
+//! executable picked by [`crate::executable_artifact`] from the build's own
+//! selection. `cargo_build_with_rustflags` applies a script bench's
+//! `rustflags`: [`RustflagsInjection::place`] puts them through
+//! [`crate::rustflags::place`], refuses an uncertain placement, and builds
+//! with target and build dir both in a per-recipe `rustflags-HASH` under the
+//! checkout's target base. `project_info` reads the shared metadata snapshot
+//! ([`crate::cargo::metadata`]).
+//!
+//! The profile types:
+//!
+//! - [`RustProfile`]: dev, release or a validated custom [`ProfileName`]
+//! - [`BuildKind`]: a Rust profile, or the external Java or CMake build of
+//!   historical rows; it is the identity a measurement row stores, a custom
+//!   profile as `cargo:NAME` so no name collides with a legacy value
+//! - [`configured_profile`]: the one `profile`-over-`debug` merge every
+//!   config table uses
+
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 

@@ -1,3 +1,6 @@
+// The test-phase driver: runs each prepared lane, keeps the fail-fast
+// accounting and writes each lane's stop record.
+
 /// The run-wide inputs of the test phase.
 struct TestPhaseArgs<'a> {
     project: Option<Project>,

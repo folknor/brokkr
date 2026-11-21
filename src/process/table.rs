@@ -1,3 +1,6 @@
+//! The shared `/proc/PID/stat` parser (`ProcStat`) and best-effort procfs
+//! snapshots (`ProcTable`).
+
 use std::collections::HashMap;
 use std::io;
 

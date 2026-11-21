@@ -17,8 +17,7 @@
 //! across discovery, probe and unlink. The lock file is permanent; nothing
 //! removes it. A probe that succeeds proves some reader exists, not that the
 //! creating brokkr lives, and keeping such a FIFO is the conservative answer.
-//! A brokkr from before this protocol takes no lock, so only its creation
-//! window stays exposed to a concurrent sweep.
+//! `brokkr clean` is the sweep.
 
 use std::fs::{File, OpenOptions};
 use std::io;

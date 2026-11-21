@@ -968,8 +968,8 @@ a kill could neither see nor cancel it.
 
 The queue also decides admission order: waiters take the lock in arrival
 order, through ordered tickets decided under `admit.lock`, with a heartbeat
-that lets a stale place be passed. The `src/lock/` entries in
-`reference/architecture.md` state that protocol.
+that lets a stale place be passed. The module docs under `src/lock/` state
+that protocol.
 
 ### Cancellation
 

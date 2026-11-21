@@ -1,3 +1,6 @@
+//! Conversion between typed lock state and the stable lock-file wire record
+//! (`lock_record_codec.rs`), plus the record's reads and writes.
+
 use std::os::unix::io::RawFd;
 
 use super::{AcqId, AuthHash, LockRecord, LockState};

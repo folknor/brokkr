@@ -1,3 +1,5 @@
+//! The `brokkr deps` phase list, and each phase's outcome and summary.
+
 use serde::{Serialize, Serializer};
 
 use super::DepsEvent;

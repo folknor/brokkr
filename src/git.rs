@@ -1,3 +1,7 @@
+//! Git commit identity ([`Commit`], [`ShortCommit`]), the run-provenance
+//! collection ([`GitInfo`]), and [`TreeState`], the one parsed status every
+//! cleanliness question is answered from.
+
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;

@@ -1,4 +1,6 @@
-//! The deadline model shared by direct, cargo, parallel, and shim lanes.
+//! The deadline model shared by direct, cargo, parallel, and shim lanes:
+//! the typed `Expiry`, the timeout cause and its attribution, and the one
+//! freeze, snapshot and kill verdict every watchdog uses.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

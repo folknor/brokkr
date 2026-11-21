@@ -1,5 +1,9 @@
 //! Admission and release of one launch: the lease, the private directory and
 //! the descriptor the child inherits.
+//!
+//! Admission refuses conflicts and checks placement. The spawn choke point
+//! (`process::spawn`) makes the lease descriptor inheritable for that one
+//! child. [`ReadHold`] reserves a run's inputs for reading with no child.
 
 use std::cell::RefCell;
 use std::io;

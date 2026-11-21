@@ -1,5 +1,17 @@
 //! One iteration's host: what the script's builtins do, on the resource
 //! protocol, with each child's sidecar evidence kept for the document.
+//!
+//! The iteration's owner lease covers the bound inputs, its first handles.
+//! Every call is first judged by `crate::bench::policy` and then admitted
+//! with the access it declared; `read()`, `write()` and `filesize()` go
+//! through the same resource layer. A launch runs on a borrow, with a fresh
+//! marker FIFO per child drained while the borrow's release waits for every
+//! holder. A call's `stop_at` reaches the sidecar supervisor as an exact
+//! marker, with a SIGTERM grace on a hotpath call so the child can write its
+//! report, and its `deadline` as the wall limit, worded by [`overdue`].
+//! Stderr snapshots, hotpath reports and host-trace readings each draw on a
+//! run-wide [`Budget`], and the host trace (`crate::bench::host_trace`) is
+//! read around each sample.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

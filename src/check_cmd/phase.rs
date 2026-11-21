@@ -1,21 +1,9 @@
-// Implementation of the `check` command (clippy + tests).
+// `brokkr check` orchestration over the plan `plan_check` builds.
 //
-// Both phases iterate the same list of "active sweeps" - each one a
-// cargo invocation with a specific feature flag set, optional
-// pre-built binary packages, and (for tests) optional libtest
-// filters. The list is built once at the top of `cmd_check` from
-// whichever of these inputs apply, in priority order:
-//
-// 1. CLI `--features` / `--no-default-features` flags → a single
-//    ad-hoc sweep that ignores `[[check]]` and any profile.
-// 2. CLI `--profile <name>` or `[test].default_profile` → the
-//    profile's resolved sweeps (each backed by a `[[check]]` entry,
-//    plus the profile's libtest filters).
-// 3. `[[check]]` entries are configured but no profile applies →
-//    every entry runs in declaration order with no libtest filters.
-// 4. None of the above → a single `--all-features` sweep, matching
-//    `brokkr check`'s pre-`[[check]]` behaviour for projects that
-//    haven't migrated.
+// `cmd_check` runs the setup around the plan, sequences the convention
+// phases and the build phases, hands off to `prepare`, and does the
+// accounting, the coverage audit and the sequential test resolutions. The
+// sweep list it runs comes from `activation::decide_active_sweeps`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

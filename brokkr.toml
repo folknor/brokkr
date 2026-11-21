@@ -41,6 +41,15 @@ pattern = '\bnotes/'
 paths = ["README.md", "CLAUDE.md", "docs/**/*.md", "scripts/**/*.js", "scripts/**/*.py", "scripts/**/*.sh"]
 message = "notes/ is transient; durable docs must carry their own context"
 
+# docs/ ships in the binary as `brokkr man`; reference/ does not, so a man
+# reader can't follow a citation into it. A docs page says what its reader
+# needs and stops there.
+[[textlint]]
+name = "docs-never-cite-reference"
+pattern = '(?:^|[\s`(])reference/'
+paths = ["docs/**/*.md"]
+message = "reference/ isn't shipped with brokkr man; say what the reader needs here or nothing"
+
 # docs/ is how brokkr is used; source paths and internal type names are no
 # use to its reader and belong in reference/ or a code comment
 # (reference/how-to-write-docs.md). A script, not a textlint pattern, because

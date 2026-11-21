@@ -1,8 +1,12 @@
 //! Parser for cargo's `--message-format=json` output.
 //!
 //! Turns cargo/clippy/rustc JSON diagnostics into structured [`Diagnostic`]
-//! values that the `check` text renderer formats. This is how brokkr *reads*
-//! cargo - there is no machine-readable output mode of brokkr's own.
+//! values that the `check` text renderer formats.
+//!
+//! Cargo's own manifest lints (`cargo::unused_dependencies` and others)
+//! reach stderr only, as text. `manifest_lints_by_block` recognizes them by
+//! a `Cargo.toml` arrow plus a lint identity, and check's clippy, test and
+//! support-build paths classify them through `OwnerIndex`.
 
 use crate::diagnostic::Diagnostic;
 use crate::rustc_text::Level;

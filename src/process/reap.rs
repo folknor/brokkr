@@ -1,3 +1,6 @@
+//! Pidfd-backed verified signalling and `ReaperExemptions`, the process-tree
+//! boundary the stray reap and the orphan reap share.
+
 use std::collections::{HashMap, HashSet};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 

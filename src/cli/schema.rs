@@ -1,4 +1,12 @@
 //! Clap command and argument definitions.
+//!
+//! Every subcommand with arguments gets its own `#[derive(Args)]` struct,
+//! named `VariantCmd` after its variant, never inline fields in a struct
+//! variant. With inline variants the one enum-level function clap generates
+//! builds every argument of every subcommand; its unoptimized frame was
+//! estimated above 2 MB by clippy's `large_unopt_stack_frames`, and building
+//! the command tree overflowed a libtest thread's 2 MiB stack. With separate
+//! structs each `Args` impl builds its own arguments in its own frame.
 
 use super::validation::{
     validate_env_kv, validate_meta_filter, validate_param_filter, validate_since,

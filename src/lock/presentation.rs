@@ -1,3 +1,6 @@
+//! What lock status shows about a holder beyond its record: verified uptime
+//! and the advisory same-agent hint.
+
 use super::LockInfo;
 use crate::process::{BootId, ProcIdentity};
 

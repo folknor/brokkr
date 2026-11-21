@@ -4,6 +4,11 @@
 //! Each rule judges the direct dependencies of one or more workspace
 //! packages, either against a `forbid` list (listed names are violations) or
 //! an `allow` list (unlisted names are violations).
+//!
+//! The rules read the shared Cargo metadata and `DependencyKind`.
+//! `selector_findings` lists every bad `from` or `except` for
+//! `check --audit` through the same per-rule resolver the phase refuses
+//! with.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;

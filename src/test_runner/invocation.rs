@@ -1,4 +1,6 @@
-//! The runner's typed libtest selection and launch rendering.
+//! The runner's typed libtest selection (`LibtestArgs`, `TestThreads`) and
+//! launch rendering. Protocol flags are set here, never taken from a
+//! caller's passthrough.
 use super::Launch;
 use crate::error::DevError;
 

@@ -1,3 +1,6 @@
+// `brokkr clippy`, the investigative entry point over the diagnostics
+// pipeline `check`'s clippy phase uses.
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_clippy(
     project_root: &Path,

@@ -1,9 +1,18 @@
-//! Scope helpers for `brokkr check`'s diagnostic output.
+//! Working-tree scope for `brokkr check`.
 //!
-//! Every diagnostic a phase reports is an error, and every one of them is
-//! shown - there is no cap and no flag to raise one. Errors in files with
-//! unstaged changes - the files being edited right now - come first, then the
-//! rest, which is the whole of what this module decides.
+//! - `unstaged_files` is the working tree against the index, plus untracked
+//!   files.
+//! - `dirt` classifies the tree (`Unknown`, `Clean`, `ProseOnly`, `Code`)
+//!   for the markdown-only shortcut, through `git::TreeState` and the shared
+//!   extension policy in `globs`.
+//! - `prioritize` puts a phase's errors in files with unstaged changes
+//!   first. Every error is shown: there is no cap and no flag to raise one.
+//! - `TreeSnapshot` is one check run's file list, status and cached bytes,
+//!   shared by the convention scanners. Its byte cache is keyed by canonical
+//!   file identity, so every spelling of one file (a symlink, `..`, an
+//!   absolute path outside the root the test-code classifier reaches) reads
+//!   the same bytes. `present_files` is the list less what `presence`
+//!   observes absent.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

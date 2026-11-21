@@ -1,3 +1,7 @@
+//! Prefixed console output (`[build]`, `[bench]`, `[run]`, `[error]` and the
+//! rest), the quiet switch, run-log teeing and the status line. The channel
+//! contract is `reference/output.md`.
+
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;

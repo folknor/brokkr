@@ -13,6 +13,10 @@
 // announcements go through a [`Narrator`] at the point they are decided, so a
 // run that refuses mid-plan has printed exactly what it printed before the
 // planner existed, and the audit collects the same lines instead.
+//
+// The audit's own findings live here too: `[[check]]` entries no lane
+// references, package selectors naming no workspace package, and absent
+// `[lints] allow_exact` paths.
 
 /// Where planning's announcements go: straight to the console and run log
 /// (a check run), or into a list the audit prints as part of its plan.

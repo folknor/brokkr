@@ -194,7 +194,7 @@ namespaced pairs are provenance and excluded.
 
 `brokkr mogwai` doesn't measure mogwai's serving path or adapter.
 
-mogwai's reading rules, what makes a delta real, live in mogwai's
-`reference/performance.md`, not here. pbfhogg's rules are almost entirely
+mogwai's reading rules, what makes a delta real, live in mogwai's own
+performance reference, not here. pbfhogg's rules are almost entirely
 inapplicable: pbfhogg is I/O bound, so its error model is drive state, trim
 debt and page cache, while the screen and the walk are CPU and RNG bound.

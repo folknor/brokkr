@@ -8,8 +8,8 @@
 //!
 //! The engine consumes this as a masking layer: [`classify`] labels every byte
 //! of a file, and [`mask_line_by`] blanks out the bytes of a line that fall
-//! outside what a rule keeps - a target region, and under `skip_test` the
-//! production bytes - so a textlint `pattern` can be scoped to match only in
+//! outside what a rule keeps - a target region, and under `test_code` the
+//! test-only bytes or everything outside the test selection - so a textlint `pattern` can be scoped to match only in
 //! code, only in string literals, or only in comments.
 
 use ra_ap_rustc_lexer::{LiteralKind, TokenKind, tokenize};

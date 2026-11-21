@@ -647,7 +647,7 @@ stands for a commit, and a run without a result never pairs or compares.
 
 Two runs pair when their stored pairing keys are equal, and brokkr compares
 the latest run per key on each side. The key
-(`reference/bench-store.md`) is the project, the bench, every bound param
+is the project, the bench, every bound param
 with its keys and file digests in bound order, and what was measured:
 timing, `--hotpath`, `--alloc`, or incidental, a timing run that captured a
 report anyway.
@@ -810,7 +810,7 @@ stored.
 ### Marks
 
 What is said about runs after the fact is stored in the bench store beside
-them (`reference/bench-store.md`, Marks). It is never in `brokkr.toml` and
+them. It is never in `brokkr.toml` and
 never an edit of a run, so it holds locally and through a results server
 alike. The mark flags are these:
 

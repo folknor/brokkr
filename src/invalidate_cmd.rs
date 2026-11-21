@@ -1,5 +1,7 @@
 //! Implementation of the `invalidate` command - hard-delete benchmark results
-//! and their sidecar profile data by UUID prefix or commit prefix.
+//! and their sidecar profile data by UUID prefix or commit prefix, through
+//! `db::RunStore`. An empty prefix is refused; without `--force` both stores
+//! are opened read-only and the deletion is only previewed.
 
 use std::path::Path;
 

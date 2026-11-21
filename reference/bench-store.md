@@ -53,6 +53,12 @@ attribute and serves its wire contract (On the wire, below). The wire is in
 the module too (`wire.rs`), so the server and a client decode the same
 types.
 
+In the `brokkr` binary, the bench runner (`src/bench/runner/`) is the one
+publisher of runs and `src/bench/marking.rs` the one writer of marks. Each
+writes to the local store or, when the user-wide `results_server` names
+one, through `src/bench/remote.rs`. The two share the retry admission and
+uncertainty latch in `src/bench/publication.rs`.
+
 ## The run document
 
 The unit of every write and read is one `RunDocument`: one attempted run,

@@ -517,8 +517,8 @@ its path comes to name another file) and doesn't cache its digest.
 against their pins, since it records nothing; it reserves none.
 
 Each run stores every bound param with its `from` path, `{NAME}` references
-substituted, and its keys in bound order, with a file's digest beside each
-(`reference/bench-store.md`, The run document). A file pairs on its key and
+substituted, and its keys in bound order, with a file's digest beside each.
+A file pairs on its key and
 digest, any other param on its key alone, and a collection on its keys and
 digests in order, so `--osc 4706,4705` and `--osc 4705,4706` don't pair.
 

@@ -1,4 +1,5 @@
-//! Package and projected feature requests for one Cargo build shape.
+//! Package and projected feature requests for one Cargo build shape, built
+//! without any dependency on the check command.
 
 use std::collections::BTreeSet;
 

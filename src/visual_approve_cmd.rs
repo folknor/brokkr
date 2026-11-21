@@ -1,4 +1,4 @@
-//! Visual baseline approval.
+//! Visual baseline approval: `brokkr approve` for litehtml and sluggrs.
 use crate::{config::project_config::ProjectConfig, error::DevError, litehtml, sluggrs};
 use std::path::Path;
 

@@ -1,3 +1,6 @@
+//! OOM protection: `protect_child` marks a child as the kernel OOM killer's
+//! preferred target.
+
 use std::process::Command;
 
 /// Set the child process as the preferred OOM kill target.

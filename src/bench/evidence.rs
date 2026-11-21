@@ -1,7 +1,10 @@
 //! The brokkr side of the bench store: where the store lives, and how a
 //! sidecar capture, a child's ending and its environment become the evidence
 //! a run document holds. The store itself never sees brokkr's types, so a
-//! server can include it alone; everything brokkr-specific is here.
+//! server can include it alone; everything brokkr-specific is here,
+//! credential redaction of a child's environment included. For `brokkr
+//! sidecar` the mapping runs in reverse: a stored child's evidence back as
+//! the sidecar's types, with the positions the store derived.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

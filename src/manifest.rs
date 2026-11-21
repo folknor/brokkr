@@ -6,6 +6,9 @@
 //!
 //! The config is a set of named toggles, not a rule DSL. The phase is inert
 //! unless a project opts a check in.
+//!
+//! `ManifestDeps` is the shared `toml_edit` walker over package, target and
+//! workspace dependency tables.
 
 use std::path::{Path, PathBuf};
 

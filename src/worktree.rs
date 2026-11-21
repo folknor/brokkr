@@ -45,10 +45,25 @@
 //! so a worktree build lands on the same disk as every other build of the
 //! project. The lock-time free-space gate covers the live cwd target and
 //! environment override, but does not resolve cargo-config target overrides.
-//! Each worktree still gets its own directory there: sharing one with the live tree is how a reused worktree
-//! once re-linked a stale binary (see `build::cargo_build_observed`). The
-//! `.brokkr-target` link is how a build in the worktree finds it
-//! ([`isolated_target_dir`]).
+//! Each worktree still gets its own directory there: sharing one with the
+//! live tree lets a reused worktree re-link a stale binary (see
+//! `build::cargo_build_observed`). The `.brokkr-target` link is how a build
+//! in the worktree finds it ([`isolated_target_dir`]).
+//!
+//! ## Admission and removal
+//!
+//! Every admission, cut or reuse, refuses a checkout that isn't pristine
+//! ([`is_pristine`], asked only after cargo config recovery has undone a
+//! crashed run's filtered file) and then finds the tracked files left as LFS
+//! pointers ([`crate::worktree_lfs`]). A cut is gated on the container's free
+//! space and runs `git worktree add` with `GIT_LFS_SKIP_DOWNLOAD_ERRORS=1`, so
+//! an object the LFS server can't serve stays a pointer instead of failing
+//! the checkout.
+//!
+//! [`remove_one`] is the one slot removal (target dir, worktree, links), used
+//! by [`purge_all`], retention eviction and `create`'s stale replacement; the
+//! last two refuse a dirty worktree first ([`is_dirty`]). [`list`] must be
+//! given the build root, since the checkout key derives from it.
 
 use std::path::{Component, Path, PathBuf};
 

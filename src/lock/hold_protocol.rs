@@ -1,3 +1,20 @@
+//! The order of a fresh hold, enforced by state types that each consume
+//! their predecessor:
+//!
+//! 1. The flock wait. A blocking acquirer joins the lock queue first and
+//!    tries the flock only on its turn; a non-blocking try that would pass a
+//!    live waiter refuses with `QueueBusy`.
+//! 2. The control service starts.
+//! 3. The free-space gate (`crate::disk_gate`).
+//! 4. The drain: a draining record is published, the queue place is
+//!    claimed, then earlier compile leases are waited out.
+//! 5. The capability hash is published and the tree policy activated.
+//! 6. The hold goes live: it enters the accounting cgroup before anything is
+//!    spawned, then runs the post-hold reaps and warnings.
+//!
+//! Until the live owner takes the descriptor, the pre-live owner invalidates
+//! any record it published.
+
 use std::collections::HashMap;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};

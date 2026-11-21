@@ -1,3 +1,16 @@
+//! The captured and passthrough child runners, the one supervisor they share,
+//! and its `Ending` verdict.
+//!
+//! `Exits` is the one statement of which exit codes complete a run. It is the
+//! full accepted set, with 0 not implied, so an answer command expected to
+//! answer no can fail on 0. Between ticks the supervisor waits on the child's
+//! pidfd, so the recorded elapsed is the exit, not the next tick; that wake
+//! still observes once more as `Wake::Exit` before reaping, so a stop marker
+//! still wins. Every spawn names its `SpawnProfile`: the plain runners use
+//! `Plain`, `run_cargo` and the profile-taking passthrough, idle and sidecar
+//! spawns `Cargo { phase }`. `supervise_group_leader` is the supervisor
+//! without capture, for a served process-group leader.
+
 use std::path::Path;
 use std::process::ExitStatus;
 use std::sync::atomic::Ordering;

@@ -1,3 +1,6 @@
+//! `DevError`, one variant per failure kind, its rendering policy, and the
+//! process exit codes a handler result resolves to.
+
 use std::error::Error as StdError;
 use std::fmt;
 use std::io;

@@ -1,3 +1,11 @@
+//! Loading, composing and validating `brokkr.toml`.
+//!
+//! `bench`, `bench_annotations`, `check` and `project_config` are ordinary
+//! submodules under `config_parts/`. `schema.rs`, `parser.rs`, `compose.rs`,
+//! `user.rs` and `tests.rs` are `include!`d instead, so those five files share
+//! this one namespace: the serde schemas, every table's parser, the include
+//! and user-layer composition, and their tests.
+
 #[path = "config_parts/bench.rs"]
 pub mod bench;
 #[path = "config_parts/bench_annotations.rs"]

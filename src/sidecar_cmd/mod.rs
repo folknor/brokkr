@@ -5,7 +5,9 @@
 //!
 //! A uuid prefix resolves across the typed stores (results.db and
 //! sidecar.db) and the project's script-bench runs at once; a prefix naming
-//! runs in both is ambiguous. A typed run is read as it always was; a bench
+//! runs in both is ambiguous, and the typed aliases resolve first. This file
+//! also parses `--compare`'s operands (`UUID/ITER/CHILD` for a bench side).
+//! A typed run is read as it always was; a bench
 //! run is read one child of each selected iteration at a time (`bench.rs`),
 //! and the views (`views.rs`) are written once over either (`source.rs`).
 

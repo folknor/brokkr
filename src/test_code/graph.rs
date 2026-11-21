@@ -1,4 +1,14 @@
 //! Reachability from Cargo's target roots, and the per-file verdict.
+//!
+//! The walk starts at `cargo metadata` target roots with per-context visit
+//! keys and intersects production masks across occurrences, keeping per
+//! occurrence what it proves test-dead to derive the test selection. When a
+//! shadowing site leaves bare `#[test]` unresolved, it classifies a second
+//! time with bare `#[test]` honored and marks the files whose selection
+//! differs. Every source's contents come through the caller's snapshot
+//! reader, so masks describe the bytes the scan matches; module resolution,
+//! the ambiguity check and visit identity still consult the live
+//! filesystem.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;

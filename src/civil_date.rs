@@ -1,4 +1,5 @@
-//! Gregorian civil dates and conversions to Unix time.
+//! Proleptic-Gregorian civil dates and conversions to Unix time, shared by
+//! the `[header]` year check and the results timestamps.
 
 /// One day in the proleptic Gregorian calendar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

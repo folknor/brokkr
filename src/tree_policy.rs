@@ -14,6 +14,10 @@
 //! only recovery can read, and that must be undone even after the key has
 //! been removed from `brokkr.toml`. With no leftovers, recovery only inspects
 //! the reserved names and changes nothing.
+//!
+//! [`HeldTree`] is the guard: the lock owns it, or `with_worktree` does on a
+//! `--commit` checkout. [`restore_active_hold`] is the watchdog backstop's
+//! bounded restore of every registered directory.
 
 use std::path::{Path, PathBuf};
 

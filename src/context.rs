@@ -1,3 +1,9 @@
+//! Command context: the command lock, path bootstrap, [`MeasurementSession`]
+//! with its [`DirtyPolicy`], and the `--commit` worktree lifecycle
+//! ([`with_worktree`]). [`bootstrap_config`] resolves host paths from config
+//! alone; [`bootstrap`] is the cargo query a command that needs its target
+//! dir makes of the tree it acts on.
+
 use std::path::Path;
 
 use crate::build;

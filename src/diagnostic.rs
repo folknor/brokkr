@@ -2,6 +2,12 @@
 //!
 //! Readers keep the fields cargo emitted. Formatting, sorting and ownership
 //! decisions derive from those fields at the point the report is rendered.
+//!
+//! `OwnerIndex`, built from `cargo metadata`, classifies JSON diagnostics and
+//! stderr manifest lints by package id and manifest path, and
+//! `Diagnostic::is_dependency_warning` is the one warning-exemption rule
+//! every reader applies. `check`'s clippy and rustdoc phases merge on
+//! `DiagnosticKey` and render at error level.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;

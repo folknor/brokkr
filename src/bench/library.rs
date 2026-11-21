@@ -8,7 +8,8 @@
 //! directory without `.lua`, its directories joined by dots (`io/uring.lua`
 //! is `io.uring`), every segment letters, digits and `_`, never a dot, so a
 //! name names one file; a file whose path makes no such name, and every
-//! symbolic link, is not a module. The scan holds each directory open and
+//! symbolic link, is not a module; [`module_name`] is that rule, and the
+//! registry check judges `bench_lib` entries by it too. The scan holds each directory open and
 //! opens what is inside it following no link, so nothing outside the
 //! directory is ever read, even if a path is swapped while it runs.
 

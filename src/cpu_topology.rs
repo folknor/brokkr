@@ -17,7 +17,16 @@
 //!   thread may run on, including cpuset and affinity restrictions.
 //! - The first allowed CPU with an `index3/shared_cpu_list` identifies an L3
 //!   domain; its logical CPU list is intersected with the allowed set.
-//! - `topology/core_id` collapses SMT siblings onto their physical core.
+//! - `topology/core_id`, paired with `topology/physical_package_id` since a
+//!   core id is unique only within a package, collapses SMT siblings onto
+//!   their physical core.
+//!
+//! The count is the default in-flight budget of a `parallel` `[[check]]`
+//! sweep and `brokkr env`'s `l3 domain:` line; `domain_label` picks the
+//! vendor's word for the domain. `budget = "cores"` takes `all_cores_probe`
+//! instead, every allowed physical core. Both probes return a `CoreProbe`
+//! for the plan line, whose budget `quota` caps by every visible cgroup v2
+//! `cpu.max`; the topology count and a numeric budget are left alone.
 //!
 //! # What it means per vendor
 //!

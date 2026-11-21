@@ -19,6 +19,11 @@
 //! (U+2190..=21FF, including `→` used as "maps to" in comments and display
 //! strings) and box-drawing / geometric shapes (U+2500..=25FF, used for tree
 //! and table output).
+//!
+//! The built-in extension list lives in `globs`. `is_candidate` (extension or include, before exclusion) is
+//! shared with `check --audit`'s gremlins findings, `tracked_files` is the
+//! file walk every convention scanner shares, and `CodepointSet` holds the
+//! allow and ban singletons and ranges.
 
 use std::path::{Path, PathBuf};
 

@@ -1,4 +1,5 @@
-// Final verdict, stop precedence, summary schema, and run timings.
+//! A check run's final verdict, stop precedence and test timings, and the
+//! one schema-versioned `--json` summary trailer (`CheckSummary`).
 
 use super::{
     ContinuationReport, DoctestAccounting, ExecutionAccounting, Phase, PolicyCoverage, RunReport,

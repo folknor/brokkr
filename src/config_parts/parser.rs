@@ -1,3 +1,7 @@
+// `load`, `load_user_only` and every table's parser and validator: host
+// sections, textlint presets, script checks, `[[check]]`, `[test]` profiles
+// and quarantine, install steps and datasets. `include!`d into `config.rs`.
+
 /// The obligations a profile claim places on config validation and check
 /// execution. Keep the complete-claim policy here so parsers and phases ask
 /// the same named question instead of interpreting `Certifies::Complete`

@@ -1,3 +1,6 @@
+//! results.db's versioned migration steps, run under `store`'s
+//! schema-version policy.
+
 use super::KvClass;
 use super::schema::HOTPATH_TYPED_DDL;
 use super::store::{column_exists, table_exists};

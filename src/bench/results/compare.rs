@@ -2,7 +2,15 @@
 //! pairing key alone (`reference/bench-store.md`): the latest run per key on
 //! each side is compared, and what the key leaves out (the config, the
 //! build, the host, the captured environment, the verdict, the record) is
-//! named under the pair rather than splitting it.
+//! named under the pair rather than splitting it, the external executables
+//! each side ran among it. The key paired on is the resolved name and
+//! `MarkView::comparison_key`; the stored key is never rewritten.
+//!
+//! Each side's stored config is read on its own, under the name that side
+//! was stored as, and an unreadable side is named. Every compared run is
+//! read with its children, so captures diff by stage and occurrence and each
+//! child's executable and page-cache preparation are seen whatever the
+//! run's class.
 
 use std::collections::{BTreeMap, BTreeSet};
 

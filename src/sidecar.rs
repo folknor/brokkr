@@ -3,7 +3,27 @@
 //! Samples `/proc/{pid}/*` at fixed intervals, reads application phase markers
 //! from a FIFO, and hands everything back to the harness, which stores it in
 //! SQLite after the child exits. Nothing is written during the benchmark
-//! itself.
+//! itself. Measured modes always run it.
+//!
+//! # Capture
+//!
+//! A capture keeps every FIFO record (markers, counters, `%CALL_ID`-tagged
+//! call streams and their sink ends) in one arrival-ordered list, with its
+//! loss split by cause ([`CaptureLoss`]) and a bounded census of the call ids
+//! it saw. [`ClockOutliers`] counts records stamped outside the run interval;
+//! it is stored and repeated on every query, and never rebases a stamp.
+//! [`Timeline`] is the per-stream chronological projection every marker view
+//! reads; a stored library call's stream closes at its return when its
+//! [`CallSpan`] is known.
+//!
+//! Each FIFO drain is bounded in bytes, so a child writing without pause
+//! can't starve the supervisor's deadline and shutdown checks.
+//!
+//! A run is supervision ([`supervise_sidecar`], ending in an [`OpenCapture`])
+//! and a finish that closes the capture. The typed paths call both back to
+//! back ([`run_sidecar_with_deadline`]). A script-bench call pumps the open
+//! capture while its borrow's release waits, and finishes only once no holder
+//! is left.
 //!
 //! # Last marker
 //!
@@ -14,8 +34,7 @@
 //! FIFO is created and dropped, so a marker from an earlier run in the same
 //! hold is never shown as the current one. It is the last marker *observed*:
 //! FIFO draining lags the child, so it does not prove the child's current
-//! step. This replaced a PID-keyed status file beside the lock, which a
-//! reader in another PID namespace could not trust.
+//! step.
 //!
 //! # Deadlines
 //!

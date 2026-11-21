@@ -4,6 +4,13 @@
 //! benches). The store answers the queries (`store::RunFilter`), locally or
 //! on the results server the user-wide config names (`super::remote`); this
 //! module maps `results`' filters onto them and renders what comes back.
+//!
+//! Each view reads runs against the marks they were selected under, held
+//! in a `Listing`, `Lookup` or `Comparison`. A hidden run is shown with what
+//! hid it, and every run under the name its rename chain resolves to, a
+//! differing stored name disclosed. A remote run answer must have read the
+//! children it was asked for. [`BenchReader::resolve`] is `brokkr sidecar`'s lookup, one
+//! run read whole.
 
 mod annotations;
 mod compare;

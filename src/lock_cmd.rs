@@ -1,4 +1,9 @@
-//! Lock status and termination commands.
+//! `brokkr lock` and `brokkr kill`: presentation and orchestration over
+//! `lockfile`, `lock_service` and the lock queue.
+//!
+//! `brokkr lock` lists the holder, the queue and the live serves. `brokkr
+//! kill` cancels its [`KillScope`]'s queued commands, then stops the holder
+//! when it is in scope, and lists the scope's serves as left running.
 
 use crate::error::{DevError, LockError};
 use crate::lockfile;

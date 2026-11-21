@@ -1,3 +1,13 @@
+//! The measurement databases: [`ResultsDb`] (`.brokkr/results.db`) and
+//! `sidecar::SidecarDb` (`.brokkr/sidecar.db`), linked by result UUID.
+//! `store` owns the shared open policy, busy timeout and versioned
+//! migration; a read-only query open migrates an older schema first and
+//! refuses a newer one. `run_store` is the run identity and selection both
+//! stores share. `schema` and `migrate` are results.db's DDL and migration
+//! steps; `types`, `write`, `query` and `compare` its rows, inserts and
+//! queries; `format` the rendering. `historical_qualifier` recognizes
+//! historical typed pbfhogg argv for a results.db migration step.
+
 mod compare;
 mod format;
 mod hotpath;

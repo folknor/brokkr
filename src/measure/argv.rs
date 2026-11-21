@@ -1,5 +1,7 @@
 //! Render subprocess argument vectors for measured rows, and the resolved
-//! invocation every measured spawn executes.
+//! invocation every measured spawn executes. Harness runners record
+//! `cli_args` from the [`Invocation`] they execute, so the row names what
+//! ran.
 
 use std::path::Path;
 

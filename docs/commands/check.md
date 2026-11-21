@@ -16,11 +16,7 @@ phase, then "Exit codes", "Sweep log lines" and "Sweep selection".
 
 `brokkr test` runs the cargo tests matching one name against the same sweep
 set. The config behind both (`[[check]]`, `[[dependency_rule]]`, `[test]`,
-profiles) is in `brokkr man config` and `brokkr man sweeps`. How the pipeline
-is built (selection, accounting, harness isolation, the guard protocol, the
-module map) is in `reference/check-internals.md` and
-`reference/architecture.md`.
-
+profiles) is in `brokkr man config` and `brokkr man sweeps`.
 The rest lives in sibling topics:
 
 - `brokkr man test-lanes`: the test phase and its lanes (serial, parallel,
@@ -420,9 +416,6 @@ When `-p` excludes every applicable sweep of an enabled phase, that phase
 refuses as a failed run instead of reading green. The test phase refuses
 before `prepare`, so a run that will test nothing compiles nothing for it.
 The `--json` trailer's `sweeps` lists the sweeps some phase started work on.
-The selection model, dedupe keys and the gated phases' selection are in
-`reference/check-internals.md`.
-
 ## Feature projection
 
 A `[[check]]` entry's `features` are written against the entry's own
@@ -1174,8 +1167,7 @@ sibling that passes it.
 
 On a nightly rustdoc that supports it, the phase lints without rendering
 (`-Zunstable-options --check`), detected automatically; no key controls it.
-The reported lints are the same. How the flags are placed and how doc
-freshness is kept are in `reference/check-internals.md`.
+The reported lints are the same.
 
 Output goes through clippy's formatter: one
 `error[LINT] FILE:LINE:COL MESSAGE` line per diagnostic, merged across

@@ -1,3 +1,7 @@
+//! Lint policy for the test phase: the `-A` flags it injects, which lints
+//! reach a test build or belong to cargo, and the rustflags target key; plus
+//! the cargo-unification and lane-budget types the check config resolves to.
+
 use super::{BudgetSpec, CheckEntry, LintsConfig, ParallelBinaries, ProfilePin, SweepProfile};
 
 /// The `-A <lint>` flag pairs the test phase injects into the build's

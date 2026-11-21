@@ -1,4 +1,7 @@
-//! The one scratch-directory allocator for unit tests.
+//! The one scratch-directory allocator for unit tests: `scratch` for a
+//! directory, `scratch_path` for a file path, and `cargo_fixture` for a
+//! project a test builds with cargo, which `worktree::isolated_target_dir`
+//! pins to the fixture's own `target` under `cfg(test)`.
 //!
 //! Project rules forbid `/tmp`, so every test that needs a filesystem writes
 //! under the crate's gitignored `target/test-tmp/`. Many modules grew their

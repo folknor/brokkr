@@ -1,3 +1,8 @@
+//! Sweep environment composition: the env every cargo run of a sweep sees,
+//! the isolated target dir a sweep with `rustflags` gets, and
+//! `place_sweep_rustdocflags`, which puts a sweep's cfg rustflags into
+//! rustdocflags for the rustdoc phase and every test-lane invocation.
+
 use std::path::Path;
 
 use crate::profile::PlannedSweep;

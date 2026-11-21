@@ -28,9 +28,19 @@
 //! handle on purpose; that gains nothing, since a handle resolves only to one
 //! the host gave out.
 //!
+//! The phase the State is in (top level, `validate()`, `preflight()`,
+//! `bench()`) decides which builtins a call may reach, so every host is
+//! held to the same gate before its own judgement. A module loaded through
+//! `require` lives in the same State and is held by [`check_module`] to
+//! defining no global. [`Value`] is the dellingr-free form of
+//! `bench(params, keys)`'s arguments, `config()`'s table and JSON, and the
+//! one Lua-to-`Value` conversion reads `binary_with()`'s options, `record`
+//! and `json.encode` alike.
+//!
 //! An inline script's line numbers are mapped to its config file's
 //! (`super::script_lines`) when the script carries a map: compile errors,
-//! every traceback frame and the location a builtin's failure is given.
+//! every traceback frame of the script's own chunk (never a module's) and
+//! the location a builtin's failure is given.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -561,8 +571,9 @@ impl Modules {
     }
 }
 
-/// Where the State is: what decides which builtins may run. A module a
-/// script requires runs in the phase it was required from.
+/// Where the State is: what decides which builtins may run. A required
+/// module's chunk runs at top level whatever phase asked for it; its
+/// exported functions run in the phase that calls them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     /// A chunk's top level, the script's or a module's as `require` runs it:

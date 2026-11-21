@@ -1,3 +1,8 @@
+// The per-user home, brokkr state root and lock paths, shared by
+// `user_dirs` and the standalone `brokkr-rustc-guard`, which `include!`s
+// this file (so no inner doc comment here). The explicit-home `_at` helpers
+// let the guard's decision run on injected paths.
+
 use std::path::PathBuf;
 
 #[allow(dead_code)]

@@ -1,5 +1,12 @@
 //! Project detection from brokkr.toml at or one level above the working
 //! directory.
+//!
+//! `Project` names the built-in projects, with `Other` for the rest;
+//! `Detection` holds the shared and typed project config, and `require()`
+//! gates a command to its projects. This module also mints the distinct
+//! private `ProjectRoot` and `BuildRoot` types, which `context` requires for
+//! measurement, lock and worktree setup, so a stray path can't stand in for
+//! either root.
 
 use std::path::{Path, PathBuf};
 

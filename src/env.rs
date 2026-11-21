@@ -1,3 +1,7 @@
+//! `brokkr env`: collects host facts, tool versions, datasets and brokkr's
+//! own store sizes into one report and formats it. The host probes are
+//! `host`'s, the store observations `health`'s.
+
 use std::path::{Path, PathBuf};
 
 use crate::config::ResolvedPaths;

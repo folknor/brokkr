@@ -1,7 +1,8 @@
 //! Pretty-print hotpath profiling data from the results database.
 //!
 //! Reads the structured `HotpathData` produced by parsing the hotpath crate's
-//! JSON output, and formats it as column-aligned ASCII tables.
+//! JSON output, and formats it as column-aligned ASCII tables for the typed
+//! results views, the bench results views and row recording.
 
 use std::collections::BTreeSet;
 

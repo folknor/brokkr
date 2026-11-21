@@ -1,4 +1,17 @@
 //! Exhaustive command policy shared by dispatch, help and the manual.
+//!
+//! Each `CommandSpec` records a command's applicability, config need, lock
+//! policy, worktree selection, disk gate, default mode, run log and tool
+//! probes; `COMMANDS` lists every `CommandId` so registry checks can prove
+//! the catalogue complete. Dispatch decides `reads_only` once per invocation
+//! and feeds it to `lock_for`, `run_log_for` and tree selection, so a command
+//! that only reads (a `brokkr bench --dry-run`, or one that only lists,
+//! describes or refuses) takes no lock, writes no log and gets no tree.
+//!
+//! Applicability hides a command from `--help` but never from the parser: a
+//! hidden subcommand still parses, and dispatch refuses it from the same
+//! spec before its handler runs. Project prefixes and man topic visibility
+//! read the same specs.
 
 use crate::project::Project;
 

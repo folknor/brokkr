@@ -1,3 +1,6 @@
+//! Typed process identity: PIDs, start ticks, boot identifiers, namespace
+//! inodes, process identities and the host scope they are meaningful in.
+
 use std::num::NonZeroU32;
 
 /// A nonzero process id in the current procfs/PID-namespace view.

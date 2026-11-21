@@ -1,6 +1,7 @@
 //! Inputs and artifact identities carried by a prepared test plan, and the
 //! barrier a cargo-launched run's harnesses wait on while its build is held
-//! to that plan.
+//! to that plan. Every plan hash goes through `hash_file_at`, named by its
+//! `HashSite`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;

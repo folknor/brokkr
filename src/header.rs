@@ -5,7 +5,7 @@
 //! plain regex rule cannot express is the *dynamic* element - "the copyright
 //! year must be this year" - so it gets a dedicated feature. A file matching
 //! `paths` (minus `exempt`) must contain `pattern` with `{year}` substituted by
-//! the current UTC year. The byte substring may occur anywhere in the file;
+//! the current UTC year, from `civil_date::CivilDate`. The byte substring may occur anywhere in the file;
 //! this phase does not check its position. Missing text or a stale year fails
 //! the same check (neither contains the expanded string).
 //!

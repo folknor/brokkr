@@ -10,8 +10,7 @@ and functions behind it. "Key files" maps the modules.
 
 The harness is spread over these modules:
 
-- `src/harness.rs`: the public facade. It re-exports `BenchHarness`,
-  `BenchConfig`, `BuildIdentity`, `WallSource` and `format_cli_args`.
+- `src/harness.rs`: the public facade, re-exports only. It owns no code.
 - `src/measure.rs`: `MeasureRequest`, `MeasureMode`, `BenchHarness` and the
   `run_hotpath` and `run_external*` entry points.
 - `src/measure/execution.rs`: `MeasurementLoop` and `measure`, the iteration

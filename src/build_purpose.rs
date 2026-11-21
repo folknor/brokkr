@@ -3,7 +3,10 @@
 //! Discovery chooses targets; activation chooses sweeps; selection admits
 //! packages and projects configured features. This owner turns those inputs
 //! into the Cargo shape. Command differences are policy data, not launcher
-//! decisions. Host `features` never enter here: measured builds receive them
+//! decisions. Purpose policy owns profile defaults, feature admission and
+//! Cargo profile flags, and a sweep's profile precedence and eligibility: a
+//! `profile_required` pin a `brokkr test` flag contradicts leaves the sweep
+//! out (`eligible_sweep_profile`). Host `features` never enter here: measured builds receive them
 //! already merged into their feature list (`command_args`), and the standalone
 //! purposes (run, install, check, clippy, test, crit) do not inherit them -
 //! the host feature policy in `docs/brokkr.toml.md`. Computed `[cargo_env]`

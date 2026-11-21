@@ -1,3 +1,9 @@
+// The serial `cargo test` lane and what surrounds it: sweep shape
+// descriptions, `build_packages` support builds and their fingerprint, the
+// harness-shim fallback, and the `BuildVerifier` that holds the run's own
+// artifact stream to the plan and settles the shim's build gate.
+// `test_execution_tests.rs` has the check command's extracted tests.
+
 /// The feature-shape fragment of [`describe_sweep`], read back out of the
 /// feature argv a request hands cargo (its projection, not the configured
 /// list) so it can never drift from what cargo is actually handed.

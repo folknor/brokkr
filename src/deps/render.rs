@@ -1,3 +1,5 @@
+//! Text and NDJSON renderers for `brokkr deps` events.
+
 use super::DepsEvent;
 use super::ccu::{OutdatedEvent, StaleEvent};
 use super::duplicate_version::DuplicateVersionEvent;

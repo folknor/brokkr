@@ -1,3 +1,7 @@
+// The clippy and rustdoc cargo runs: their arguments, diagnostic
+// attribution, merging, rendering and failure excerpts. `check` and
+// `brokkr clippy` both run through here.
+
 fn clippy_args(sweep: &PlannedSweep, run: &ResolutionRun, lints: &LintsConfig) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "clippy".into(),

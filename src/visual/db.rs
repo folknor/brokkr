@@ -1,4 +1,10 @@
-//! Shared SQLite operations for the two visual result stores.
+//! Shared SQLite operations for the two visual result stores,
+//! `.brokkr/litehtml-visual.db` and `.brokkr/sluggrs-visual.db`.
+//!
+//! `visual` and `approve` open a store read-write ([`VisualDb::open`]); the
+//! query commands open it read-only. The first open imports the subject's
+//! legacy tables from `results.db` once, recorded in `brokkr_imports`, and
+//! leaves the legacy tables in place.
 
 use std::path::{Path, PathBuf};
 

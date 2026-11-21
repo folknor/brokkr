@@ -19,6 +19,27 @@
 //!
 //! Patterns are compiled with the linear-time `regex` crate (no backtracking),
 //! so an author-supplied pattern cannot hang the phase.
+//!
+//! `test_code` scoping goes through `lex::mask_line_by` per rule, composing
+//! with `region`: `skip` blanks test-only bytes, `only` blanks everything
+//! outside the test selection, and an `only` rule refuses a file whose
+//! selection depends on an unresolved bare `#[test]`. `must_scan` admission
+//! counts a file only at an eligible line holding real content, which under
+//! `test_code` is code in scope. The `test_code` classifier runs only when a
+//! rule with a `test_code` scope applies to a tracked `.rs` file.
+//!
+//! `Selection` judges a rule's selectors by path: each `paths` glob's
+//! liveness from `GlobSet::matches` indices, the survivors by the scanner's
+//! own `applies`, presence asked only of matched paths. It is the one
+//! definition behind the audit's textlint findings and behind
+//! `require_live_paths`, whose failures are `DeadScope` entries.
+//!
+//! A classifier failure or refusal is returned in
+//! `TextlintScan::classifier_error`, not as the scan's error. `Withheld`
+//! names the (rule, file) pairs left undecidable: every `test_code` rule's
+//! Rust files on a failure, the named pairs on a refusal. The scan judges
+//! every other pair, and the phase prints those findings, then fails with
+//! that error.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

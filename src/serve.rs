@@ -8,6 +8,15 @@
 //! generation is a bench-lock: every measurement refuses while one is
 //! outstanding ([`refuse_measurement`]), every other locked command only
 //! warns ([`warn_if_live`]), and listing and stopping take no lock at all.
+//! The snapshots are linked into the generation directory
+//! `.brokkr/serve/NAME.TOKEN/` under the state root.
+//!
+//! Every reader that acts on the registry reconciles it first: a free entry
+//! is SIGKILLed down by carrier scan and retired once none is left, an entry
+//! from a positively earlier boot retires unscanned, and another namespace's
+//! entry, or one whose scope can't be read, is unknown and blocks
+//! (`registry::scope_of`). [`lock_report`] and [`kill_report`] are the
+//! `brokkr lock` and `brokkr kill` lines.
 //!
 //! # What is guaranteed
 //!

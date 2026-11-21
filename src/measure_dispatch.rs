@@ -1,4 +1,6 @@
-//! Shared mode dispatch for the small benchmark adapters.
+//! Shared mode dispatch for the small benchmark adapters (mogwai and
+//! sluggrs): the profiled-versus-measured split and profiler narration. Each
+//! adapter keeps its own build and harness calls.
 
 use crate::error::DevError;
 use crate::measure::MeasureRequest;

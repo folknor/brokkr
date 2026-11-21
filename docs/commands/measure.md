@@ -70,10 +70,6 @@ measurement loop:
   or invalid profile JSON fails that iteration.
 - **Instrumented builds.** No command accepts `--hotpath` or `--alloc` and
   runs a plain child: the build adds the mode's instrumentation feature.
-
-How the loop, recording and capture are built is in
-`reference/measure-harness.md`.
-
 No harness records a distribution (min, p50, p95, max); the retired nidhogg
 `api` bench was its only producer. Its stored rows keep reading (`brokkr man
 results`), from `run_distribution`'s `*_us` columns where they exist and its

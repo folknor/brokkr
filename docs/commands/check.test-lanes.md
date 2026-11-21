@@ -33,10 +33,6 @@ The test phase runs after clippy, one lane per selected sweep:
   are absent from a red run.
 - **Warnings** from a passing sweep and its pre-builds are filtered by owner
   (a path dependency outside the workspace prints nothing) and printed once.
-
-How harness isolation works, and the failure-roster rules, are in
-`reference/check-internals.md`.
-
 ### Build errors
 
 When a test sweep dies building (no `test result:` lines, compile errors on
@@ -515,11 +511,6 @@ A complete run is green only when all of these hold:
 
 `ignored` and `interrupted` both fail it. Exit codes are unchanged: a fired
 ceiling exits 124, an interrupt 130.
-
-The identities (binary unit, pair, execution), the build, inventory and policy
-passes, the outcome evidence table, the anomaly list and the doctest carrier
-rules are in `reference/check-internals.md`.
-
 ### Policy coverage
 
 Classification reads the plan: a shape resolution's selection is the union of
@@ -669,10 +660,7 @@ inventory has three degraded states:
 
 Outside a complete claim, brokkr records preparation failures and the lane
 runs as it always does. A `harness = false` target in a partial profile's
-serial lane is never executed to ask for a listing. The inventory rules,
-preparation costs and `brokkr test`'s per-sweep recheck are in
-`reference/check-internals.md`.
-
+serial lane is never executed to ask for a listing.
 ### Report
 
 On the final reporting path, after the failure verdict and before the `--json`

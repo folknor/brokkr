@@ -1033,7 +1033,7 @@ that sets it, to `r.hotpath` say, gets it rendered beside the record.
 `read(h)` returns the whole file a handle names, `filesize(h)` its size in
 bytes, and `write(h, data)` replaces an output's file with the string
 `data`. brokkr admits each as it would admit a call reading or writing the
-handle (`reference/bench-resources.md`, brokkr's own file access). It
+handle. It
 refuses a file a child turned into a link out of what the iteration holds,
 or onto an input for `write`, and opens the file without following a link.
 
@@ -1175,8 +1175,7 @@ Each iteration owns one directory,
 - the children's stdout and stderr spools
 - the marked calls' hotpath reports
 
-The directory follows the resource protocol in
-`reference/bench-resources.md`. brokkr removes it when the iteration ends,
+brokkr removes it when the iteration ends,
 and removes one a crash left behind once nothing that inherited its
 reservation is still running. Its outputs and scratch go to that configured
 drive.

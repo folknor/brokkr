@@ -1,8 +1,12 @@
 //! Shared parsing and classification for rustc-shaped text.
 //!
-//! The text splitter is used for script-check failure excerpts, manifest-lint
-//! discovery, and failed cargo reports. Keeping header recognition and
-//! summary classification here gives those readers one definition of a block.
+//! `rustc_blocks` opens a block at each column-zero `error` or `warning`
+//! header, and `classify_block`, `classify_line` and `classify_diagnostic`
+//! sort a block into finding, failure summary, cargo status (warning
+//! tallies, `build failed`) or progress. Script-check failure excerpts,
+//! `cargo_json`'s summary filter and manifest-lint discovery, `cargo_filter`
+//! and `check`'s failed-run reports all read through here, so they share one
+//! definition of a diagnostic.
 
 /// The severity of a rustc-shaped diagnostic block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

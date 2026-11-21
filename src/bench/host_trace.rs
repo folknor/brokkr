@@ -7,6 +7,12 @@
 //! invocations. The device is the block device holding the iteration
 //! container, resolved through sysfs; counters are cumulative and only a
 //! reader derives deltas, never across a boot or a device instance change.
+//!
+//! A [`Sampler`] thread reads between the readings taken before `bench()`
+//! and after it, under the run-wide [`RUN_READINGS`] budget. The cursor is
+//! written in progress at an iteration's start and ended after its release.
+//! The reader's derivations, [`window`] and [`gap`], live here so
+//! `brokkr results` and the sidecar phase views derive them alike.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};

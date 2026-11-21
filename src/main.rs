@@ -1,3 +1,8 @@
+//! The `brokkr` binary: module declarations and `main`. Startup lives in
+//! `main_parts::bootstrap`, dispatch in `main_parts::dispatch`. The
+//! `brokkr-rustc-guard` and `brokkr-results-server` bins beside it include
+//! the shared sources they need by path; there is no workspace.
+
 mod artefacts;
 mod atomic_write;
 mod bench;

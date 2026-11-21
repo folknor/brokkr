@@ -1,4 +1,8 @@
-// Convention scans and their findings; cargo diagnostic execution lives elsewhere.
+//! The convention phases' orchestration: the scans over one working-tree
+//! snapshot, finding blocks, script-check failure rendering, and the
+//! selector hygiene only `check --audit` reports (`selector_findings`). The
+//! scanners themselves live in their own crate modules; cargo diagnostics
+//! live in `diagnostics.rs`.
 
 use super::{Phase, cargo_line, fmt_wall, phase_inert, phase_ok, phase_time_left};
 use crate::config::{

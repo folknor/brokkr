@@ -43,6 +43,16 @@
 //! Brokkr adds to rustdocflags twice: the rustdoc phase's lint-only `--check`
 //! (`rustdoc_check.rs`), and the `--cfg` / `--check-cfg` entries of a sweep's
 //! `rustflags` ([`cfg_args`]), which cargo never hands to rustdoc on its own.
+//!
+//! The target layer is chosen only when it is live for every configured
+//! triple; an ambient cross triple decides only platform-free selectors.
+//! Each directory's file is the one cargo's own probe picks
+//! ([`selected_config_file`], shared by `guard`, `crit`'s stamp and
+//! `strip_rustflags`). The module also owns the launch-side reads of the same
+//! chain: [`EffectiveEnv`] (a launch's env over brokkr's own),
+//! [`CargoLaunchConfig`] (one parse for runners, `build.target`, rustdoc,
+//! `build-dir` and `[env]`) and [`effective_rustflags`] (the flags a host
+//! build gets and the source that won, for build provenance).
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};

@@ -1,4 +1,6 @@
-//! Time bounds for test execution, from inner clocks to outer watchdogs.
+//! Time bounds for test execution, from inner clocks to outer watchdogs:
+//! every bound from the per-test cap to the check ceiling, with compile-time
+//! assertions that each inner bound expires before the next outer one.
 use std::time::Duration;
 
 /// Hard per-test cap. Lost lifecycle events may blur attribution but never

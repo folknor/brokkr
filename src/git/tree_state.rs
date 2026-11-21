@@ -1,5 +1,14 @@
 //! One parsed view of a checkout's porcelain status, with named answers for
 //! the different questions callers ask about its changes.
+//!
+//! One NUL-safe `git status --porcelain=v1 -z` parse answers measurement
+//! cleanliness, install's stamp, worktree reuse and deletion, check's
+//! prose-only test and its unstaged diagnostic priority. brokkr's own edits
+//! are recognized, not counted as dirt: toolchain sidecar names come from
+//! `toolchain::moved_paths`, and a filtered cargo config is exempt only when
+//! `cargo_config_strip::verifies` it as brokkr's untouched install over an
+//! original equal to `HEAD`. Approved sluggrs images are recognized by
+//! sluggrs' writer-owned layout helper.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

@@ -1,4 +1,18 @@
-// Sweep selection and the shared ad-hoc environment policy.
+//! Check and clippy sweep activation, effective profile selection and the
+//! shared ad-hoc environment merge.
+//!
+//! `check` takes the first rung of this ladder that applies:
+//!
+//! 1. `--features` or `--no-default-features`: one ad-hoc sweep. It keeps a
+//!    resolved profile's run shaping and the union of every `[[check]]`
+//!    entry's `env`.
+//! 2. `--profile NAME` or `[test] default_profile`: the profile's sweeps.
+//! 3. `[[check]]` entries and no profile: every entry, in declaration order.
+//! 4. Nothing configured: one `--all-features` sweep.
+//!
+//! `brokkr clippy` is always ad-hoc unless `--sweep NAME` names a
+//! `[[check]]` or `[[lint_sweep]]` entry. The ad-hoc env union reads
+//! `[[check]]` entries only.
 
 use crate::config::{CheckEntry, LintSweep, TestConfig};
 use crate::error::DevError;

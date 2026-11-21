@@ -1,3 +1,6 @@
+//! The resolved requests of the `results` and `sidecar` commands
+//! ([`ResultsQuery`], [`SidecarQuery`]), built from the parsed CLI.
+
 use std::path::Path;
 
 use crate::config::project_config::ratatoskr::RatatoskrConfig;

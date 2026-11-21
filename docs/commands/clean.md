@@ -128,8 +128,7 @@ Bare `brokkr clean` removes these, in order:
 - **Leases**: in every project, first. Clean reclaims every free lease in
   the launch lease store with its private directory, wherever that sits,
   including a script-bench iteration's unless a borrow of it is still held.
-  It names each lease it keeps and why (the ownership protocol is in
-  `reference/bench-resources.md`). Script-bench iterations live under
+  It names each lease it keeps and why. Script-bench iterations live under
   `bench-iterations/` under the host's scratch, which clean never removes by
   name.
 - **Scratch**: its shape differs per project, as described after this list.

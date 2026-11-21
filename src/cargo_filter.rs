@@ -9,7 +9,9 @@
 //! rendered diagnostics.
 //!
 //! Both the cargo JSON reader and this text reader produce the shared
-//! [`Diagnostic`] model.
+//! [`Diagnostic`] model, and a caller with an `OwnerIndex` gets the same
+//! dependency-warning rule. Check's own test and support builds read cargo
+//! JSON instead.
 
 #[cfg(test)]
 use std::path::Path;
