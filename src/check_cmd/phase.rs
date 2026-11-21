@@ -1011,9 +1011,11 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
         doctests: a.doctests,
         universe_selectors: &universe_selectors,
     };
-    // Two steps: every lane built (target-dir chains, concurrent), then every
-    // lane listed one at a time with nothing compiling. The background
-    // script checks may compile, so they are joined in between.
+    // Two steps: every lane warmed (target-dir chains, concurrent, nothing
+    // hashed), then every lane built again alone - usually a no-op, though it
+    // relinks where a later build replaced its files or a build script reruns
+    // - hashed straight after, and listed, with nothing else compiling. The
+    // background script checks may compile, so they are joined in between.
     let builds = build_profile(&inputs, a.tested(), &a.selections.test, a.extra_args, a.serial_builds);
     a.background.join()?;
     let mut preparer = CargoPreparer::new(inputs, a.extra_args, builds);

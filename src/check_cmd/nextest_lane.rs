@@ -304,8 +304,9 @@ struct NextestArtifacts {
 
 /// Read the engine lane's artifact stream: the units the engine's ids map
 /// onto, the executables the plan hashes, and the runtime fingerprint
-/// verification needs.
-fn nextest_lane_artifacts(stdout: &str) -> Result<NextestArtifacts, DevError> {
+/// verification needs, with each support bin's digest from `digests` (the
+/// lane's snapshot on the checked route).
+fn nextest_lane_artifacts(stdout: &str, digests: crate::check_cmd::Digests<'_>) -> Result<NextestArtifacts, DevError> {
     let (binaries, index, _) = parse_test_binaries(stdout);
     let by_id = binaries
         .iter()
@@ -314,7 +315,9 @@ fn nextest_lane_artifacts(stdout: &str) -> Result<NextestArtifacts, DevError> {
             (u.id(), u)
         })
         .collect();
-    let runtime_fingerprint = Some(index.fingerprint()?);
+    let runtime_fingerprint = Some(
+        index.fingerprint_with(&mut |exe| digests.of(exe, crate::test_runner::HashSite::RuntimeIndex))?,
+    );
     Ok(NextestArtifacts { binaries, by_id, runtime_fingerprint })
 }
 
@@ -328,7 +331,7 @@ fn prepare_nextest(
     env: &LaneEnv,
 ) -> Result<PreparedLane, DevError> {
     let built = build_nextest(inputs, sweep, attempt, extra_args, env)?;
-    assemble_nextest_lane(inputs, sweep, built.selection.clone(), env, &built.as_build())
+    assemble_nextest_lane(inputs, sweep, built.selection.clone(), env, &built.as_build(), crate::check_cmd::Digests::READ)
         .inspect_err(|e| report_certifying_failure(inputs, sweep, attempt, e))
 }
 
@@ -545,6 +548,7 @@ pub(crate) fn assemble_nextest_lane(
     selection: Vec<String>,
     env: &LaneEnv,
     build: &NextestBuild<'_>,
+    digests: crate::check_cmd::Digests<'_>,
 ) -> Result<PreparedLane, DevError> {
     let label = sweep.label.as_str();
     let env_refs = env.refs();
@@ -570,7 +574,7 @@ pub(crate) fn assemble_nextest_lane(
     let binary_list = std::sync::Arc::new(builder.finish());
     // The same stream, read as brokkr's artifact index: the units the engine's
     // ids are mapped onto, and the executables the plan hashes.
-    let artifacts = nextest_lane_artifacts(stdout)?;
+    let artifacts = nextest_lane_artifacts(stdout, digests)?;
     let lane_binaries = artifacts.binaries;
     let by_id = artifacts.by_id;
 
@@ -705,8 +709,7 @@ pub(crate) fn assemble_nextest_lane(
         // in the shape's universe, audited as not run.
         let unit = BinaryUnit::of(b);
         let (names, ignored) = selected.remove(&unit).unwrap_or_default();
-        let hash = crate::test_runner::hash_file_at(crate::test_runner::HashSite::Nextest, Path::new(&b.executable))
-            .map_err(|e| DevError::Build(format!("could not hash {}: {e}", b.executable)))?;
+        let hash = digests.of(&b.executable, crate::test_runner::HashSite::Nextest)?;
         // No benchmarks: the engine never runs `#[bench]` functions in test mode.
         binaries.push(PreparedBinary {
             binary: b.clone(),
@@ -1259,7 +1262,7 @@ mod nextest_lane_tests {
             ),
             r#"{"reason":"build-finished","success":true}"#,
         );
-        let art = nextest_lane_artifacts(&stdout).unwrap();
+        let art = nextest_lane_artifacts(&stdout, crate::check_cmd::Digests::READ).unwrap();
         let fp = art.runtime_fingerprint.clone().unwrap();
         assert!(fp.iter().any(|l| l.starts_with("bin ") && l.contains("servebin")), "{fp:?}");
         assert_eq!(art.binaries.len(), 1);
@@ -1445,6 +1448,7 @@ mod nextest_lane_tests {
                     // One second: the cap the synthesized config carries.
                     ceiling: std::time::Duration::from_secs(1),
                 },
+                crate::check_cmd::Digests::READ,
             )
             .unwrap()
         };
@@ -1531,6 +1535,7 @@ mod nextest_lane_tests {
                     build_platforms: build_platforms(&root, &[], None).unwrap(),
                     ceiling: std::time::Duration::from_secs(1),
                 },
+                crate::check_cmd::Digests::READ,
             )
             .err()
             .map(|e| e.to_string())

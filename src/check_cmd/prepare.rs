@@ -433,7 +433,7 @@ pub(crate) struct PreparedLane {
     /// The executables the lane runs or hands its tests, as the plan saw them
     /// (link-search dylibs are not among them - no artifact stream names one):
     /// test executables, runtime `CARGO_BIN_EXE_*` bins, support bins. Set on
-    /// a lane listed from the prepare phase's build step; a direct lane whose
+    /// a lane listed from its authoritative build ([`CargoPreparer`]); a direct lane whose
     /// files all still match runs without a cargo invocation.
     pub(crate) snapshot: Option<Snapshot>,
     /// Set when preparing this lane failed outside a certifying claim: what
@@ -799,7 +799,7 @@ pub(crate) fn prepare_lane(
 }
 
 /// [`prepare_lane`], listing `prebuilt` when the lane's shape was already
-/// built (the prepare phase's build step) instead of building it here, its
+/// built (its authoritative build, [`CargoPreparer`]) instead of building it here, its
 /// digests taken from `digests`.
 fn prepare_lane_from(
     inputs: &LaneInputs<'_>,
@@ -814,7 +814,7 @@ fn prepare_lane_from(
     let kind = lane_kind(sweep);
     let mut prepared = match (kind, prebuilt) {
         (LaneKind::Nextest, Some(ShapeBuild::Nextest(built))) => {
-            assemble_nextest_lane(inputs, sweep, built.selection.clone(), &env, &built.as_build())
+            assemble_nextest_lane(inputs, sweep, built.selection.clone(), &env, &built.as_build(), digests)
                 .inspect_err(|e| report_certifying_failure(inputs, sweep, attempt, e))?
         }
         (LaneKind::Nextest, _) => prepare_nextest(inputs, sweep, attempt, extra_args, &env)?,
@@ -1809,9 +1809,9 @@ pub(crate) fn snapshot_drift(snapshot: &Snapshot) -> Result<Vec<String>, DevErro
         .collect())
 }
 
-/// The most files hashed at once, across the whole process: the build step
-/// runs one chain per target dir concurrently, and each chain's snapshot
-/// draws on this one budget rather than bringing its own.
+/// The most files hashed at once, across the whole process: every snapshot
+/// or recheck, whoever takes it, draws on this one budget rather than
+/// bringing its own.
 fn hash_readers() -> &'static (std::sync::Mutex<usize>, std::sync::Condvar) {
     static READERS: std::sync::OnceLock<(std::sync::Mutex<usize>, std::sync::Condvar)> =
         std::sync::OnceLock::new();
@@ -1879,7 +1879,7 @@ fn hash_all(paths: &[String], site: HashSite) -> Result<Vec<std::io::Result<Stri
 
 /// Where a lane's preparation takes the content digests its inventory and
 /// runtime fingerprint record. On the checked route ([`CargoPreparer::lane`])
-/// they come from the lane's snapshot, which was checked just before listing
+/// they come from the lane's snapshot, which was read just before listing
 /// and is checked again after it before the inventory is accepted, so a
 /// digest read between the two would be the same observation read twice. A
 /// path outside the snapshot there is a plan whose inventory and
@@ -1897,7 +1897,7 @@ impl<'a> Digests<'a> {
         Self { known: Some(snapshot) }
     }
 
-    fn of(&self, path: &str, site: HashSite) -> Result<String, DevError> {
+    pub(crate) fn of(&self, path: &str, site: HashSite) -> Result<String, DevError> {
         match self.known {
             Some(snapshot) => snapshot
                 .binary_search_by(|(p, _)| p.as_str().cmp(path))
@@ -1909,39 +1909,43 @@ impl<'a> Digests<'a> {
     }
 }
 
-/// One lane's products from the prepare phase's build step.
+/// One lane's build: the build step's warm-up, or the authoritative build the
+/// listing step makes just before it lists.
 pub(crate) struct LaneBuild {
     support: Vec<SupportArtifact>,
     /// `None` for a lane with nothing to compile here (a doc-only lane, a
     /// serial lane whose harnesses cannot be attributed).
     shape: Option<ShapeBuild>,
     /// The executables the lane runs or hands its tests, hashed straight after
-    /// the lane's own build - before the next build in its target dir.
+    /// the lane's authoritative build, with nothing run between that build
+    /// and the read. Empty for a warm-up build, which is never listed.
     snapshot: Snapshot,
 }
 
-/// Universe builds by (shape, resolution), each with its snapshot.
-type UniverseBuilds = HashMap<(ShapeId, Resolution), (UniverseBuilt, Snapshot)>;
+/// The universe keys the build step already warmed, so two lanes of one
+/// shape warm it once.
+type UniverseWarmed = std::collections::HashSet<(ShapeId, Resolution)>;
 
 /// What the build step produced, consumed by the listing step's preparer.
 #[derive(Default)]
 pub(crate) struct ProfileBuilds {
-    /// By sweep label: the build, or why it failed, with the errors its
-    /// attempt held back (replayed when the lane is prepared).
+    /// By sweep label: the warm-up build, or why it failed, with the errors
+    /// its attempt held back (replayed when the lane is prepared).
     lanes: HashMap<String, (Result<LaneBuild, DevError>, Vec<String>)>,
-    /// By (shape, resolution): a universe build and its snapshot.
-    universes: UniverseBuilds,
 }
 
-/// The prepare phase's build step: every attempted lane's universe builds
-/// (under a certifying claim), support builds and shape build, with the
-/// snapshot of what each produced. One chain per target directory, the chains
-/// concurrent ([`run_grouped`]). Nothing is listed or executed here, so the
-/// listing deadline never runs beside a compile.
+/// The prepare phase's build step, a warm-up: every attempted lane's
+/// universe builds (under a certifying claim), support builds and shape
+/// build, one chain per target directory, the chains concurrent
+/// ([`run_grouped`]), so the compile work runs in parallel. Nothing is
+/// hashed, listed or executed here: the listing step rebuilds each lane
+/// (a no-op on what this step left) immediately before it hashes and lists
+/// it, so that read is both the lane's own-build record and its pre-listing
+/// observation, and the listing deadline never runs beside a compile.
 ///
 /// A failure is kept for its lane, not raised: the listing step reports it
-/// where it reports every other preparation failure. Only a stop ends a
-/// chain early.
+/// where it reports every other preparation failure, and does not build that
+/// lane again. Only a stop ends a chain early.
 pub(crate) fn build_profile(
     inputs: &LaneInputs<'_>,
     sweeps: &[PlannedSweep],
@@ -1955,7 +1959,7 @@ pub(crate) fn build_profile(
         .filter(|(i, _)| selection.attempt(LaneIdx::new(*i)).is_some())
         .map(|(i, s)| (i, target_dir_key(s, inputs.target_dir)))
         .collect();
-    let universes: std::sync::Mutex<UniverseBuilds> = std::sync::Mutex::new(HashMap::new());
+    let universes: std::sync::Mutex<UniverseWarmed> = std::sync::Mutex::new(UniverseWarmed::new());
     let outcomes = run_grouped(&keyed, serial_builds, &|i| {
         let sweep = &sweeps[i];
         let Some(attempt) = selection.attempt(LaneIdx::new(i)) else {
@@ -1967,10 +1971,7 @@ pub(crate) fn build_profile(
         }
         Ok((built, held))
     });
-    let mut out = ProfileBuilds {
-        universes: universes.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner),
-        ..ProfileBuilds::default()
-    };
+    let mut out = ProfileBuilds::default();
     for (i, outcome) in outcomes {
         if let Some(Ok(entry)) = outcome {
             out.lanes.insert(sweeps[i].label.clone(), entry);
@@ -1979,16 +1980,19 @@ pub(crate) fn build_profile(
     out
 }
 
-/// One lane's build step, in the order its verification will see: universe
-/// builds first (so the lane's snapshot is taken after them), then support
-/// builds, then the shape.
+/// One lane's build: support builds, then the shape. With `warm_universes`
+/// it is the build step's warm-up - the lane's universe builds first, and no
+/// snapshot, since nothing lists what a warm-up left. Without, it is the
+/// listing step's authoritative build, and its snapshot is read straight
+/// after it.
 fn build_lane(
     inputs: &LaneInputs<'_>,
     sweep: &PlannedSweep,
     attempt: &Attempt,
     extra_args: &[String],
-    universes: Option<&std::sync::Mutex<UniverseBuilds>>,
+    warm_universes: Option<&std::sync::Mutex<UniverseWarmed>>,
 ) -> Result<LaneBuild, DevError> {
+    let universes = warm_universes;
     refuse_target_sweep_args(sweep, &ForwardedArgs::parse(extra_args))?;
     let env = lane_env(inputs, sweep)?;
     let kind = lane_kind(sweep);
@@ -1999,16 +2003,12 @@ fn build_lane(
         let shape = shape_id(sweep);
         for run in attempt.runs() {
             let key = (shape.clone(), Resolution::from_option(run.resolution.as_deref()));
-            let known = universes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(&key);
-            if known {
+            if !universes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key) {
                 continue;
             }
-            // A universe that will not build is enumerated again, and its
-            // failure reported, by the listing step.
-            if let Ok(built) = build_universe(inputs, sweep, run, &env) {
-                let snapshot = take_snapshot(built.tracked_paths())?;
-                universes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, (built, snapshot));
-            }
+            // Warm-up only: the listing step builds the universe again right
+            // before it lists it, and reports a failure there.
+            drop(build_universe(inputs, sweep, run, &env));
         }
     }
     let mut support = Vec::new();
@@ -2037,16 +2037,20 @@ fn build_lane(
             build_serial(inputs, sweep, attempt, extra_args, &env)?.ok_or_else(|| not_prepared(sweep))?,
         )),
     };
-    let mut paths: Vec<String> = support.iter().map(|a| a.executable.clone()).collect();
-    if let Some(s) = &shape {
-        paths.extend(s.tracked_paths());
-    }
-    let snapshot = take_snapshot(paths)?;
+    let snapshot = if warm_universes.is_some() {
+        Snapshot::new()
+    } else {
+        let mut paths: Vec<String> = support.iter().map(|a| a.executable.clone()).collect();
+        if let Some(s) = &shape {
+            paths.extend(s.tracked_paths());
+        }
+        take_snapshot(paths)?
+    };
     Ok(LaneBuild { support, shape, snapshot })
 }
 
-/// The real preparer: cargo, listings, hashes. Lists what the build step
-/// built ([`build_profile`]), and builds only what it has no build for.
+/// The real preparer: cargo, listings, hashes. Builds each lane again right
+/// before listing it, over what the build step warmed ([`build_profile`]).
 pub(crate) struct CargoPreparer<'a> {
     pub(crate) inputs: LaneInputs<'a>,
     /// The forwarded `-- …` args, which narrow what a lane selects and so
@@ -2072,33 +2076,23 @@ impl Preparer for CargoPreparer<'_> {
             .runs_ignored_with(libtest_extra.iter().map(String::as_str))
     }
 
-    /// Hand over the lane's build - the build step's, or a fresh one when it
-    /// has none or a later build in its target dir replaced its files in
-    /// place - and its support executables. Every fact of what `lane` then
-    /// lists comes from this one build.
+    /// Hand over the lane's authoritative build and its support executables:
+    /// built now, with nothing else running, and hashed straight after, so
+    /// its snapshot is both the lane's own-build record and the observation
+    /// just before listing. On what the build step left it is a no-op build
+    /// that re-uplifts whatever a later build in the target dir replaced.
+    /// Every fact of what `lane` then lists comes from this one build. A lane
+    /// whose warm-up build failed reports that failure and is not built again.
     fn support(&mut self, sweep: &PlannedSweep, attempt: &Attempt) -> Result<Vec<SupportArtifact>, DevError> {
-        let built = match self.builds.lanes.remove(&sweep.label) {
-            Some((built, held)) => {
-                // What the build step's attempt would have printed, printed
-                // now - where this lane's preparation is reported.
-                for line in &held {
-                    output::error(line);
-                }
-                built?
+        if let Some((warmed, held)) = self.builds.lanes.remove(&sweep.label) {
+            // What the build step's attempt would have printed, printed
+            // now - where this lane's preparation is reported.
+            for line in &held {
+                output::error(line);
             }
-            None => build_lane(&self.inputs, sweep, attempt, self.extra_args, None)?,
-        };
-        let drift = snapshot_drift(&built.snapshot)?;
-        let built = if drift.is_empty() {
-            built
-        } else {
-            output::detail(&format!(
-                "prepare: sweep '{}': rebuilt before listing - {}",
-                sweep.label,
-                drift.join("; ")
-            ));
-            build_lane(&self.inputs, sweep, attempt, self.extra_args, None)?
-        };
+            warmed?;
+        }
+        let built = build_lane(&self.inputs, sweep, attempt, self.extra_args, None)?;
         let support = built.support.clone();
         self.pending = Some((sweep.label.clone(), built));
         Ok(support)
@@ -2114,7 +2108,7 @@ impl Preparer for CargoPreparer<'_> {
                 sweep.label
             )));
         }
-        // The inventory's digests are the snapshot's: it was checked just
+        // The inventory's digests are the snapshot's: it was read just
         // before listing and is checked again below before the inventory is
         // accepted, so reading the files in between would observe them twice.
         let mut prepared = prepare_lane_from(
@@ -2141,21 +2135,11 @@ impl Preparer for CargoPreparer<'_> {
     }
 
     fn universe(&mut self, sweep: &PlannedSweep, run: &ResolutionRun, env: &LaneEnv) -> Result<Universe, DevError> {
-        let key = (shape_id(sweep), Resolution::from_option(run.resolution.as_deref()));
-        let held = match self.builds.universes.remove(&key) {
-            Some((built, snapshot)) if snapshot_drift(&snapshot)?.is_empty() => Some((built, snapshot)),
-            _ => None,
-        };
-        let (built, snapshot) = match held {
-            Some(held) => held,
-            // No build-step build, or one replaced since: build it now (alone,
-            // nothing else compiles here) and list that.
-            None => {
-                let built = build_universe(&self.inputs, sweep, run, env)?;
-                let snapshot = take_snapshot(built.tracked_paths())?;
-                (built, snapshot)
-            }
-        };
+        // Built now, alone, and hashed straight after: the snapshot is the
+        // universe's own-build record and its pre-listing observation, as a
+        // lane's is (`support`). The build step only warmed it.
+        let built = build_universe(&self.inputs, sweep, run, env)?;
+        let snapshot = take_snapshot(built.tracked_paths())?;
         let universe = list_universe(&self.inputs, sweep, env, built)?;
         let changed = snapshot_drift(&snapshot)?;
         if !changed.is_empty() {
@@ -2282,11 +2266,16 @@ pub(crate) fn prepare_profile(
         };
 
         // Support executables are fingerprinted after the lane's own build,
-        // the order the lane's verification repeats.
+        // the order the lane's verification repeats - from the lane's
+        // snapshot where it has one, which was read after that build and
+        // accepted after the listings, so the plan never records a later read.
         let attempt = |preparer: &mut dyn Preparer| {
             preparer.support(sweep, lane_attempt).and_then(|support| {
                 let mut prepared = preparer.lane(sweep, lane_attempt)?;
-                prepared.support_fingerprint = support_fingerprint(&support)?;
+                let digests = prepared.snapshot.as_ref().map_or(Digests::READ, Digests::from_snapshot);
+                let fingerprint =
+                    support_fingerprint_with(&support, &mut |exe| digests.of(exe, HashSite::Support))?;
+                prepared.support_fingerprint = fingerprint;
                 prepared.support = support;
                 Ok(prepared)
             })

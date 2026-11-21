@@ -1477,26 +1477,37 @@ and policy passes in `prepare_profile` (`src/check_cmd/prepare.rs`), because
 a listing is binary execution under the same 20s wall limit as a test and
 must never share the machine with a compile:
 
-1. **Build.** Every attempted lane's builds - under a complete claim its
-   universe builds first, then its `build_packages` support builds, then its
-   shape - grouped by target directory as the clippy phase is: one chain per
-   directory in configured order, the chains concurrent. Straight after each
-   lane's builds, before the next build in its directory, the executables the
-   lane runs or hands its tests are hashed - test executables, the runtime
+1. **Build (warm-up).** Every attempted lane's builds - under a complete claim
+   its universe builds first, then its `build_packages` support builds, then
+   its shape - grouped by target directory as the clippy phase is: one chain
+   per directory in configured order, the chains concurrent, so the compile
+   work runs in parallel. Nothing is hashed, listed or executed in this step.
+   A lane whose build fails here is reported in step 2 and not built again.
+   The `background` script checks are joined at its end.
+2. **Inventory.** Lane by lane in configured order, nothing else running. Each
+   lane is built again, alone, with its support builds - usually a no-op on
+   what step 1 left, though it re-uplifts or relinks whatever a later build in
+   its directory replaced in place, and recompiles where a build script reruns
+   on every build - and straight after that build the executables the lane runs or
+   hands its tests are hashed: test executables, the runtime
    `CARGO_BIN_EXE_*` bins, the support executables. That is the lane's
-   **snapshot**. A dylib a build script placed in a link-search directory is
-   not in it, as no artifact stream names one (the same limit the rebuild
-   comparison below has). Nothing is listed or executed in this step. The `background`
-   script checks are joined at its end.
-2. **Inventory.** Lane by lane in configured order, nothing compiling. A lane whose
-   snapshot still holds is listed from its step-1 build; one that a later build
-   in its directory replaced in place - or that has no step-1 build - is built
-   again, alone, with its support builds, and listed from that build under a
-   fresh snapshot, so every fact of the plan (support executables included)
-   comes from the one build it is listed from. The snapshot is checked again
-   after the listings, whichever build it came from: a file that changed
-   while the lane's own binaries were being listed fails the lane, since its
-   inventory would describe other binaries than the ones it runs. Each lane
+   **snapshot**, both the record of the lane's own build and the observation
+   just before its listings, since brokkr runs nothing between that build and
+   the read. A dylib a build script placed in a link-search directory is not
+   in it, as no artifact stream names one (the same limit the rebuild
+   comparison below has). Every fact of the plan (support executables
+   included) comes from the one build it is listed from. The snapshot is
+   checked again after the listings: a file that changed while the lane's own
+   binaries were being listed fails the lane, since its inventory would
+   describe other binaries than the ones it runs. Hashing only after the
+   listings, or only at lane entry, would not do: a file an earlier lane's
+   listing replaced, and this lane's listing restored, would pass both while
+   the inventory came from other bytes. Because the authoritative builds run
+   one after another, a later lane's build can still replace an earlier
+   accepted lane's file (a build script writing outside its own outputs, or a
+   shared uplift path), and so can step 3's universe builds; the lane-entry
+   check finds that, and a lane whose build is not reproducible then fails a
+   complete claim. Each lane
    ends this pass with one inventory disposition: `prepared` (including any
    unlistable binaries), `skipped`, `unavailable`, or `doc_tests` for a
    doctest-only lane. A skipped lane has no selected executions, and an
@@ -1506,7 +1517,8 @@ must never share the machine with a compile:
    harness it listed with no tests at all: one built and spawned on every run
    for nothing, which `test = false` on its target would spare.
 3. **Policy (complete claims only).** After every lane's inventory disposition
-   is fixed, enumerate each shape resolution's universe and `#[ignore]`d
+   is fixed, build each shape resolution's universe again, alone, snapshot it
+   straight after that build (as a lane's is), enumerate the universe and its `#[ignore]`d
    subset, validate that the prepared binaries belong to that universe, then
    judge filter liveness across the lanes. A skipped or unavailable inventory
    makes the relevant filters unknown, not dead. This pass writes the shape
@@ -1534,16 +1546,17 @@ Every check is a full content read; no digest is ever served from a file stamp
 (inode, size, mtime, ctime). A settled stamp says an ordinary write would have
 been noticed, not that the bytes are the same: a store through a live writable
 shared mapping changes them with no timestamp update. What is not repeated is a
-read within one observation. A lane listed from its build-step snapshot records
-the snapshot's digests as its inventory's executable identities and in its
-runtime-index fingerprint, since the snapshot was checked just before the
+read within one observation. A lane listed from its snapshot records
+the snapshot's digests as its inventory's executable identities, in its
+runtime-index fingerprint and in its support fingerprint, nextest lanes
+included, since the snapshot was read just before the
 listings and is checked again after them before the inventory is accepted; a
 path the inventory names that the snapshot does not hold is refused. A serial
 lane's merged and per-resolution fingerprints share one digest per bin. A lane
 prepared at lane entry has no snapshot and reads its files. The reads of one
 snapshot or recheck are spread over a process-wide budget of a few readers and
-joined before the caller goes on, so the next build in a chain still starts
-after its snapshot; drift lines stay in path order, and a stop during the reads
+joined before the caller goes on, so a listing never starts before its
+snapshot is complete; drift lines stay in path order, and a stop during the reads
 is a stop, never drift. The run log carries one line per hash site for the
 prepare phase and for the test phase (files, bytes read, read time summed over
 readers).
@@ -1858,10 +1871,12 @@ an artifact after a *successful* preparation. The shim stays permissive: the
 plan attributes the harness streams, it does not fail closed.
 
 What preparing costs on a partial check, per serial lane, on top of the lane
-itself: the lane's `build_packages` support builds; one `cargo metadata`; one
-`cargo test --no-run` build per cargo resolution; two `--list` executions of
-every listable binary (the selection, then the ignored-only subset); a content
-hash of every executable at the snapshot, before the listings and after them.
+itself: the lane's `build_packages` support builds, twice (the warm-up, then
+the no-op authoritative build); one `cargo metadata`; two `cargo test
+--no-run` builds per cargo resolution, for the same reason; two `--list`
+executions of every listable binary (the selection, then the ignored-only
+subset); a content hash of every executable at the snapshot, just before the
+listings, and again after them.
 Then, when the lane's turn comes and the harness shim is attached, the snapshot
 is hashed again, the support builds rerun only when it no longer holds, and the
 lane's own `cargo test` build is held to the plan from its stream, every

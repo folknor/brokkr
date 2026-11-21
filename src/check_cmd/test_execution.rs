@@ -233,10 +233,22 @@ pub(crate) fn support_artifacts(stdout: &str, package: &str) -> Vec<SupportArtif
 /// lane's own builds, which can re-uplift a support bin over the pre-build's,
 /// so the file hashed is the one the lane's tests will read.
 pub(crate) fn support_fingerprint(artifacts: &[SupportArtifact]) -> Result<Vec<String>, DevError> {
+    support_fingerprint_with(artifacts, &mut |exe| {
+        crate::test_runner::hash_file_at(crate::test_runner::HashSite::Support, Path::new(exe))
+            .map_err(|e| DevError::Build(format!("could not hash support executable {exe}: {e}")))
+    })
+}
+
+/// [`support_fingerprint`] with each executable's digest from `digest`: the
+/// lane's snapshot on the checked route, so the plan's support identities are
+/// the observation the post-listing check accepted, not a later read.
+pub(crate) fn support_fingerprint_with(
+    artifacts: &[SupportArtifact],
+    digest: &mut dyn FnMut(&str) -> Result<String, DevError>,
+) -> Result<Vec<String>, DevError> {
     let mut out = Vec::with_capacity(artifacts.len());
     for a in artifacts {
-        let hash = crate::test_runner::hash_file_at(crate::test_runner::HashSite::Support, Path::new(&a.executable))
-            .map_err(|e| DevError::Build(format!("could not hash support executable {}: {e}", a.executable)))?;
+        let hash = digest(&a.executable)?;
         out.push(format!("support {} {} {} {hash}", a.package, a.target, a.executable));
     }
     out.sort();
