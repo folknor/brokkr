@@ -166,8 +166,8 @@ newest 16) remove it. The three clocks mean:
 
 "Stops" has a price in two lanes and it is worth naming:
 
-- **The parallel-binaries lane** creates every binary's thread up front and they
-  wait for a budget slot. A killed binary used to release its slots and let the
+- **The parallel-binaries lane** runs a bounded pool of workers over a queue of
+  binaries, each waiting for its budget slots before it starts. A killed binary used to release its slots and let the
   next queued binary start, so the run continued past a timeout. Cancellation is
   now lane-wide: the first binary to blow its budget sets a shared flag, queued
   binaries return without starting, and every binary *already executing* sees the

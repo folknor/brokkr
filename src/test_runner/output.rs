@@ -1257,7 +1257,10 @@ error: could not compile `pbfhogg` (test) due to 1 previous error
         assert!(tail.ends_with(line), "got: {tail}");
         let long: String = (0..50).map(|i| format!("line {i}\n")).collect();
         let tail = super::signal_stderr_tail(&long, 3).expect("tail");
-        assert_eq!(tail, "stderr, last 3 of 50 lines:\n  line 47\n  line 48\n  line 49");
+        assert_eq!(
+            tail,
+            "stderr, last 3 of 50 lines:\n  line 47\n  line 48\n  line 49"
+        );
         assert!(super::signal_stderr_tail("\n \n", 40).is_none());
     }
 

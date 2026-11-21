@@ -465,6 +465,14 @@ fn run_parallel_sweep(
         forwarded: ForwardedArgs::parse(&prepared.cargo_extra),
     };
 
+    // A claim is fixed for the binary's whole run, so freed slots admit only
+    // queued binaries and the in-flight count decays once the queue empties.
+    // Running a long binary as several processes over parts of its listing
+    // was weighed and declined: it changes which tests share a process (an
+    // opt-in key, a journaled per-process manifest and per-part validation),
+    // and a started part still cannot widen. Smaller units are the consumer's
+    // to draw - more test targets, or `harness = "nextest"`; see the sweeps
+    // doc's tail section.
     let queue = std::sync::Mutex::new(planned.iter());
     // The lane and each binary in flight as holder activities, so `brokkr
     // lock` shows which binaries run and how many are done. Workers name the

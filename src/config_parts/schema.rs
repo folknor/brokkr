@@ -2256,9 +2256,10 @@ pub struct ResolvedPaths {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ParallelBinaries {
-    /// Tests allowed in flight across the sweep. A binary claims
-    /// `min(its test count, budget)` slots, at least one, and runs under
-    /// `--test-threads=<claim>`.
+    /// Tests allowed in flight across the sweep. Each binary claims a share
+    /// proportional to its recorded serial cost (`binary_timings::allocate`),
+    /// at least one slot and at most its test count, and runs under
+    /// `--test-threads=<claim>` for its whole run.
     ///
     /// Unset means **the physical cores sharing one last-level cache** - a
     /// full CCX/CCD on AMD, the die on Intel (see `crate::cpu_topology`).

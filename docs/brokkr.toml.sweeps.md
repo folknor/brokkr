@@ -534,8 +534,10 @@ while looking like it asked for seven. The number a project has already tuned
 is the total, so the total is what the key takes.
 
 **Each binary's slice is proportional to how long it takes**, floored at one
-slot and capped at its own test count, handed out largest-first so the long
-pole is admitted while the pool is whole. Proportional is not a heuristic:
+slot and capped at its own test count, and binaries are admitted in order of
+claim size, largest first - which admits the long pole while the pool is whole
+when the pole holds the largest claim, and queues it behind every wider claim
+when it does not (a one-slot pole). Proportional is not a heuristic:
 model a binary of cost `c` on `k` threads as taking `c/k`, and the sweep's wall
 time is `max(c_i / k_i)`; that maximum is minimised by holding `c_i / k_i`
 equal across binaries, which is exactly threads in proportion to cost. Every
@@ -629,6 +631,42 @@ the lane.
 
 On AMD the domain is a CCX/CCD; on Intel it is usually the whole die, and
 hybrid parts count P-cores and E-cores alike.
+
+### The tail: a running binary cannot grow
+
+A claim is fixed for a binary's whole run: it is the `--test-threads` that
+process was started with, and libtest offers no way to widen it. When the
+small binaries finish, their slots admit binaries still queued and nothing
+else, so once the queue is empty the in-flight count decays to the claims of
+the binaries still running. The equal-finish model above is the plan; the
+tail is what a model of `c/k` cannot see (tests of 10s, 9s and 9s take 18s on
+two threads, not 14s), and a run whose busy count falls well before the end
+is showing it.
+
+The lane is work-conserving at **binary** granularity, so the remedy is
+smaller binaries:
+
+- **Split the long integration targets at the source.** More `[[test]]`
+  targets are more planning units, and a freed slot then has queued work to
+  admit. Each costs a link, so split the few poles the `slowest` line and
+  `--timings` name rather than undoing a target consolidation, and keep tests
+  that share a provisioned fixture in one target - the boundary is yours to
+  choose, which a timing-driven split could not know.
+- **`harness = "nextest"`** schedules process-per-test across the sweep's
+  binaries under one in-flight count, which is test-granular work
+  conservation within the sweep - at the price of fail-fast, a process (and
+  its fixture setup) per test, and the shared-process detector.
+
+A library's unit tests cannot be split into targets this way. A one-slot
+library pole is the arithmetic floor described above, not the tail: its
+claim was small from the start.
+
+brokkr does not split a binary into several processes itself. Weighed and
+declined: the split changes which tests share a process, so it would need an
+opt-in key, a journaled per-process test manifest and per-part validation in
+accounting, and it still cannot widen a part once started - for a gain the
+source split above already delivers wherever the consumer can draw the
+boundary.
 
 ### Doctests
 
