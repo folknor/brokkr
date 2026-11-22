@@ -800,10 +800,6 @@ const CALL_CENSUS_LIMIT: usize = 4096;
 /// Summary of a sidecar run.
 #[derive(Debug, Clone)]
 pub struct SidecarSummary {
-    pub vm_hwm_kb: i64,
-    pub sample_count: i32,
-    pub marker_count: i32,
-    pub wall_time_ms: i64,
     /// What the capture omitted, by cause.
     pub(crate) loss: CaptureLoss,
     /// Records stamped outside the run interval, by [`clock_outliers`].
@@ -910,10 +906,6 @@ impl SidecarData {
             fired_stop_marker: None,
             ending: Ending::Exited(0),
             summary: SidecarSummary {
-                vm_hwm_kb: 0,
-                sample_count: 0,
-                marker_count: 0,
-                wall_time_ms: 0,
                 loss: CaptureLoss::default(),
                 clock: ClockOutliers::default(),
             },
@@ -986,7 +978,6 @@ pub(crate) enum SinkEndKind {
 /// Contains bounded captured output with per-stream completeness flags, the
 /// child's ending and wall-clock time, and the sidecar profile data.
 pub struct SidecarRunResult {
-    pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
@@ -1760,7 +1751,6 @@ pub(crate) struct OpenCapture {
     run: child::SupervisedChild,
     samples: Vec<Sample>,
     capture: FifoCapture,
-    last_hwm: i64,
     fired_stop_marker: Option<String>,
     run_idx: usize,
     max_line_bytes: usize,
@@ -1809,10 +1799,7 @@ impl OpenCapture {
             [samples.len(), marker_total, counter_total],
             wall_time_ms,
         ));
-        let count = |n: usize| i32::try_from(n).unwrap_or(i32::MAX);
-        let (sample_count, marker_count) = (count(samples.len()), count(marker_total));
         SidecarRunResult {
-            stdout: run.stdout,
             stderr: run.stderr,
             stdout_truncated,
             stderr_truncated,
@@ -1826,10 +1813,6 @@ impl OpenCapture {
                 fired_stop_marker: self.fired_stop_marker,
                 ending: run.ending,
                 summary: SidecarSummary {
-                    vm_hwm_kb: self.last_hwm,
-                    sample_count,
-                    marker_count,
-                    wall_time_ms,
                     loss: capture.loss,
                     clock,
                 },
@@ -1862,7 +1845,6 @@ pub(crate) fn supervise_sidecar(
 
     let mut samples = Vec::new();
     let mut capture = FifoCapture::default();
-    let mut last_hwm = 0;
     let mut sample_idx = 0;
     let (requested_stop, stop_spec) = match stop_marker {
         Some(StopRequest { requested, spec }) => (requested, Some(spec)),
@@ -1903,7 +1885,6 @@ pub(crate) fn supervise_sidecar(
                 .flatten();
             if let Some(sample) = sample {
                 sample_idx = sample_idx.saturating_add(1);
-                last_hwm = last_hwm.max(sample.vm_hwm_kb);
                 if fifo.keep_sample() {
                     samples.push(sample);
                 } else {
@@ -1929,7 +1910,6 @@ pub(crate) fn supervise_sidecar(
         run,
         samples,
         capture,
-        last_hwm,
         fired_stop_marker,
         run_idx,
         max_line_bytes: tunables.max_fifo_line_bytes,

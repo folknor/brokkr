@@ -1351,10 +1351,6 @@ mod tests {
             fired_stop_marker: None,
             ending: Ending::Exited(0),
             summary: crate::sidecar::SidecarSummary {
-                vm_hwm_kb: 0,
-                sample_count: 0,
-                marker_count: 0,
-                wall_time_ms: 0,
                 loss: crate::sidecar::CaptureLoss::default(),
                 clock: crate::sidecar::ClockOutliers::default(),
             },

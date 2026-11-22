@@ -2,7 +2,7 @@
 
 use super::bootstrap::{
     ServeRequest, WithTarget, require_detection, run_build, run_check, run_clippy, run_deps,
-    run_fmt, run_install, run_man, run_measured, run_program, run_serve, run_sync, run_wc,
+    run_fmt, run_install, run_man, run_measured, run_program, run_serve, run_wc,
 };
 use crate::clean::CleanOpts;
 use crate::clean::{cargo_clean_package, cmd_clean};
@@ -18,7 +18,7 @@ use crate::request::{ResultsQuery, SidecarQuery};
 use crate::visual_approve_cmd::cmd_approve;
 use crate::{
     check_cmd, cli, context, crit_cmd, history_cmd, invalidate_cmd, litehtml, lockfile, mogwai,
-    output, project, ratatoskr, results_cmd, runnables, sidecar_cmd, sluggrs, test_cmd,
+    output, project, results_cmd, runnables, sidecar_cmd, sluggrs, test_cmd,
 };
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
@@ -846,89 +846,6 @@ fn run_project(
         Command::Hotpath(cli::HotpathCmd { mode, target }) => {
             run_measured(&mode, detection, invocation, |req| {
                 sluggrs::hotpath::cmd(req, &target)
-            })
-        }
-        // ----- ratatoskr-only commands -----
-        Command::Service(cli::ServiceCmd {
-            script,
-            all,
-            filter,
-            include_ignored,
-            keep_artefacts,
-            debug,
-            release,
-            profile,
-            repeat,
-            keep_going,
-        }) => {
-            let choice = profile_choice(debug, release, profile.as_ref());
-            // Same bare-is-an-index shape as `sync`: bare lists, SCRIPT
-            // runs one (a directory runs that cohort), --all runs the
-            // discovered cohort.
-            if all {
-                ratatoskr::cmd::service_suite(&crate::request::ServiceSuiteRequest {
-                    project_root,
-                    build_root: &detection.build_root,
-                    included_config_files: detection.config_sources.included(),
-                    ratatoskr: project_config.ratatoskr()?,
-                    filter: filter.as_deref(),
-                    keep_artefacts,
-                    profile_override: choice.as_ref(),
-                    keep_going,
-                    include_ignored,
-                    repeat,
-                })
-            } else if let Some(script) = script {
-                ratatoskr::cmd::service_test(&crate::request::ServiceTestRequest {
-                    project_root,
-                    build_root: &detection.build_root,
-                    included_config_files: detection.config_sources.included(),
-                    ratatoskr: project_config.ratatoskr()?,
-                    script: &script,
-                    keep_artefacts,
-                    profile_override: choice.as_ref(),
-                    repeat,
-                    keep_going,
-                })
-            } else {
-                ratatoskr::cmd::service_list(project_root)
-            }
-        }
-        Command::Sync(cli::SyncCmd {
-            script,
-            all,
-            filter,
-            include_ignored,
-            bench,
-            force,
-            keep_artefacts,
-            debug,
-            release,
-            profile,
-            gate,
-            as_baseline,
-            commit,
-        }) => run_sync(
-            &script,
-            &all,
-            &filter,
-            &include_ignored,
-            &bench,
-            &force,
-            &keep_artefacts,
-            profile_choice(debug, release, profile.as_ref()).as_ref(),
-            &gate,
-            &as_baseline,
-            &commit,
-            detection,
-            invocation,
-        ),
-        Command::MockServe(cli::MockServeCmd { fixture }) => {
-            let cfg = project_config.ratatoskr()?;
-            ratatoskr::saehrimnir::run_mock_serve(&ratatoskr::saehrimnir::MockServeRequest {
-                project_root,
-                config: cfg,
-                fixture: &fixture,
             })
         }
     }

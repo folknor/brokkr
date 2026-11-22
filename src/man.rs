@@ -12,7 +12,7 @@
 //! headings themselves - see [`sections`].
 //!
 //! Topics are filtered by the detected project, the same way `--help` filters
-//! subcommands: a pbfhogg tree has no use for the ratatoskr sync reference. The
+//! subcommands: a pbfhogg tree has no use for the mogwai reference. The
 //! project-agnostic topics - the ones about `check`, `deps`, `clippy`,
 //! measurement and config - are always listed, because they describe machinery
 //! that runs everywhere.
@@ -198,30 +198,6 @@ const TOPICS: &[Topic] = &[
         summary: "sluggrs config, snapshot outputs and the snapshot store",
         content: include_str!("../docs/projects/sluggrs.md"),
         commands: &[CommandId::Hotpath],
-    },
-    Topic {
-        name: "ratatoskr",
-        summary: "the harness model, saehrimnir contract, lua runtime, artefacts",
-        content: include_str!("../docs/projects/ratatoskr.md"),
-        commands: &[CommandId::Sync],
-    },
-    Topic {
-        name: "sync",
-        summary: "sync (list/run/bench) and mock-serve",
-        content: include_str!("../docs/commands/sync.md"),
-        commands: &[CommandId::Sync],
-    },
-    Topic {
-        name: "gate",
-        summary: "--gate/--as-baseline, baseline pinning, bench thresholds",
-        content: include_str!("../docs/commands/ratatoskr-gate.md"),
-        commands: &[CommandId::Sync],
-    },
-    Topic {
-        name: "service",
-        summary: "the service command: lua VM, frontmatter, cohort runs",
-        content: include_str!("../docs/commands/service.md"),
-        commands: &[CommandId::Sync],
     },
     Topic {
         name: "mogwai",
@@ -419,19 +395,18 @@ mod tests {
     /// And the project-scoped ones must not leak across.
     #[test]
     fn scoped_topics_stay_in_their_project() {
-        let ratatoskr: Vec<&str> = visible(Some(&Project::Ratatoskr))
+        let mogwai: Vec<&str> = visible(Some(&Project::Mogwai))
             .iter()
             .map(|t| t.name)
             .collect();
-        assert!(ratatoskr.contains(&"sync"));
-        assert!(ratatoskr.contains(&"pbfhogg"));
+        assert!(mogwai.contains(&"mogwai"));
 
         let pbfhogg: Vec<&str> = visible(Some(&Project::Pbfhogg))
             .iter()
             .map(|t| t.name)
             .collect();
         assert!(pbfhogg.contains(&"pbfhogg"));
-        assert!(!pbfhogg.contains(&"sync"));
+        assert!(!pbfhogg.contains(&"mogwai"));
     }
 
     /// An unrecognised project still gets a usable listing rather than an empty

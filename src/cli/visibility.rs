@@ -122,10 +122,7 @@ Prepare => ("prepare", Visibility::Only(&[Project::Litehtml]), Required, Blockin
 HtmlExtract => ("html-extract", Visibility::Only(&[Project::Litehtml]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Outline => ("outline", Visibility::Only(&[Project::Litehtml]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Hotpath => ("hotpath", Visibility::Only(&[Project::Sluggrs]), Required, Blocking, true, crate::measure::MeasureMode::Hotpath { runs: std::num::NonZeroUsize::MIN }, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
-Mogwai => ("mogwai", Visibility::Only(&[Project::Mogwai]), Required, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
-Service => ("service", Visibility::Only(&[Project::Ratatoskr]), Required, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Sync => ("sync", Visibility::Only(&[Project::Ratatoskr]), Required, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
-MockServe => ("mock-serve", Visibility::Only(&[Project::Ratatoskr]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),}
+Mogwai => ("mogwai", Visibility::Only(&[Project::Mogwai]), Required, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),}
 
 static INVOCATION: std::sync::OnceLock<CommandId> = std::sync::OnceLock::new();
 pub(crate) fn set_invocation(command: CommandId) {
@@ -233,8 +230,7 @@ impl CommandSpec {
                         && (program.with.is_none() || program.with_commit.is_some()))
                 }
                 super::Command::Build(super::BuildCmd { commit, .. })
-                | super::Command::Crit(super::CritCmd { commit, .. })
-                | super::Command::Sync(super::SyncCmd { commit, .. }) => Ok(commit.is_some()),
+                | super::Command::Crit(super::CritCmd { commit, .. }) => Ok(commit.is_some()),
                 // Every build is a worktree's once one commit is given, the
                 // `--rounds` competitors included.
                 super::Command::Bench(super::BenchCmd { commit, .. }) => Ok(!commit.is_empty()),

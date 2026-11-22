@@ -298,26 +298,6 @@ impl BuildConfig {
             profile: RustProfile::Release,
         }
     }
-
-    /// Build config for an external harness crate described by a `[*.harness]`
-    /// block (`package` + optional `binary`/`features`), under an
-    /// already-resolved profile. Shared by every harness build
-    /// (`harness_build`): they build the same kind of engine, so the config
-    /// mapping lives once here.
-    pub fn for_harness_with_profile(
-        harness_cfg: &crate::config::HarnessConfig,
-        profile: RustProfile,
-    ) -> Self {
-        Self {
-            package: Some(harness_cfg.package.clone()),
-            bin: harness_cfg.binary.clone(),
-            example: None,
-            features: harness_cfg.features.clone(),
-            default_features: true,
-            all_features: false,
-            profile,
-        }
-    }
 }
 
 /// Target directory override shared by Cargo build, metadata, binary lookup,
@@ -419,8 +399,7 @@ pub fn cargo_build(config: &BuildConfig, project_root: &Path) -> Result<BuiltArt
 /// never mention the lock. Checking at this one choke point covers call paths
 /// several layers below the command that took the lock, where threading a
 /// `&LockGuard` down would not. The cargo PID goes into the lock file for the
-/// build's duration, so `brokkr kill --hard` during a build reaches cargo;
-/// before, only ratatoskr's orchestration published it, via `on_spawn`.
+/// build's duration, so `brokkr kill --hard` during a build reaches cargo.
 pub fn cargo_build_observed(
     config: &BuildConfig,
     project_root: &Path,

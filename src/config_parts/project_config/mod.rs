@@ -1,8 +1,8 @@
 //! `ProjectConfig`: the one project-owned section a config may hold.
 //!
 //! Load rejects a known project section when `project` names another
-//! project, and the litehtml-rs, sluggrs, ratatoskr and mogwai parsers
-//! require their section. `[dellingr]` and `[piners]` are retired with their
+//! project, and the litehtml-rs, sluggrs and mogwai parsers require their
+//! section. `[dellingr]`, `[piners]` and `[ratatoskr]` are retired with their
 //! commands: a matching project gets a warning, and the table loads
 //! unvalidated and stays in the composed config a script sees. `[pbfhogg]` is
 //! an ordinary host-name section, not a project section. `Detection` and
@@ -23,8 +23,6 @@ use crate::project::Project;
 pub enum ProjectConfig {
     Litehtml(litehtml::LitehtmlConfig),
     Sluggrs(sluggrs::SluggrsConfig),
-    /// Boxed: the largest section, reached only through [`Self::ratatoskr`].
-    Ratatoskr(Box<ratatoskr::RatatoskrConfig>),
     Mogwai(mogwai::MogwaiConfig),
     Generic,
 }
@@ -37,7 +35,10 @@ impl ProjectConfig {
         match project {
             Project::Litehtml => Ok(Self::Litehtml(litehtml::parse(table)?)),
             Project::Sluggrs => Ok(Self::Sluggrs(sluggrs::parse(table)?)),
-            Project::Ratatoskr => Ok(Self::Ratatoskr(Box::new(ratatoskr::parse(table)?))),
+            Project::Ratatoskr => {
+                self::ratatoskr::note_retired(table);
+                Ok(Self::Generic)
+            }
             Project::Piners => {
                 self::piners::note_retired(table);
                 Ok(Self::Generic)
@@ -48,17 +49,6 @@ impl ProjectConfig {
             }
             Project::Mogwai => Ok(Self::Mogwai(mogwai::parse(table)?)),
             _ => Ok(Self::Generic),
-        }
-    }
-
-    /// The `[ratatoskr]` section. Load requires it in a ratatoskr project,
-    /// so the refusal here only fires for a command run from another project.
-    pub(crate) fn ratatoskr(&self) -> Result<&ratatoskr::RatatoskrConfig, DevError> {
-        match self {
-            Self::Ratatoskr(cfg) => Ok(&**cfg),
-            _ => Err(DevError::Config(
-                "this command needs a ratatoskr project (`project = \"ratatoskr\"`)".into(),
-            )),
         }
     }
 }

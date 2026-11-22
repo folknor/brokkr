@@ -28,11 +28,6 @@ brokkr-designated directory is how clean spares it, with no special case:
 - `brokkr crit` points `CRITERION_HOME` at `.brokkr/bench/` rather than
   criterion's default `target/criterion`, which also puts the baselines out
   of reach of `cargo clean`.
-- `.brokkr/ratatoskr/gate.db` is a named permanent store. Clean keeps that
-  path and any directory containing it, so the store can move below the
-  current level without becoming sweepable. A gate baseline is pinned by
-  UUID in `brokkr.toml`, so deleting the row breaks the gate, and
-  re-recording silently rebases the reference onto current numbers.
 
 ## Disk gate
 

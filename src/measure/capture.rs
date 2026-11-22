@@ -107,7 +107,6 @@ impl BenchHarness {
             wall: Some(capture.elapsed),
             ending: Some(ending),
             sidecar: Some(capture.data),
-            stdout: capture.stdout,
             stderr: capture.stderr,
             pid: Some(pid),
             error,

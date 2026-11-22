@@ -23,9 +23,9 @@ pub(crate) mod console;
 pub(crate) mod paths;
 
 pub(crate) use child::{
-    CapturedOutput, DeadlineCapture, Ending, SpawnProfile, run_captured, run_captured_observed,
-    run_captured_with_env, run_captured_with_env_and_deadline,
-    run_captured_with_env_and_deadline_with_options, run_captured_with_idle_deadline, run_cargo,
+    CapturedOutput, Ending, SpawnProfile, run_captured, run_captured_observed,
+    run_captured_with_env, run_captured_with_env_and_deadline, run_captured_with_idle_deadline,
+    run_cargo,
     run_cargo_unsetting, run_passthrough_in, run_passthrough_timed,
 };
 pub(crate) use console::*;

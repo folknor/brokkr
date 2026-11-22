@@ -56,8 +56,8 @@ line into the run log when the command keeps one, and keeps a drawn status
 line intact. The commands that keep a run log are `check`, `test`, measured
 runs and `crit`, writing `.brokkr/check-logs/KIND-MS.log`.
 
-Each prefix is padded to ten columns, and a longer tag (`[ratatoskr]`)
-overflows by one space instead of being cut. The prefixes mean:
+Each prefix is padded to ten columns, and a tag of ten or more
+(`[download]`) is followed by one space instead of being cut. The prefixes mean:
 
 - **`[lock]`**: lock events
 - **`[strays]`**: the stray-process reaps and `brokkr strays`

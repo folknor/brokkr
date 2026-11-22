@@ -33,10 +33,9 @@ use crate::shutdown::ChildIsolation;
 enum ChildKind {
     Plain,
     TestProcess,
-    Service,
 }
 
-/// The named process policy: `Plain`, `Cargo`, `TestProcess`, `Service`, or a
+/// The named process policy: `Plain`, `Cargo`, `TestProcess`, or a
 /// cargo-launched test process (`cargo_test`).
 #[derive(Clone, Copy)]
 pub(crate) struct ChildPolicy {
@@ -63,13 +62,6 @@ impl ChildPolicy {
         Self {
             cargo: CargoProfile::Plain,
             kind: ChildKind::TestProcess,
-        }
-    }
-
-    pub(crate) const fn service() -> Self {
-        Self {
-            cargo: CargoProfile::Plain,
-            kind: ChildKind::Service,
         }
     }
 
@@ -182,11 +174,11 @@ impl ChildPolicy {
     }
 
     fn needs_parent_death(self) -> bool {
-        matches!(self.kind, ChildKind::TestProcess | ChildKind::Service)
+        matches!(self.kind, ChildKind::TestProcess)
     }
 
     fn carries_orphan_token(self) -> bool {
-        matches!(self.kind, ChildKind::TestProcess | ChildKind::Service)
+        matches!(self.kind, ChildKind::TestProcess)
     }
 }
 

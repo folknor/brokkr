@@ -1431,10 +1431,3 @@ surfaces, so brokkr lints them separately.
   `build_packages` (see "Invocation selection").
 - `--sweep` applies before that fold, and its labels under a lanes profile
   are the lane-qualified form.
-
-Per-project orchestration blocks such as `[ratatoskr.harness]` aren't
-`[[check]]` sweeps, and neither `brokkr check` nor `brokkr test` sees them.
-They describe how to build a binary that ratatoskr's orchestration commands
-(`service`, `mock-serve`, `sync`) spawn, with their own `package`, `features`
-and `debug` fields. `[test.profiles]` may reference only `[[check]]` entries
-in its `sweeps` list, never an orchestration block.

@@ -3,7 +3,6 @@
 //! `brokkr-rustc-guard` and `brokkr-results-server` bins beside it include
 //! the shared sources they need by path; there is no workspace.
 
-mod artefacts;
 mod atomic_write;
 mod bench;
 mod build;
@@ -41,7 +40,6 @@ mod globs;
 mod gremlins;
 mod guard;
 mod harness;
-mod harness_build;
 mod header;
 mod health;
 mod history;
@@ -70,7 +68,6 @@ mod preflight;
 mod process;
 mod profile;
 mod project;
-mod ratatoskr;
 mod request;
 mod reservations;
 mod results_cmd;

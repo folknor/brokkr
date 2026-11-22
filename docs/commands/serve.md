@@ -86,7 +86,6 @@ a serving process perturbs what is measured. A measurement is any of:
   preflight launches anything
 - `brokkr crit TARGET` sampling into a baseline (`--compare` and
   `--baselines` sample nothing)
-- ratatoskr `sync --bench`
 
 brokkr checks for serves where the measurement starts, under its hold. No
 serve can start inside that hold, so the answer stays true for the whole

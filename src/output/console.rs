@@ -28,7 +28,7 @@ pub fn is_quiet() -> bool {
 // man pager), not prefixed lines.
 //
 // The prefix is "[tag]" padded to 10 columns, so messages align for the usual
-// short tags; a longer tag ("[ratatoskr]") is followed by one space and
+// short tags; a longer tag ("[download]") is followed by one space and
 // overflows the column rather than being cut.
 //
 // Quiet mode split: `run_msg`, `download_msg` and the lock, strays and guard
@@ -455,10 +455,6 @@ pub fn sluggrs_msg(msg: &str) {
     emit_tag("[sluggrs]", msg);
 }
 
-pub fn ratatoskr_msg(msg: &str) {
-    emit_tag("[ratatoskr]", msg);
-}
-
 /// `brokkr install`'s `[[install]]` steps, announced like its cargo runs.
 pub fn install_msg(msg: &str) {
     emit_tag("[install]", msg);
@@ -586,13 +582,6 @@ pub fn format_duration(duration: Duration) -> String {
     }
 }
 
-/// Adapt integer-millisecond measurements to the shared duration formatter.
-pub fn format_duration_ms(milliseconds: u128) -> String {
-    format_duration(Duration::from_millis(
-        u64::try_from(milliseconds).unwrap_or(u64::MAX),
-    ))
-}
-
 /// A byte count in binary units, `df`-style: `512B`, `3K`, `14G`, `1.8T`.
 /// Shared by `brokkr env`'s storage rows and the free-space gate.
 #[allow(clippy::cast_precision_loss)] // a display figure
@@ -710,7 +699,6 @@ mod channel_tests {
                 hotpath_msg,
                 litehtml_msg,
                 sluggrs_msg,
-                ratatoskr_msg,
                 deps_msg,
                 install_msg,
                 wc_msg,
@@ -754,7 +742,7 @@ mod channel_tests {
         assert!(stdout.contains("[result]  unretrievable result\n"));
         assert!(stdout.contains("[warn]    visible warning\n"));
         assert!(stdout.contains("\r\x1b[2K[test]    clears status\n"));
-        assert_eq!(log.matches("logged action").count(), 12);
+        assert_eq!(log.matches("logged action").count(), 11);
         assert!(!log.contains('\x1b'));
         assert!(stderr.contains("[sidecar] query provenance\n"));
         assert!(stderr.contains("[sidecar] unstored session\n"));

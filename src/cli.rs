@@ -121,12 +121,12 @@ mod visibility_tests {
         ));
     }
 
-    /// `Other("ratatoskr")` is a foreign repo that happens to call itself
-    /// ratatoskr in its own brokkr.toml - it is NOT `Project::Ratatoskr` and
-    /// must not be handed ratatoskr's project-specific commands.
+    /// `Other("mogwai")` is a foreign repo that happens to call itself
+    /// mogwai in its own brokkr.toml - it is NOT `Project::Mogwai` and
+    /// must not be handed mogwai's project-specific commands.
     #[test]
     fn other_does_not_impersonate_a_builtin() {
-        assert!(visible_in("sync", &Project::Ratatoskr));
-        assert!(!visible_in("sync", &Project::Other("ratatoskr".into())));
+        assert!(visible_in("mogwai", &Project::Mogwai));
+        assert!(!visible_in("mogwai", &Project::Other("mogwai".into())));
     }
 }

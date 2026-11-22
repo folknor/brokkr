@@ -34,8 +34,8 @@ The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bar
 - `reference/clean.md` - clean's ownership rule, disk gate, store maintenance and worktree purge. Read before changing `src/clean.rs` or `src/clean/`.
 - `reference/crit.md` - crit's design decisions and the failure each prevents. Read before changing `src/crit_cmd/`.
 - `reference/deps.md` - deps internals: phase model, metadata graph, ccu shell-out, publish-cycle walk. Read before changing `src/deps/`.
-- `docs/commands/visual.md`, `hotpath.md`, `sync.md`, `ratatoskr-gate.md`, `service.md` - project-specific commands.
-- `reference/visual-projects.md`, `reference/ratatoskr.md`, `reference/mogwai.md` - internals of those projects' commands. Read before changing `src/visual/`, `src/litehtml/`, `src/sluggrs/`, `src/ratatoskr/` or `src/mogwai/`.
+- `docs/commands/visual.md`, `hotpath.md` - project-specific commands.
+- `reference/visual-projects.md`, `reference/mogwai.md` - internals of those projects' commands. Read before changing `src/visual/`, `src/litehtml/`, `src/sluggrs/` or `src/mogwai/`.
 - `docs/projects/*.md` - per-project commands and internals; pbfhogg uses script benches and generic commands.
 
 ## Architecture
@@ -49,7 +49,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `src/lock/`, `src/hold.rs`, `src/guard.rs`, `src/stray.rs`, `src/test_orphans.rs` - the global lock, compile capability, rustc guard and reapers.
 - `src/measure/`, `src/harness.rs`, `src/db/`, `src/sidecar.rs` - measurement and result stores; `src/bench/store/` is the per-user store of script-bench runs, served over HTTP by `src/bin/results_server/` and reached by `src/bench/remote.rs`.
 - `src/bench/` - script benches: `runner/` runs `brokkr bench NAME`, `lua.rs` is the only seam to the dellingr VM.
-- `src/<project>/` - project-specific commands (pbfhogg, elivagar and nidhogg have no typed command module).
+- `src/<project>/` - project-specific commands (pbfhogg, elivagar, nidhogg and ratatoskr have no typed command module).
 
 ## Shared commands quick reference
 

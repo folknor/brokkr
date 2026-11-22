@@ -51,7 +51,7 @@ No flag combination removes the measurement stores:
 | `.brokkr/sluggrs-visual.db` | sluggrs visual runs, results, and approvals |
 | `$XDG_DATA_HOME/brokkr/history.db` | global command history |
 | `$XDG_DATA_HOME/brokkr/bench.db` | every attempted script-bench run, all projects |
-| `.brokkr/ratatoskr/gate.db` | the gate baselines |
+| `.brokkr/ratatoskr/` | what brokkr's retired ratatoskr commands left, `gate.db` included; clean never names anything under it |
 | `.brokkr/library-certifications/` | certification records an older brokkr's library verification wrote; small, and nothing writes them now |
 | `.brokkr/bench/` | `brokkr crit`'s criterion baselines and their environment stamps |
 | `$XDG_DATA_HOME/brokkr/sidecar-backups/` | durable profiler backups |
@@ -59,11 +59,6 @@ No flag combination removes the measurement stores:
 `brokkr crit` keeps its baselines in `.brokkr/bench/` rather than
 criterion's default `target/criterion`, so neither `brokkr clean` nor your
 own `cargo clean` can reach them.
-
-Don't delete `gate.db` by hand either. `brokkr.toml` pins a gate baseline by
-UUID, so deleting its row breaks the gate, and re-recording silently rebases
-the reference onto current numbers. Clean keeps the `gate.db` path and any
-directory containing it.
 
 ## Unswept state
 
@@ -181,8 +176,6 @@ Scratch removal differs per project:
 
 The run-artefact trees clean removes, through the reservation gate, are:
 
-- the named `.brokkr/ratatoskr/service/`, `service-mock/`, `sync/` and
-  `mock/` trees; other directories under `.brokkr/ratatoskr/` are kept
 - `.brokkr/test-hung/`
 - the isolated feature-unification and fixture-lint targets,
   `TARGET/unify-*` and `TARGET/fixture-*` under cargo's resolved target
@@ -206,8 +199,7 @@ prints `nothing to clean` unless a cargo sweep already reported its work; a
 No clean runs after an interrupted command (Ctrl-C, `brokkr kill`). A sweep
 there would run after the command released the brokkr lock, while another
 brokkr may already be using the same paths. The routine set also holds what
-runs keep on purpose for later: hung-test snapshots, the run directories of
-failed ratatoskr runs, and caches.
+runs keep on purpose for later: hung-test snapshots and caches.
 
 A script-bench iteration's directory goes with its lease instead. Other
 disposable working state an interrupted command leaves on disk sits under a

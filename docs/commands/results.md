@@ -214,7 +214,7 @@ identity: two different brokkr commands that happen to run the same
 subprocess stay separate rows.
 
 `cargo_profile` is in the tuple because a config-selected profile
-(`[ratatoskr.harness] profile`, say) changes the binary without changing the
+(a `[[bin]]` `profile`, say) changes the binary without changing the
 argv. A row built under anything but release gets a `build:` line naming its
 profile, so rows a profile split apart say why. A row whose profile is
 missing or unreadable pairs with nothing, not even a row with the same text:

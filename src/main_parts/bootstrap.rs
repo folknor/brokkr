@@ -3,14 +3,12 @@
 use super::dispatch::run;
 use crate::cli::{Cli, Command};
 use crate::command_args::{parse_env_overrides, resolve_features, resolve_mode};
-use crate::context::with_worktree;
 use crate::error::DevError;
 use crate::fmt_cmd::cmd_fmt;
 use crate::passthrough_cmd::duration_ms;
 use crate::project::Project;
 use crate::{
-    check_cmd, cli, config, context, deps, history_cmd, man, measure, output, project, ratatoskr,
-    runnables, shutdown, test_runner, wc,
+    check_cmd, cli, config, context, deps, history_cmd, man, measure, output, project, runnables, shutdown, test_runner, wc,
 };
 use std::time::Instant;
 
@@ -646,120 +644,6 @@ fn build_snapshot(
             },
         ),
     }
-}
-
-/// `sync`: bare lists, a script runs, `--bench` measures, `--all` and
-/// `--gate all` run a cohort.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn run_sync(
-    script: &Option<String>,
-    all: &bool,
-    filter: &Option<String>,
-    include_ignored: &bool,
-    bench: &Option<std::num::NonZeroUsize>,
-    force: &bool,
-    keep_artefacts: &bool,
-    choice: Option<&crate::build::RustProfile>,
-    gate: &Option<String>,
-    as_baseline: &bool,
-    commit: &Option<String>,
-    detection: &project::Detection,
-    invocation: &crate::db::RunInvocation,
-) -> Result<(), DevError> {
-    let dev_config = &detection.config;
-    let project_root = detection.project_root.as_path();
-    let ratatoskr_config = detection.project_config.ratatoskr()?;
-    let cohort_gate = gate.as_deref() == Some(ratatoskr::sync::GATE_ALL);
-
-    // Refuse before anything is built: a cohort rebase re-anchors
-    // every baseline-relative rule at once, and a gated sweep
-    // supplies its own scripts.
-    ratatoskr::sync::validate_gate_selection(gate.as_deref(), script.is_some(), *as_baseline)?;
-    // A named gate must exist before a `--commit` worktree is cut for it.
-    // (A gate literally named `all` is refused when the config loads.)
-    if let Some(name) = gate.as_deref()
-        && !cohort_gate
-        && !ratatoskr_config.gate.contains_key(name)
-    {
-        return Err(DevError::Config(format!(
-            "sync: gate `{name}` not found in [ratatoskr.gate.*] of brokkr.toml"
-        )));
-    }
-
-    // Modes off one shape: --all runs the discovered cohort,
-    // --gate all runs the configured gate cohort, no script
-    // lists, a script runs, a script plus --bench measures.
-    if *all {
-        return ratatoskr::sync::run_sync_all(&ratatoskr::sync::SyncAllRequest {
-            project_root,
-            build_root: &detection.build_root,
-            included_config_files: detection.config_sources.included(),
-            ratatoskr: ratatoskr_config,
-            filter: filter.as_deref(),
-            include_ignored: *include_ignored,
-            keep_artefacts: *keep_artefacts,
-            profile_override: choice.cloned(),
-        });
-    }
-    if script.is_none() && !cohort_gate {
-        if bench.is_some() {
-            return Err(DevError::Usage(
-                "sync: --bench needs a SCRIPT to measure (or --gate all to \
-                 sweep every configured gate)"
-                    .into(),
-            ));
-        }
-        return ratatoskr::sync::run_sync_list(project_root, ratatoskr_config);
-    }
-    // `--gate all` implies `--bench` (clap `requires`), so a
-    // missing bench here means the plain script-run shape.
-    let Some(bench) = *bench else {
-        let script = script.as_deref().unwrap_or_default();
-        return ratatoskr::sync::run_sync_smoke(&ratatoskr::sync::SyncSmokeRequest {
-            project_root,
-            build_root: &detection.build_root,
-            included_config_files: detection.config_sources.included(),
-            ratatoskr: ratatoskr_config,
-            script,
-            keep_artefacts: *keep_artefacts,
-            profile_override: choice.cloned(),
-        });
-    };
-    // A sync bench runs the sidecar, whose per-run narration is
-    // run-log only: give it the measured runs' log.
-    let _log = check_cmd::RunLog::begin(project_root, check_cmd::run_log_kind::MEASURE);
-    with_worktree(
-        Some(&detection.project),
-        &detection.project_root,
-        &detection.build_root,
-        commit.as_deref(),
-        false,
-        &crate::tree_policy::TreePolicy::of(dev_config),
-        context::worktree_keep(dev_config)?,
-        |build_root| {
-            let req = ratatoskr::sync::SyncBenchRequest {
-                project_root: &detection.project_root,
-                build_root,
-                dev_config,
-                ratatoskr: ratatoskr_config,
-                // Empty for the cohort: `run_gate_cohort`
-                // substitutes each gate's configured script.
-                script: script.as_deref().unwrap_or_default(),
-                bench,
-                force: *force,
-                keep_artefacts: *keep_artefacts,
-                profile_override: choice.cloned(),
-                invocation: invocation.clone(),
-                gate: gate.as_deref(),
-                as_baseline: *as_baseline,
-            };
-            if cohort_gate {
-                ratatoskr::sync::run_gate_cohort(&req)
-            } else {
-                ratatoskr::sync::run_sync_bench(&req)
-            }
-        },
-    )
 }
 
 /// `check` builds, scans, and diffs the code tree, so it anchors on the build

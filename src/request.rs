@@ -1,9 +1,6 @@
 //! The resolved requests of the `results` and `sidecar` commands
 //! ([`ResultsQuery`], [`SidecarQuery`]), built from the parsed CLI.
 
-use std::path::Path;
-
-use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::db::QueryFilter;
 use crate::error::DevError;
 /// One selected result view after the CLI's mutually-exclusive selectors and
@@ -80,39 +77,4 @@ pub(crate) fn compare_pair<T>(values: Vec<T>, option: &str) -> Result<(T, T), De
         .try_into()
         .map_err(|_| DevError::Usage(format!("{option} requires exactly two values")))?;
     Ok((first, second))
-}
-
-/// Service entry-point inputs. Keeping invocation state together lets the
-/// ratatoskr service entry points accept one explicit request value.
-pub(crate) struct ServiceSuiteRequest<'a> {
-    pub(crate) project_root: &'a Path,
-    /// The code tree the harness is built from (cwd); differs from
-    /// `project_root` only when `brokkr.toml` lives one level up.
-    pub(crate) build_root: &'a crate::project::BuildRoot,
-    /// The composed config's `include` files, exempt from the clean-tree
-    /// flag each run's `run.toml` records.
-    pub(crate) included_config_files: &'a [std::path::PathBuf],
-    pub(crate) ratatoskr: &'a RatatoskrConfig,
-    pub(crate) filter: Option<&'a str>,
-    pub(crate) keep_artefacts: bool,
-    /// The CLI profile choice (`--debug`/`--release`/`--profile`).
-    pub(crate) profile_override: Option<&'a crate::build::RustProfile>,
-    pub(crate) keep_going: bool,
-    pub(crate) include_ignored: bool,
-    pub(crate) repeat: std::num::NonZeroU32,
-}
-
-pub(crate) struct ServiceTestRequest<'a> {
-    pub(crate) project_root: &'a Path,
-    /// The code tree the harness is built from; see [`ServiceSuiteRequest`].
-    pub(crate) build_root: &'a crate::project::BuildRoot,
-    /// See [`ServiceSuiteRequest`].
-    pub(crate) included_config_files: &'a [std::path::PathBuf],
-    pub(crate) ratatoskr: &'a RatatoskrConfig,
-    pub(crate) script: &'a str,
-    pub(crate) keep_artefacts: bool,
-    /// The CLI profile choice (`--debug`/`--release`/`--profile`).
-    pub(crate) profile_override: Option<&'a crate::build::RustProfile>,
-    pub(crate) repeat: std::num::NonZeroU32,
-    pub(crate) keep_going: bool,
 }

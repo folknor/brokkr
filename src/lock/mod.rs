@@ -332,48 +332,6 @@ impl LockGuard {
         }
     }
 
-    /// Add an auxiliary mock-server PID. `service --all` calls this once
-    /// per distinct fixture spawned over the cohort's lifetime; `sync`
-    /// (run or bench) and single-script `service` call it once. `brokkr kill --hard`
-    /// SIGKILLs every PID in this set alongside the child so no mock
-    /// leaks when the workload child is the one written to `child_pid`.
-    pub fn add_mock_pid(&self, pid: u32) {
-        let Some(mock) = TrackedProcess::capture(pid) else {
-            return;
-        };
-        if let Ok(mut state) = self.inner.state.lock() {
-            // Prune first, so a recycled pid's new mock is not mistaken for
-            // the dead one it replaces.
-            state.mocks.retain(|tracked| !tracked.gone());
-            if !state.mocks.iter().any(|tracked| tracked.pid == mock.pid) {
-                state.mocks.push(mock);
-            }
-            self.inner.publish(&state);
-        }
-    }
-
-    /// Remove a single mock-server PID. Used when one fixture session
-    /// has drained but others remain (`service --all`'s cohort-scoped
-    /// fixture reuse model).
-    pub fn remove_mock_pid(&self, pid: u32) {
-        if let Ok(mut state) = self.inner.state.lock() {
-            state
-                .mocks
-                .retain(|tracked| tracked.pid.get() != pid && !tracked.gone());
-            self.inner.publish(&state);
-        }
-    }
-
-    /// Drop all mock-server PIDs (e.g. after the suite has drained every
-    /// mock gracefully).
-    #[cfg(test)]
-    pub fn clear_mock_pids(&self) {
-        if let Ok(mut state) = self.inner.state.lock() {
-            state.mocks.clear();
-            self.inner.publish(&state);
-        }
-    }
-
     /// Drop this thread's workload child PID. Called by orchestrators after
     /// the captured runner returns, so `brokkr lock` stops showing it and
     /// `--hard` does not have to classify it. Other threads' slots stay,
@@ -1312,22 +1270,18 @@ mod tests {
         let nested = acquire_at(&path, &ctx(), &INERT).unwrap();
 
         nested.set_child_pid(4242);
-        nested.add_mock_pid(5151);
         nested.set_progress(2, 5);
 
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("child_pid=4242"), "got: {contents}");
-        assert!(contents.contains("mock_pids=5151:"), "got: {contents}");
         assert!(contents.contains("progress=2/5"), "got: {contents}");
 
-        // And the clears forward too - via the outer handle, proving both
+        // And the clear forwards too - via the outer handle, proving both
         // handles mutate the same state. Every key stays present (always-emit
         // format), but with an empty value.
         outer.clear_child_pid();
-        nested.clear_mock_pids();
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("child_pid=\n"), "got: {contents}");
-        assert!(contents.contains("mock_pids=\n"), "got: {contents}");
     }
 
     /// Concurrent lanes publish one child each; clearing on one thread leaves

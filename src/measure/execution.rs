@@ -1,11 +1,8 @@
 //! Iteration scheduling and execution evidence.
 
 use super::kv::reported_timing;
-use super::wall::{
-    WallSource, elapsed_to_ms, elapsed_to_us, marker_span_us, us_to_ms, winning_index,
-};
+use super::wall::{WallSource, elapsed_to_ms, elapsed_to_us, us_to_ms, winning_index};
 use super::{BenchConfig, BenchHarness, BenchResult};
-use crate::db::KvPair;
 use crate::error::DevError;
 use crate::output::{child, console};
 use std::path::{Path, PathBuf};
@@ -43,7 +40,6 @@ pub struct Iteration {
     pub wall: Option<Duration>,
     pub ending: Option<child::Ending>,
     pub sidecar: Option<crate::sidecar::SidecarData>,
-    pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub pid: Option<u32>,
     pub error: Option<DevError>,
@@ -61,7 +57,6 @@ impl Iteration {
             wall: None,
             ending: None,
             sidecar: None,
-            stdout: Vec::new(),
             stderr: Vec::new(),
             pid: None,
             error: None,
@@ -204,27 +199,6 @@ fn apply_wall_source(source: WallSource, iteration: &mut Iteration) -> Result<()
             }
             Ok(())
         }
-        WallSource::MarkerSpan { start, end } => {
-            let span = iteration
-                .sidecar
-                .as_ref()
-                .and_then(|data| marker_span_us(data.markers(), start, end));
-            match span {
-                Some(us) => {
-                    if let Some(result) = &mut iteration.result {
-                        result.elapsed_us = Some(us);
-                        result.elapsed_ms = us_to_ms(us);
-                        result
-                            .kv
-                            .push(KvPair::text("meta.timing_source", "marker_span"));
-                    }
-                    Ok(())
-                }
-                None => Err(DevError::Config(format!(
-                    "missing {start} -> {end} marker span"
-                ))),
-            }
-        }
     }
 }
 
@@ -266,6 +240,7 @@ impl BenchHarness {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::db::KvPair;
 
     fn captured(reported_us: Option<i64>) -> Iteration {
         let mut iteration = Iteration::from_result(BenchResult {

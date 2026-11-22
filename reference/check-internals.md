@@ -506,8 +506,8 @@ is a larger change than this reaper.
 The reap, and the stale-guard check below, run inside `lockfile::acquire`
 itself, once per *fresh* hold. A re-entrant acquire never reaps, since its
 outer hold already did. The reap lives in `acquire` rather than in a command
-wrapper so that paths taking the lock directly (bench contexts, piners,
-ratatoskr) can't skip it.
+wrapper so that paths taking the lock directly (bench contexts)
+can't skip it.
 
 The post-acquisition reap runs only once the hold is usable, after the drain,
 so it can't rescue an acquisition that is itself blocked. That is why the

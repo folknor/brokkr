@@ -43,9 +43,9 @@ also gitignored.
 
 ## Measurable commands
 
-The typed measurable commands are mogwai's `mogwai`, sluggrs' `hotpath` and
-ratatoskr's `sync --bench`. Every other project measures through script
-benches (`brokkr bench NAME`), which any project can declare.
+The typed measurable commands are mogwai's `mogwai` and sluggrs' `hotpath`.
+Every other project measures through script benches (`brokkr bench NAME`),
+which any project can declare.
 
 ## Harness
 
@@ -56,13 +56,11 @@ measurement loop:
   the flock: a second process queues until the holder releases, so no two
   measure, verify or profile at once. Within one brokkr process the lock is
   re-entrant: a command that
-  invokes another locked command shares its hold. Ratatoskr's `sync --gate
-  all` and `sync --all` hold it across their whole sweep this way.
+  invokes another locked command shares its hold.
 - **SQLite result storage** with git commit, hostname and env snapshot.
-- **One wall source per run**: brokkr's own external wall, a self-reported
-  `elapsed_ms=` line on the child's stderr, or a required marker span. A run
-  that misses its span markers, or a self-reporting child that prints no
-  timing, fails the sample. Spans and whole-process walls are never ranked
+- **One wall source per run**: brokkr's own external wall, or a
+  self-reported `elapsed_ms=` line on the child's stderr. A self-reporting
+  child that prints no timing fails the sample. The two are never ranked
   together, and ties keep the first run.
 - **Evidence kept on failure.** A failed measurement, postprocessing step or
   row insert keeps what was captured under the `dirty` alias.
@@ -94,7 +92,7 @@ then warns that results won't be stored. The tree is the build root. So a
 `--force`: `--force` permits a dirty tree, it never decides storage.
 
 On a clean tree, `--force` warns that it has no effect, in every measured
-command, ratatoskr's `sync --bench` included. So in an A/B whose baseline is
+command. So in an A/B whose baseline is
 `--commit` and whose other arm is a dirty working tree, the output shows which
 arm filed a row.
 
@@ -183,7 +181,7 @@ Some lines go to the run-log channel instead of the console:
 - the `--hotpath` or `--alloc` header naming the target and instrument,
   since the command line already says both
 
-Every measured run, and `sync --bench`, opens a run log for this:
+Every measured run opens a run log for this:
 `.brokkr/check-logs/measure-MS.log` under the config dir. brokkr keeps the
 newest ten, apart from `check`'s and `test`'s logs (see the run log in
 `brokkr man check`).
@@ -192,8 +190,8 @@ With `--commit REF`, the worktree's commit is named once (`[run] commit
 abc1234 (subject)`, quiet-gated) by the shared worktree lifecycle, whichever
 command asked for it. Whether the worktree was reused or cut, and the
 isolated target dir the build is pinned to, use the same run-log channel.
-Under a command that keeps no run log (`run`, `verify` or `sync` with
-`--commit`), they print as quiet-gated `[run]` lines instead, rather than
+Under a command that keeps no run log (`run` or `verify` with `--commit`),
+they print as quiet-gated `[run]` lines instead, rather than
 vanish. A stale replacement or an eviction is printed.
 
 ### Warnings
@@ -575,8 +573,7 @@ A writer that takes its origin later, at its first FIFO open or first record,
 conforms only as far as that delay is negligible: every stamp is early
 against the samples by it. Some readings don't depend on the origin:
 
-- whatever only subtracts two stamps of one stream (`--durations`, a
-  marker-span wall)
+- whatever only subtracts two stamps of one stream (`--durations`)
 - `--stop` and `brokkr lock`'s last marker, which read names and brokkr's own
   observation time, not stamps
 
@@ -600,8 +597,8 @@ past 10^15 us, and leaves the rest unchecked. That threshold is 31.7 years,
 an operational assumption that no measured process in the stored history ran
 that long, not a protocol rule. Every UNIX-epoch stamp after 2001-09-09
 exceeds it. No reader interprets or rebases a stamp by its magnitude. A
-ratatoskr harness revision that stamps UNIX-epoch microseconds produces
-exactly such runs, at capture and in the stored history alike.
+writer that stamps UNIX-epoch microseconds produces exactly such runs, at
+capture and in the stored history alike.
 
 ### Arrival order and loss
 
@@ -706,9 +703,8 @@ spelling.
 
 Every chronological projection orders a stream's markers by timestamp, with
 arrival order breaking ties, since a thread stamps a marker before it
-competes for the write. The projections are segments, spans, phase lookup,
-and a marker-span wall source such as ratatoskr's `SYNC_START`..`SYNC_END`.
-The marker-span wall reads the process stream only.
+competes for the write. The projections are segments, spans and phase
+lookup.
 
 ### Counter views
 
@@ -851,8 +847,7 @@ flagged as stopped by deadline, and the run fails.
 
 The deadline bounds the child's whole life, a stop marker included. A child
 still running when it passes is killed as overdue even with a stop marker
-queued, and a stop's SIGTERM grace ends at it. The ratatoskr sync bench uses
-the script's `ceiling:`. Paths with no deadline run until the child exits or
+queued, and a stop's SIGTERM grace ends at it. Paths with no deadline run until the child exits or
 `brokkr kill`.
 
 ### Graceful kill
@@ -897,8 +892,6 @@ window:
 - each sidecar run
 - a passthrough child
 - every cargo build
-- an orchestrator's whole run; the ratatoskr sync bench holds one across all
-  its iterations
 - a measured command's whole run: build, tool materialization, prepare steps
   and every sample
 - the whole of `check`, `test`, `clippy` and `deps`
@@ -909,7 +902,7 @@ A loop over such children stops at the first `Interrupted` rather than
 recording it as that step's failure.
 
 Guards nest. The outermost installs and restores the handlers, so an inner
-guard (the sidecar's, inside an orchestrator's) can neither clear a request
+guard (the sidecar's, inside a measured command's) can neither clear a request
 that already arrived nor uncover the outer window when it drops. A second
 signal while a request is still pending takes the default action, so a wait
 that never polls the flag can't swallow the interrupt. Outside every guard,
@@ -924,7 +917,7 @@ and brokkr exits 130 (`brokkr man clean after-an-interrupt`).
 ### Hard kill
 
 `brokkr kill --hard` runs no handler. It SIGKILLs an in-scope holder's
-recorded child, mock servers and every identity-checked descendant of
+recorded child and every identity-checked descendant of
 brokkr, then brokkr. Nothing is flushed; follow up with `brokkr clean`.
 
 It signals by PID, so it refuses unless the holder shares the caller's PID
@@ -945,9 +938,7 @@ parent-death signal, and the orphan reap at the next locked command (see
 Sidecar data is stored even when the child is OOM-killed, segfaults, or exits
 non-zero: the `/proc` trajectory up to the kill is the whole point. This
 holds on every sidecar-enabled harness loop, `--hotpath` and `--alloc`
-included. Ratatoskr's marker-span source keeps every reaped iteration's data
-even when the child succeeded and only the step after it failed (log write,
-`summary.json`).
+included.
 
 Failed and dirty runs get a random UUID and update the `dirty` latest
 pointer. So `brokkr sidecar dirty` and `brokkr results dirty` resolve the
@@ -994,7 +985,6 @@ The shared child supervisor also bounds captured stdout and stderr, per
 stream:
 
 - 16 MiB for ordinary commands and sidecar measurements
-- 64 MiB for the ratatoskr harness
 - 128 MiB for Cargo output
 
 The `[cargo_env]` evaluator and `script_check` have smaller
@@ -1083,7 +1073,7 @@ included, are under "Refusals" in `brokkr man hygiene`.
 
 | Message | Cause | Fix |
 |---|---|---|
-| `a --MODE run refuses while 1 serve is outstanding - a serving process perturbs measurements:` | A `brokkr serve` server is live; the line lists each one (see "Modes"). A script bench, `sync --bench` and a criterion run refuse the same way. | Stop each listed serve with `brokkr serve --stop NAME`, then rerun. |
+| `a --MODE run refuses while 1 serve is outstanding - a serving process perturbs measurements:` | A `brokkr serve` server is live; the line lists each one (see "Modes"). A script bench and a criterion run refuse the same way. | Stop each listed serve with `brokkr serve --stop NAME`, then rerun. |
 | `a --MODE run refuses inside a served program (this process carries BROKKR_SERVE)` | The measurement was started from inside a program `brokkr serve` runs. | Run the measurement from outside the served program. |
 | `preflight failed:` then `dirty tree - commit or stash changes before benchmarking` | A stored mode found uncommitted changes in the build root (see "Dirty trees"). | Commit or stash, measure a `--commit REF`, or pass `--force` to run without storing. |
 | `config: subprocess stderr missing elapsed_ms=NNN. stderr was:` | A child measured by its self-reported wall printed no timing line (see "Harness"). | Make the child print `elapsed_ms=` on stderr; the error quotes what it printed instead. |

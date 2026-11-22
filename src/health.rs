@@ -148,11 +148,6 @@ pub(crate) fn state_stores(state_root: &Path) -> Vec<Store> {
             path: state.sluggrs_visual_db(),
             remedy: "no pruning: visual results and approvals",
         },
-        Store {
-            name: "ratatoskr-gate.db",
-            path: state.ratatoskr().gate_db(),
-            remedy: "no pruning: the gate baselines",
-        },
     ];
     stores.extend(user_stores());
     stores

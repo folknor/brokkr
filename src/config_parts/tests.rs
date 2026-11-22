@@ -2873,74 +2873,26 @@ sweeps = ["all"]
         assert!(err.contains("full"), "got: {err}");
     }
 
+    /// `[ratatoskr]` is retired: a ratatoskr project loads without one, and
+    /// with whatever an older config held there, the legacy sweep field and
+    /// gate blocks included.
     #[test]
-    fn ratatoskr_harness_rejects_legacy_sweep_field() {
-        let raw = r#"
-project = "ratatoskr"
-[ratatoskr.harness]
-sweep = "harness"
-binary = "app"
-"#;
-        let root: toml::Value = toml::from_str(raw).unwrap();
-        let table = root.as_table().unwrap();
-        let err = project_config::ratatoskr::parse(table).unwrap_err().to_string();
-        assert!(err.contains("sweep"), "got: {err}");
-        assert!(err.contains("no longer supported"), "got: {err}");
-    }
-
-    #[test]
-    fn ratatoskr_harness_parses_new_schema() {
-        let raw = r#"
-project = "ratatoskr"
-[ratatoskr.harness]
-package = "app"
-debug = true
-"#;
-        let root: toml::Value = toml::from_str(raw).unwrap();
-        let table = root.as_table().unwrap();
-        let cfg = project_config::ratatoskr::parse(table).unwrap();
-        let h = cfg.harness.unwrap();
-        assert_eq!(h.package, "app");
-        assert!(h.features.is_empty());
-        assert_eq!(h.debug, Some(true));
-    }
-
-    #[test]
-    fn harness_profile_names_a_custom_profile_and_beats_debug() {
-        let raw = r#"
-project = "ratatoskr"
-[ratatoskr.harness]
-package = "app"
-debug = true
-profile = "corpus"
-"#;
-        let root: toml::Value = toml::from_str(raw).unwrap();
-        let cfg = project_config::ratatoskr::parse(root.as_table().unwrap()).unwrap();
-        let h = cfg.harness.unwrap();
-        assert_eq!(
-            h.configured_profile("[ratatoskr.harness]"),
-            Some(crate::build::RustProfile::parse("corpus").unwrap())
-        );
-        // `release` is the built-in, so a higher layer can always override.
-        let h = HarnessConfig {
-            profile: Some(crate::build::RustProfile::parse("release").unwrap()),
-            ..h
-        };
-        assert_eq!(
-            h.configured_profile("[ratatoskr.harness]"),
-            Some(crate::build::RustProfile::Release)
-        );
-    }
-
-    #[test]
-    fn harness_profile_refuses_a_brokkr_owned_name() {
-        for name in ["debug", "tmp", "rustflags-x", "brokkr-worktrees"] {
-            let raw = format!(
-                "project = \"ratatoskr\"\n[ratatoskr.harness]\npackage = \"app\"\nprofile = \"{name}\"\n"
+    fn a_retired_ratatoskr_table_loads_whatever_it_holds_or_is_absent() {
+        for raw in [
+            "project = \"ratatoskr\"\n",
+            "project = \"ratatoskr\"\n[ratatoskr]\n",
+            "project = \"ratatoskr\"\n[ratatoskr.harness]\nsweep = \"harness\"\nbogus = 1\n\
+             [ratatoskr.gate.x.metrics.elapsed_ms]\nmax_relative = \"nope\"\n",
+        ] {
+            let root: toml::Value = toml::from_str(raw).unwrap();
+            let parsed = project_config::ProjectConfig::parse(
+                &crate::project::Project::Ratatoskr,
+                root.as_table().unwrap(),
             );
-            let root: toml::Value = toml::from_str(&raw).unwrap();
-            let err = project_config::ratatoskr::parse(root.as_table().unwrap()).unwrap_err();
-            assert!(err.to_string().contains(name), "{name}: {err}");
+            assert!(
+                matches!(parsed, Ok(project_config::ProjectConfig::Generic)),
+                "{raw}"
+            );
         }
     }
 

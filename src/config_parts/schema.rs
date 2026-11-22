@@ -1,4 +1,4 @@
-// The shared serde schemas: `DevConfig`, `HarnessConfig`, `ResolvedPaths`
+// The shared serde schemas: `DevConfig`, `ResolvedPaths`
 // and the tables they hold. `include!`d into `config.rs`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -2151,52 +2151,6 @@ pub struct DriveConfig {
     pub data: Option<String>,
     pub scratch: Option<String>,
     pub target: Option<String>,
-}
-
-/// `[ratatoskr.harness]` - self-contained build spec for ratatoskr's
-/// orchestration commands (`service`,
-/// `mock-serve`, `sync`). Decoupled from `[[check]]`
-/// so that the everyday `brokkr check` pass doesn't get conflated with
-/// "which features must the spawned binary have." See
-/// `docs/projects/ratatoskr.md`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HarnessConfig {
-    /// Cargo package to build. Passed straight to `cargo build --package`.
-    pub package: String,
-
-    /// Which `[[bin]]` inside `package` to spawn. Defaults to `package`
-    /// (the common case). Override only when the orchestration target
-    /// is a non-default bin inside a multi-binary package.
-    #[serde(default)]
-    pub binary: Option<String>,
-
-    /// Cargo features to activate for the harness build. Empty = cargo
-    /// defaults. There is no `no_default_features` here: orchestration
-    /// builds are not in the `brokkr check` sweep matrix, so the
-    /// no-default-features story is irrelevant.
-    #[serde(default)]
-    pub features: Vec<String>,
-
-    /// When true, orchestration commands build the harness with the dev
-    /// profile by default. The CLI `--debug` / `--release` / `--profile`
-    /// flags still override per-invocation.
-    #[serde(default)]
-    pub debug: Option<bool>,
-
-    /// The cargo profile orchestration commands build the harness with by
-    /// default: `dev`, `release` or a custom `[profile.<name>]`. Wins over
-    /// `debug` when both are set; the CLI flags still override it.
-    #[serde(default)]
-    pub profile: Option<crate::build::RustProfile>,
-}
-
-impl HarnessConfig {
-    /// The configured default profile: `profile`, else `debug`. `table` names
-    /// the section in the override warning.
-    pub fn configured_profile(&self, table: &str) -> Option<crate::build::RustProfile> {
-        crate::build::configured_profile(table, self.profile.as_ref(), self.debug)
-    }
 }
 
 #[allow(dead_code)]

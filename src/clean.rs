@@ -246,8 +246,6 @@ pub(crate) fn cmd_clean(
     clean_scratch(project, &paths, &c)?;
     clean_sidecar_fifos(&state, &c)?;
 
-    clean_artefact_trees(project, &state, &c)?;
-
     if c.dir(&state.test_hung_dir())? {
         output::run_msg(&format!("{} test-hung snapshots", c.verb()));
     }
@@ -472,86 +470,6 @@ fn clean_library_runs(paths: &config::ResolvedPaths, c: &Cleaner) -> Result<(), 
             output::count(removed, "library run directory")
         ));
     }
-    Ok(())
-}
-
-/// Remove child directories from a brokkr-designated artifact root while
-/// preserving each permanent store and any directory containing one.
-fn clean_artifact_children(
-    root: &Path,
-    permanent_files: &[std::path::PathBuf],
-    c: &Cleaner,
-) -> Result<usize, DevError> {
-    let metadata = match std::fs::symlink_metadata(root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(clean_io_error("cannot inspect", root, &error)),
-    };
-    if !metadata.file_type().is_dir() {
-        return Ok(0);
-    }
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(clean_io_error("cannot read directory", root, &error)),
-    };
-    let mut removed = 0usize;
-    for entry in entries {
-        let entry = entry
-            .map_err(|error| clean_io_error("cannot read directory entry in", root, &error))?;
-        let path = entry.path();
-        let kind = entry
-            .file_type()
-            .map_err(|error| clean_io_error("cannot inspect", &path, &error))?;
-        if !kind.is_dir() {
-            continue;
-        }
-        if permanent_files.iter().any(|file| file.starts_with(&path)) {
-            removed += clean_artifact_children(&path, permanent_files, c)?;
-        } else if c.dir(&path)? {
-            removed += 1;
-        }
-    }
-    Ok(removed)
-}
-
-/// Remove one explicitly owned artifact tree, descending only if it contains
-/// a named permanent store.
-fn clean_artifact_root(
-    root: &Path,
-    permanent_files: &[std::path::PathBuf],
-    c: &Cleaner,
-) -> Result<usize, DevError> {
-    if permanent_files.iter().any(|file| file.starts_with(root)) {
-        clean_artifact_children(root, permanent_files, c)
-    } else {
-        Ok(usize::from(c.dir(root)?))
-    }
-}
-
-/// Clean each project's artifact roots from its typed layout. Durable stores
-/// are named separately and never inferred from the contents of a directory.
-fn clean_artefact_trees(
-    project: &Project,
-    state: &layout::ProjectState,
-    c: &Cleaner,
-) -> Result<(), DevError> {
-    if *project == Project::Ratatoskr {
-        let ratatoskr = state.ratatoskr();
-        let permanent = [ratatoskr.gate_db()];
-        let mut removed = 0usize;
-        for root in ratatoskr.artifact_roots() {
-            removed += clean_artifact_root(&root, &permanent, c)?;
-        }
-        if removed > 0 {
-            output::run_msg(&format!(
-                "{} {} in ratatoskr artefacts",
-                c.verb(),
-                output::count(removed, "directory")
-            ));
-        }
-    }
-
     Ok(())
 }
 

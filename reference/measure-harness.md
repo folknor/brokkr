@@ -42,8 +42,7 @@ the project root's `.brokkr/` for every project, never a `--commit`
 worktree's, and reads git provenance from the build root.
 
 The lock is re-entrant within one process, and the flock is released when
-the last guard drops. Ratatoskr's `sync --gate all` relies on this: it holds
-the lock across its sweep while each swept bench acquires internally.
+the last guard drops.
 
 The mode a row records comes from the request, set once, so the `[result]`
 line's `mode=` and the sidecar provenance can't disagree.
@@ -56,7 +55,6 @@ the whole run:
 
 - external wall, timed by brokkr
 - self-reported stderr timing (`elapsed_ms=`)
-- a required marker span
 
 Every iteration keeps its streams, typed ending, optional sidecar data and
 observer failures. Best-of-N picks on `elapsed_us` where the loop has it;
@@ -77,9 +75,9 @@ The entry points over the loop:
   `run_external_prepared` and `run_external_with_kv` variants time a
   subprocess.
 
-`Measurement` (`src/measure/execution.rs`) keeps stdout and stderr for
-every captured iteration, so a caller can inspect either before recording;
-storage uses the winner's metrics.
+`Measurement` (`src/measure/execution.rs`) keeps stderr for every captured
+iteration, so a caller can inspect it before recording; storage uses the
+winner's metrics.
 
 ## Capture by mode
 

@@ -395,9 +395,6 @@ impl BenchHarness {
 
         if !git.is_clean {
             if force {
-                // Name the database. This governs results.db only - a gated
-                // ratatoskr run still records into gate.db, and unqualified
-                // the two lines read as a contradiction.
                 console::warn("dirty tree - results will NOT be stored in results.db");
             } else {
                 return Err(DevError::Preflight(vec![
@@ -430,17 +427,6 @@ impl BenchHarness {
             env_kv: Vec::new(),
             measure_start_epoch: std::cell::Cell::new(0),
         })
-    }
-
-    /// Set the cargo features that were used to build the binary.
-    ///
-    /// When set, this value is used as the default `cargo_features` for all
-    /// results recorded by this harness. Individual `BenchConfig.cargo_features`
-    /// values override the harness default when set. The DB writer canonicalizes
-    /// whichever label wins before persisting it.
-    pub fn with_cargo_features(mut self, features: Option<String>) -> Self {
-        self.cargo_features = features;
-        self
     }
 
     /// Set the brokkr invocation for this harness. Every row takes its
@@ -487,13 +473,6 @@ impl BenchHarness {
                 "clean tree - --force has no effect, results will be stored in results.db",
             );
         }
-    }
-
-    /// Expose the held lock so callers that spawn children outside of
-    /// `run_external` (notably `BenchHarness::capture_hotpath`) can still report
-    /// `child_pid` into the lockfile for `brokkr lock`.
-    pub fn lock(&self) -> &LockGuard {
-        &self.lock
     }
 
     /// Collect captured profiling iterations, including their failure evidence.

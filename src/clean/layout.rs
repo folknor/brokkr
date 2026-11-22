@@ -161,61 +161,8 @@ impl ProjectState {
         self.root.join("serve")
     }
 
-    pub(crate) fn ratatoskr(&self) -> RatatoskrLayout {
-        RatatoskrLayout::new(&self.root)
-    }
-
     pub(crate) fn litehtml(&self) -> LitehtmlLayout {
         LitehtmlLayout::new(&self.root)
-    }
-}
-
-/// Ratatoskr run artifacts and the durable gate store.
-#[derive(Debug, Clone)]
-pub(crate) struct RatatoskrLayout {
-    root: PathBuf,
-}
-
-impl RatatoskrLayout {
-    fn new(state_root: &Path) -> Self {
-        Self {
-            root: state_root.join("ratatoskr"),
-        }
-    }
-
-    pub(crate) fn gate_db(&self) -> PathBuf {
-        self.root.join("gate.db")
-    }
-
-    pub(crate) fn artifact_roots(&self) -> [PathBuf; 4] {
-        [
-            self.service_artifacts(),
-            self.service_mock_artifacts(),
-            self.sync_artifacts(),
-            self.mock_artifacts(),
-        ]
-    }
-
-    /// Service runs have a dedicated level so script stems cannot collide
-    /// with sync artifacts, mock state, or the gate database.
-    pub(crate) fn service_artifacts(&self) -> PathBuf {
-        self.root.join("service")
-    }
-
-    /// Fixture state for service runs stays separate from both service
-    /// artifacts and mock-serve's stable readiness directory.
-    pub(crate) fn service_mock_artifacts(&self) -> PathBuf {
-        self.root.join("service-mock")
-    }
-
-    /// Per-test artifacts for sync runs.
-    pub(crate) fn sync_artifacts(&self) -> PathBuf {
-        self.root.join("sync")
-    }
-
-    /// Stable readiness sentinel directory for `mock-serve`.
-    pub(crate) fn mock_artifacts(&self) -> PathBuf {
-        self.root.join("mock")
     }
 }
 

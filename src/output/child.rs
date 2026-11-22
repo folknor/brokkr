@@ -21,7 +21,6 @@ use crate::error::DevError;
 use crate::shutdown::ChildIsolation;
 
 const DEFAULT_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
-const LARGE_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
 const CARGO_CAPTURE_BYTES: usize = 128 * 1024 * 1024;
 
 /// Why a child stopped. The supervisor assigns this once at the event that
@@ -172,11 +171,6 @@ impl CapturedOutput {
     /// The child's exit code, when it exited by itself.
     pub fn code(&self) -> Option<i32> {
         self.ending.exit_code()
-    }
-
-    /// The signal that killed the child, when one did.
-    pub fn signal(&self) -> Option<i32> {
-        self.ending.signal()
     }
 
     /// Return `Ok(())` if the process exited successfully, a
@@ -608,11 +602,6 @@ impl CaptureCap {
     pub(crate) const DEFAULT: Self = Self {
         stdout: DEFAULT_CAPTURE_BYTES,
         stderr: DEFAULT_CAPTURE_BYTES,
-    };
-
-    pub(crate) const LARGE: Self = Self {
-        stdout: LARGE_CAPTURE_BYTES,
-        stderr: LARGE_CAPTURE_BYTES,
     };
 
     pub(crate) const CARGO: Self = Self {
