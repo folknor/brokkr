@@ -208,6 +208,23 @@ pub(crate) fn cmd_results(
     Ok(())
 }
 
+/// `results UUID --json`: one script-bench run as JSON on stdout. Only the
+/// bench store is read; typed rows have no JSON form.
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
+pub(crate) fn cmd_results_json(
+    dev_config: &DevConfig,
+    project: &str,
+    prefix: &str,
+) -> Result<(), DevError> {
+    let Some(bench) = BenchReader::open(project, dev_config.results_server.as_ref())? else {
+        return Err(DevError::Usage(format!(
+            "no script-bench run of this project starts with {prefix}: there is no bench store"
+        )));
+    };
+    println!("{}", crate::bench::results::run_json(&bench, prefix)?);
+    Ok(())
+}
+
 /// `--invocation ID`: one `--rounds` invocation's summary. Typed rows have
 /// no invocations, so only the bench store is read.
 #[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.

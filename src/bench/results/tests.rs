@@ -822,3 +822,49 @@ fn an_invocation_summary_pairs_rounds_and_names_what_is_missing() {
         "{out}"
     );
 }
+
+#[test]
+fn the_json_view_names_the_result_iteration_and_each_childs_peaks() {
+    let path = scratch("json");
+    let mut doc = run(1, "cat", 'a', 1_000, 300);
+    doc.iterations_requested = 2;
+    let mut fast = iteration(200, None, &serde_json::json!({"nodes": 10}));
+    let sample = |rss_kb, vm_hwm_kb| {
+        let zeros: serde_json::Map<String, serde_json::Value> = crate::bench::store::Sample::COLUMNS
+            .iter()
+            .map(|c| ((*c).to_owned(), serde_json::json!(0)))
+            .collect();
+        let mut s: crate::bench::store::Sample =
+            serde_json::from_value(zeros.into()).unwrap();
+        s.rss_kb = rss_kb;
+        s.vm_hwm_kb = vm_hwm_kb;
+        s
+    };
+    fast.children[0].evidence.samples = vec![sample(500, 600), sample(900, 950)];
+    fast.children[0].ending = ChildEnding::Exited { code: 3 };
+    doc.iterations.push(fast);
+    publish(&path, &[doc, run(2, "cat", 'a', 2_000, 100)]);
+    let reader = reader(&path);
+
+    let out: serde_json::Value =
+        serde_json::from_str(&super::run_json(&reader, "000000000000abcd0000000000000001").unwrap())
+            .unwrap();
+    assert_eq!(out["schema"], "brokkr-results-run");
+    assert_eq!(out["version"], 1);
+    assert_eq!(out["bench"], "cat");
+    assert_eq!(out["result"]["iteration"], 1);
+    assert_eq!(out["result"]["wall_us"], 200);
+    assert_eq!(out["result"]["wall_of"], "block");
+    assert_eq!(out["iterations"][0]["result"], false);
+    assert_eq!(out["iterations"][1]["result"], true);
+    assert_eq!(out["iterations"][1]["record"]["nodes"], 10);
+    let child = &out["iterations"][1]["children"][0];
+    assert_eq!(child["exit_code"], 3);
+    assert_eq!(child["peak_rss_kb"], 900);
+    assert_eq!(child["peak_vm_hwm_kb"], 950);
+    assert!(out["iterations"][0]["children"][0]["peak_rss_kb"].is_null());
+    assert_eq!(out["document"]["format"], DOCUMENT_FORMAT);
+
+    assert!(super::run_json(&reader, "0000").is_err());
+    assert!(super::run_json(&reader, "ffff").is_err());
+}

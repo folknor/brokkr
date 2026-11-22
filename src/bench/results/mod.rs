@@ -16,11 +16,13 @@ mod annotations;
 mod compare;
 mod config_diff;
 mod host;
+mod json;
 mod rounds;
 mod single;
 mod table;
 
 pub(crate) use compare::format_compare;
+pub(crate) use json::run_json;
 pub(crate) use rounds::format_rounds;
 pub(crate) use single::{ending as child_ending, format_single};
 pub(crate) use table::format_table;

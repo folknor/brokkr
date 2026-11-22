@@ -626,6 +626,42 @@ A `--hotpath` run says `measured hotpath`, an `--alloc` run `measured
 alloc`. The block ends with the result's `record`, one entry per line as
 compact JSON; for a run without a result, each extracted iteration's record.
 
+### JSON
+
+`brokkr results UUID --json` prints the one script-bench run the prefix
+names, hidden or not, as a JSON document on stdout, for a project tool to
+read and gate on. A prefix naming no run, or several, fails the command.
+Typed rows have no JSON form, and `--json` takes no filter.
+
+The document's `schema` is `brokkr-results-run` and its `version` is an
+integer. A change that would make a reader misread the document raises the
+version, so a tool should refuse one it doesn't know. A new field beside the
+others doesn't raise it.
+
+Top-level fields:
+
+- **Identity**: `uuid`, `project`, `bench` (as renamed), `stored_bench`,
+  `commit`, `dirty`, `hostname`, `started_unix_ms`, `measurement`.
+- **`build`**: `target`, `profile`, `features`, `default_features`,
+  `resolved`.
+- **`outcome`**, **`iterations_requested`**, **`pairing_key`**.
+- **`hidden`**: one entry per mark hiding the run, with `by` (`retired` or
+  `invalidated`), `mark`, `at_unix_ms`, `hostname` and `reason`.
+- **`result`**: `null` for a run without a result; otherwise `iteration`
+  (its index), `wall_us`, `wall_of` (`block`, or `measured_child` for a run
+  that marked a measured call) and `verdict`. This is the iteration the
+  table and `--compare` use, so a tool needn't pick a best of N itself.
+- **`iterations`**: in execution order, each with `index`, `result`
+  (whether it is the result iteration), `outcome`, `wall_us`,
+  `result_wall_us`, `record` and `children`.
+- **`document`**: the stored run document whole, every sample, record and
+  host reading included. Its own `format` field versions it.
+
+Each child has `index`, `program`, `argv`, `measured`, `wall_us`, `ending`,
+`exit_code` (`null` unless it exited), `samples` (the sidecar sample count),
+and `peak_rss_kb` and `peak_vm_hwm_kb`, the largest `rss_kb` and `vm_hwm_kb`
+over its samples, `null` with none.
+
 ### Hotpath reports
 
 brokkr renders each report a marked call captured (`brokkr man bench`,

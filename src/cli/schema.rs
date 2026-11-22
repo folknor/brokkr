@@ -1222,6 +1222,14 @@ pub(crate) struct ResultsCmd {
     #[arg(long = "grep-v")]
     pub(crate) grep_v: Vec<String>,
 
+    /// Print the one script-bench run the UUID prefix names as a
+    /// versioned JSON document on stdout, for a tool to read. Takes no
+    /// filter.
+    #[arg(long, requires = "query", conflicts_with_all = [
+        "command", "mode", "dataset", "meta", "env", "param", "grep", "grep_v", "hidden",
+    ])]
+    pub(crate) json: bool,
+
     /// Maximum number of results to show
     #[arg(long, short = 'n', default_value = "20")]
     pub(crate) limit: usize,

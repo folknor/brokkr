@@ -514,6 +514,7 @@ fn run_project(
             param,
             grep,
             grep_v,
+            json,
             limit,
             top,
             hidden,
@@ -549,6 +550,9 @@ fn run_project(
                     project.name(),
                     dev_config.results_server.as_ref(),
                 );
+            }
+            if json && let Some(prefix) = &query {
+                return results_cmd::cmd_results_json(dev_config, project.name(), prefix);
             }
             let params = param
                 .iter()
