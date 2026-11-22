@@ -22,13 +22,15 @@ pub(crate) fn cmd_lock() -> Result<(), DevError> {
 
 /// What a holder or a queued command was asked to do, as `brokkr lock` and
 /// `brokkr kill` name it: the project key and the invocation, or the
-/// invocation marked as having no `brokkr.toml`.
+/// invocation marked as having no `brokkr.toml`. The invocation is spelled as
+/// a `brokkr` command line, so `piners: brokkr run ...` cannot read as a
+/// `piners` binary's own command.
 fn invocation_label(configured: bool, project: &str, command: &str, args: &str) -> String {
     let what = if args.is_empty() { command } else { args };
     if configured {
-        format!("{project} {what}")
+        format!("{project}: brokkr {what}")
     } else {
-        format!("(no brokkr.toml) {what}")
+        format!("(no brokkr.toml): brokkr {what}")
     }
 }
 

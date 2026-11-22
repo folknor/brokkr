@@ -27,6 +27,11 @@ design input.
   dev timings as corpus ones. The config should own the profile of a named
   program, its with-targets included, and the CLI should refuse to contradict
   it.
+- **A program's name is its whole invocation.** `brokkr run corpus` should
+  mean `brokkr run --profile corpus --with corpus-harness corpus -- run`, and
+  `brokkr run corpus --all` should append `--all` after that, giving
+  `... corpus -- run --all`. Today nobody types the long form the same way
+  twice, and a forgotten piece is the #203 failure.
 - **A consumer knows what it was handed** (brokkr#200). `run --with` passes
   only `BROKKR_WITH_EXE`. The profile, commit, dirty state and feature
   selection brokkr resolved never reach the program. piners worked around all
@@ -46,6 +51,16 @@ design input.
 features, rustflags. It must be readable without running anything: refusing a
 conflicting `--profile` before a build, `install --names`, help visibility
 and the project gate all read config that way.
+
+**A program entry is its own alias.** There is no separate alias namespace:
+`[program.corpus]` declares the build (profile, with-targets) and a fixed
+leading `args` list, here `["run"]`, and `brokkr run corpus` runs exactly
+that. Once brokkr sees a program name, every later token is appended to
+the program's arguments, so brokkr's own flags go before the name. A flag
+that contradicts the declaration, such as `brokkr run --profile dev corpus`,
+is refused before the build. One name means one way to build and run it,
+which is #203 with the arguments included. Still open: whether a program
+name may shadow a bin of the same name that has no entry, or is refused.
 
 **Lua for what happens around it**: post-install actions, deploys, smoke
 checks, and multi-step builds cargo alone does not cover (codegen, bundling).
