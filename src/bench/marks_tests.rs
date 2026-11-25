@@ -266,6 +266,18 @@ fn a_comparison_key_resolves_the_bench_and_keeps_the_algorithm() {
         view.comparison_key(v2),
         r#"["bench-pair-v2","hotpath","pbfhogg","concat",[]]"#
     );
+    let v3 = r#"["bench-pair-v3","timing","measured-child","pbfhogg","cat",[]]"#;
+    assert_eq!(
+        view.comparison_key(v3),
+        r#"["bench-pair-v3","timing","measured-child","pbfhogg","concat",[]]"#
+    );
+    // A reset keeps its procedure and resolves the key it wraps.
+    let v4 = serde_json::json!(["bench-pair-v4", "trim-v1", v2]).to_string();
+    let resolved = r#"["bench-pair-v2","hotpath","pbfhogg","concat",[]]"#;
+    assert_eq!(
+        view.comparison_key(&v4),
+        serde_json::json!(["bench-pair-v4", "trim-v1", resolved]).to_string()
+    );
     assert_eq!(
         view.comparison_key("[\"future\",\"cat\"]"),
         "[\"future\",\"cat\"]"

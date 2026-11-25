@@ -226,6 +226,19 @@ function bench(params)
     binary(params.mode):ok()
 end"""
 
+[bench.trimmed]
+profile = "dev"
+params.mode = { choices = ["a", "b"], default = "a" }
+params.answer = { choices = ["bool", "number"], default = "bool" }
+script = """
+function fstrim(params)
+    if params.answer == "number" then return 1 end
+    return params.mode == "a"
+end
+function bench(params)
+    binary(params.mode):ok()
+end"""
+
 [bench.unchecked]
 profile = "dev"
 params.mode = { validated = true, default = "plain" }
@@ -1009,6 +1022,50 @@ fn validate_and_dry_run_judge_the_invocation_before_anything_is_built() {
     let error = fixture.bench("unvalidated", "unchecked", 1, &[]).error();
     assert!(
         error.contains("--mode is validated = true, but the script declares no validate()"),
+        "{error}"
+    );
+}
+
+/// `fstrim()` is asked per arm as `validate()` is: `--dry-run` names the
+/// arms that trim without probing anything, a run that would trim refuses
+/// before anything is built when the helper is not installed, and an
+/// answer that is not one boolean is a script error.
+#[test]
+fn fstrim_answers_per_arm_and_a_trimming_run_needs_the_helper() {
+    let _serial = crate::test_scratch::process_global_lock();
+    let fixture = Fixture::new("fstrim");
+    let _hold = crate::lockfile::test_hold(
+        &fixture.detection.project_root,
+        &fixture.detection.build_root,
+    );
+    let ran = fixture.dry("fstrim-dry", "trimmed", &["--mode", "a,b"]);
+    assert!(ran.result.is_ok(), "{}", ran.console);
+    ran.says("arm 1/2 (mode=a): --answer bool --mode a, trims scratch before each iteration");
+    assert!(
+        !ran.console.contains("--mode b, trims"),
+        "arm b does not trim: {}",
+        ran.console
+    );
+
+    let error = fixture
+        .bench("fstrim-real", "trimmed", 1, &["--mode", "a"])
+        .error();
+    assert!(
+        error.contains("fstrim() asks for a trimmed scratch")
+            && error.contains("brokkr-fstrim-never-installed does not exist"),
+        "{error}"
+    );
+    assert!(fixture.stored().is_empty(), "nothing is stored");
+
+    let error = fixture
+        .dry(
+            "fstrim-broken",
+            "trimmed",
+            &["--mode", "a", "--answer", "number"],
+        )
+        .error();
+    assert!(
+        error.contains("fstrim script error") && error.contains("exactly one boolean"),
         "{error}"
     );
 }

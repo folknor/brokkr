@@ -350,6 +350,24 @@ impl Context {
                 return Ok(ended);
             }
         }
+        // The pure decision runs as a real one does; the trim itself is
+        // the host's and never runs here.
+        if frozen.script.has_fstrim() {
+            let host = super::validate::ValidateHost {
+                config: Arc::clone(&config),
+            };
+            let (ran, _) = lua::run_hook(
+                lua::Hook::Fstrim,
+                &frozen.script,
+                &bound.preflight_args(),
+                host,
+            );
+            modules.extend(ran.modules);
+            if let Some(ended) = hook_ended("fstrim", ran.outcome, None)? {
+                unconsumed(spec, 0, 0)?;
+                return Ok(ended);
+            }
+        }
         let mut shared = host::Shared {
             since: spec.since.clone(),
             fault: None,
@@ -433,7 +451,9 @@ fn hook_ended(
         return Err(fixture_fault(fault));
     }
     match outcome {
-        lua::HookOutcome::Passed => Ok(None),
+        // A contract test runs validate and preflight only, which never
+        // decide; fstrim() is the runner's.
+        lua::HookOutcome::Passed | lua::HookOutcome::Decided(_) => Ok(None),
         lua::HookOutcome::Refused(why) => Ok(Some(Ended::at(stage, "refused", Some(why)))),
         lua::HookOutcome::Broken(why) => Ok(Some(Ended::at(stage, "broken", Some(why)))),
         lua::HookOutcome::Failed(why) => {

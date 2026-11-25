@@ -542,13 +542,23 @@ fn pointer_line(
 }
 
 /// The class a run pairs in, read from its stored key: `timing` under
-/// `bench-pair-v1`, else the class `bench-pair-v2` names.
+/// `bench-pair-v1`, else the class `bench-pair-v2` or `bench-pair-v3`
+/// names; a `bench-pair-v4` key is its inner key's class with its reset.
 fn pairing_class(run: &StoredRun) -> String {
-    let value: Option<serde_json::Value> = serde_json::from_str(&run.pairing_key).ok();
+    key_class(&run.pairing_key)
+}
+
+fn key_class(key: &str) -> String {
+    let value: Option<serde_json::Value> = serde_json::from_str(key).ok();
     let parts = value.as_ref().and_then(serde_json::Value::as_array);
-    match parts.and_then(|p| Some((p.first()?.as_str()?, p.get(1)?.as_str()))) {
-        Some(("bench-pair-v1", _)) => "timing".to_owned(),
-        Some(("bench-pair-v2", Some(class))) => class.to_owned(),
+    match parts.and_then(|p| Some((p.first()?.as_str()?, p.get(1)?.as_str(), p.get(2)))) {
+        Some(("bench-pair-v1", _, _)) => "timing".to_owned(),
+        Some(("bench-pair-v2", Some(class), _)) => class.to_owned(),
+        Some(("bench-pair-v3", Some(class), _)) => format!("{class} on a measured child"),
+        Some(("bench-pair-v4", Some(procedure), Some(inner))) => match inner.as_str() {
+            Some(inner) => format!("{}, reset {procedure}", key_class(inner)),
+            None => "(unknown)".to_owned(),
+        },
         _ => "(unknown)".to_owned(),
     }
 }

@@ -14,6 +14,7 @@
 //! read around each sample.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::os::fd::{AsRawFd as _, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -99,6 +100,227 @@ pub(super) struct IterationSetup<'a> {
     pub(super) budget: Budget,
     /// The run so far: its uuid, project and bench name the cell cursor.
     pub(super) run: &'a store::RunDocument,
+    /// The pinned trim helper when this arm's `fstrim()` answered true: each
+    /// iteration then syncs and trims its scratch filesystem after its
+    /// cursor is written and before its trace starts and `bench()` runs.
+    pub(super) fstrim: Option<&'a crate::fstrim::Helper>,
+}
+
+/// What a reset needs of the iteration: where it trims through, and what
+/// admission recorded of it.
+pub(super) struct ResetTarget<'a> {
+    container: &'a Path,
+    dir: &'a Path,
+    /// `(st_dev, st_ino)` of `dir` as the lease recorded it.
+    identity: (u64, u64),
+    /// Whether this iteration's in-progress cursor was written, which is
+    /// what names a reset that is killed.
+    cursor_written: bool,
+}
+
+/// Every other `.brokkr-iteration-` entry in the container, read through
+/// the pinned descriptor `container`, names compared as bytes. A listing
+/// that fails, or an entry that does not read, is an error, never a pass.
+fn retained_iterations(container: &OwnedFd, own: &std::ffi::OsStr) -> Result<Vec<String>, String> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let at = format!("/proc/self/fd/{}", container.as_raw_fd());
+    let entries = std::fs::read_dir(&at).map_err(|e| format!("cannot list the container: {e}"))?;
+    let mut retained = Vec::new();
+    for entry in entries {
+        let name = entry
+            .map_err(|e| format!("cannot list the container: {e}"))?
+            .file_name();
+        if name != own
+            && name
+                .as_bytes()
+                .starts_with(crate::reservations::ITERATION_DIR_PREFIX.as_bytes())
+        {
+            retained.push(name.to_string_lossy().into_owned());
+        }
+    }
+    Ok(retained)
+}
+
+/// Sync and trim the filesystem holding the iteration directory, which
+/// must be the admitted inode on the container's filesystem: what the reset
+/// record holds, completed or not. A refusal of brokkr's own (no cursor to
+/// name it, another iteration's directory still in the container, a
+/// directory replaced since admission, another filesystem, no hold) is a
+/// record with `refused` set and no stage run.
+fn reset_iteration(helper: &crate::fstrim::Helper, at: &ResetTarget<'_>) -> store::Reset {
+    let boot = || {
+        crate::boot_clock::BootInstant::now()
+            .ok()
+            .map(crate::boot_clock::BootInstant::as_us)
+    };
+    let started = boot();
+    let refused = |why: String| store::Reset {
+        procedure: store::RESET_TRIM_V1.to_owned(),
+        path: at.dir.display().to_string(),
+        target: None,
+        fsid: None,
+        lock_seen: false,
+        sync: store::ResetStage::Unreported,
+        trim: store::ResetStage::Unreported,
+        reported_bytes: None,
+        refused: Some(why),
+        malformed: None,
+        output_cut: false,
+        reap_unconfirmed: false,
+        ending: "not started".to_owned(),
+        completed: false,
+        started_us: started,
+        ended_us: boot(),
+    };
+    if !at.cursor_written {
+        return refused(
+            "the cell cursor could not be written, so a trim killed now would go unnamed"
+                .to_owned(),
+        );
+    }
+    let container = match crate::fstrim::open_target(at.container) {
+        Ok(container) => container,
+        Err(why) => return refused(why),
+    };
+    // Blocks another iteration's directory still holds are not free to
+    // trim: a reset over them would not be the reset it records.
+    let own = at.dir.file_name().unwrap_or_default();
+    match retained_iterations(&container.dir, own) {
+        Err(why) => return refused(why),
+        Ok(retained) if !retained.is_empty() => {
+            return refused(format!(
+                "an earlier iteration's directory is still in {}: {}; its blocks are not free \
+                 to trim (brokkr clean reclaims it once nothing holds it)",
+                crate::output::path(at.container),
+                retained.join(", ")
+            ));
+        }
+        Ok(_) => {}
+    }
+    // The iteration as the scanned container holds it, so the directory
+    // trimmed through sits in the container whose entries were checked.
+    let target = match own
+        .to_str()
+        .ok_or_else(|| format!("{} is not UTF-8", at.dir.display()))
+        .and_then(|name| crate::fstrim::open_target_at(&container.dir, name, at.dir))
+    {
+        Ok(target) => target,
+        Err(why) => return refused(why),
+    };
+    match crate::fstrim::open_target(at.container) {
+        Ok(now) if (now.dev, now.ino) == (container.dev, container.ino) => {}
+        Ok(_) => {
+            return refused(format!(
+                "{} was replaced while the trim was being prepared",
+                crate::output::path(at.container)
+            ));
+        }
+        Err(why) => return refused(why),
+    }
+    if (target.dev, target.ino) != at.identity {
+        return refused("the iteration directory was replaced since it was admitted".to_owned());
+    }
+    if container.dev != target.dev {
+        return refused(format!(
+            "the iteration directory is not on the scratch filesystem of {}",
+            crate::output::path(at.container)
+        ));
+    }
+    let hold = match crate::lockfile::live_hold() {
+        Some(hold) => hold,
+        None => return refused("no brokkr lock is held to trim under".to_owned()),
+    };
+    match crate::fstrim::trim(helper, &target.dir, &hold) {
+        Ok(trim) => trim.to_reset(at.dir, started, boot()),
+        Err(DevError::Interrupted) => store::Reset {
+            ending: "interrupted".to_owned(),
+            ..refused("stopped before the helper started".to_owned())
+        },
+        Err(error) => refused(error.to_string()),
+    }
+}
+
+/// An iteration that could not be admitted: no trace, reset or sample.
+fn unadmitted(error: &DevError) -> store::Iteration {
+    store::Iteration {
+        outcome: store::IterationOutcome::Failed {
+            reason: format!("the iteration could not be admitted: {error}"),
+        },
+        wall_us: None,
+        record: None,
+        children: Vec::new(),
+        host: None,
+        reset: None,
+    }
+}
+
+/// The console line for a completed reset.
+fn announce_reset(index: usize, container: &Path, reset: &store::Reset) {
+    crate::output::bench_msg(&format!(
+        "iteration {}: trimmed {}{}",
+        index + 1,
+        crate::output::path(container),
+        reset
+            .reported_bytes
+            .map(|b| format!(", FITRIM reported {}", crate::output::format_bytes(b)))
+            .unwrap_or_default()
+    ));
+}
+
+/// The sample, or none when the reset failed: a reset that did not
+/// complete ends the iteration before its chunk or `bench()` runs, and its
+/// directory is released and its cursor ended all the same.
+fn sample_unless_reset_failed(
+    script: &lua::Script,
+    args: &lua::Args,
+    host: IterationHost,
+    reset_failed: bool,
+) -> (lua::Sample, IterationHost) {
+    if !reset_failed {
+        return lua::run_sample(script, args, host);
+    }
+    (
+        lua::Sample {
+            outcome: lua::SampleOutcome::Failed(String::new()),
+            wall: None,
+            record: None,
+            modules: BTreeSet::new(),
+        },
+        host,
+    )
+}
+
+/// How an iteration whose reset did not complete ends, before `bench()`.
+fn reset_outcome(reset: &store::Reset) -> Option<store::IterationOutcome> {
+    if reset.completed {
+        return None;
+    }
+    if reset.ending == "interrupted" || crate::shutdown::should_unwind() {
+        return Some(store::IterationOutcome::Interrupted);
+    }
+    let why = match (&reset.refused, &reset.malformed) {
+        (Some(why), _) => why.clone(),
+        (None, Some(line)) => format!("unreadable helper output at {line:?}"),
+        (None, None) => {
+            let stage = |name: &str, s: &store::ResetStage| match s {
+                store::ResetStage::Ok { .. } => format!("{name} ok"),
+                store::ResetStage::Failed { errno } => format!(
+                    "{name} failed: {}",
+                    std::io::Error::from_raw_os_error(*errno)
+                ),
+                store::ResetStage::Unreported => format!("{name} unreported"),
+            };
+            format!(
+                "{}, {} ({})",
+                stage("sync", &reset.sync),
+                stage("trim", &reset.trim),
+                reset.ending
+            )
+        }
+    };
+    Some(store::IterationOutcome::Failed {
+        reason: format!("fstrim: {why}"),
+    })
 }
 
 /// What a run may still keep of its children's output, spent across its
@@ -148,24 +370,11 @@ pub(super) fn run_iteration(
         .and_then(|()| Resources::open(setup.container, setup.inputs));
     let resources = match resources {
         Ok(resources) => resources,
-        Err(error) => {
-            return (
-                store::Iteration {
-                    outcome: store::IterationOutcome::Failed {
-                        reason: format!("the iteration could not be admitted: {error}"),
-                    },
-                    wall_us: None,
-                    record: None,
-                    children: Vec::new(),
-                    host: None,
-                },
-                since,
-                budget,
-                BTreeSet::new(),
-            );
-        }
+        Err(error) => return (unadmitted(&error), since, budget, BTreeSet::new()),
     };
-    let trace = TraceStart::begin(
+    let dir = resources.dir().to_path_buf();
+    let identity = resources.dir_identity();
+    let (trace, reset) = TraceStart::begin(
         setup.container,
         host_trace::cell(
             &setup.run.uuid,
@@ -174,7 +383,24 @@ pub(super) fn run_iteration(
             setup.index,
         ),
         budget.host_readings,
+        |cursor_written| {
+            setup.fstrim.map(|helper| {
+                reset_iteration(
+                    helper,
+                    &ResetTarget {
+                        container: setup.container,
+                        dir: &dir,
+                        identity,
+                        cursor_written,
+                    },
+                )
+            })
+        },
     );
+    let reset_failed = reset.as_ref().and_then(reset_outcome);
+    if let Some(reset) = reset.as_ref().filter(|r| r.completed) {
+        announce_reset(setup.index, setup.container, reset);
+    }
     // The inputs are the first handles, in order, as the args' handles
     // index them.
     let calls = Calls::new(resources.inputs().to_vec());
@@ -192,14 +418,25 @@ pub(super) fn run_iteration(
         budget,
         since,
     };
-    let (sample, mut host) = lua::run_sample(setup.script, setup.args, host);
-    let observed = trace.finish(&mut host, setup.index);
+    let (sample, mut host) =
+        sample_unless_reset_failed(setup.script, setup.args, host, reset_failed.is_some());
+    let (observed, release_completed) = trace.finish(&mut host, setup.index);
     // A stop pending at the end of the iteration interrupts it whatever the
     // sample said: a completed block ran under it, and a failure may be the
     // stop's own doing (a git call or a child it cut short).
     let mut profile_failed = false;
     let outcome = match sample.outcome {
         _ if crate::shutdown::should_unwind() => store::IterationOutcome::Interrupted,
+        _ if reset_failed.is_some() => reset_failed.clone().unwrap_or(store::IterationOutcome::Interrupted),
+        // A trimmed iteration that kept its directory leaves blocks the next
+        // trim cannot free: it fails, so no trimmed run completes over it.
+        lua::SampleOutcome::Completed(_) if reset.is_some() && !release_completed => {
+            store::IterationOutcome::Failed {
+                reason: "fstrim: the iteration directory was not released, so the next \
+                         iteration's trim would not free its blocks"
+                    .to_owned(),
+            }
+        }
         lua::SampleOutcome::Completed(verdict) => {
             match profile_failure(setup.measurement, &host.children) {
                 // A completed sample under --hotpath fails here, its children
@@ -229,6 +466,7 @@ pub(super) fn run_iteration(
             record,
             children: host.children,
             host: observed,
+            reset,
         },
         host.since,
         host.budget,
@@ -251,8 +489,9 @@ struct TraceStart {
 
 impl TraceStart {
     /// After `bench()`: stop sampling, read the end, release the
-    /// iteration's directory, read again and record this cell's end.
-    fn finish(self, host: &mut IterationHost, index: usize) -> Option<store::HostTrace> {
+    /// iteration's directory, read again and record this cell's end. Returns
+    /// the trace, when it validates, and whether the release completed.
+    fn finish(self, host: &mut IterationHost, index: usize) -> (Option<store::HostTrace>, bool) {
         let (readings, capped) = self.sampler.finish();
         let end = host_trace::read(self.device.as_ref());
         host.budget.host_readings = host.budget.host_readings.saturating_sub(readings.len());
@@ -309,16 +548,26 @@ impl TraceStart {
                 "bench cell cursor was not usable; its predecessor is not recorded",
             );
         }
-        match trace.validate() {
+        let trace = match trace.validate() {
             Ok(()) => Some(trace),
             Err(error) => {
                 crate::output::warn(&format!("host trace not stored: {error}"));
                 None
             }
-        }
+        };
+        (trace, release_completed)
     }
 
-    fn begin(container: &Path, cell: store::Cell, budget: usize) -> Self {
+    /// Resolve the device, read the cursor and write this cell's in-progress
+    /// one, run `between` (a managed reset), and only then take the start
+    /// reading and start sampling: a reset is named by the cursor, so a
+    /// killed one is never an unnamed gap, and its I/O is outside the trace.
+    fn begin<R>(
+        container: &Path,
+        cell: store::Cell,
+        budget: usize,
+        between: impl FnOnce(bool) -> R,
+    ) -> (Self, R) {
         let device = host_trace::resolve_device(container);
         let previous = host_trace::read_cursor();
         let cursor_written =
@@ -340,16 +589,20 @@ impl TraceStart {
                     false
                 }
             };
+        let ran = between(cursor_written);
         let start = host_trace::read(device.as_ref());
         let sampler = host_trace::Sampler::start(device.clone(), budget);
-        Self {
-            device,
-            cell,
-            previous,
-            cursor_written,
-            start,
-            sampler,
-        }
+        (
+            Self {
+                device,
+                cell,
+                previous,
+                cursor_written,
+                start,
+                sampler,
+            },
+            ran,
+        )
     }
 }
 

@@ -10,7 +10,7 @@ use super::document::{
     ChildBootInterval, ChildEnding,
     Clock, Conditions, DeviceCounters, Evidence, Executable, ExecutableIdentity, HostTrace,
     HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue, Reading, Record,
-    ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd, StderrCapture, StderrTail,
+    Reset, ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd, StderrCapture, StderrTail,
 };
 use super::list::StoredRun;
 
@@ -241,23 +241,27 @@ fn load_iterations(
     children: bool,
 ) -> Result<Vec<Iteration>, StoreError> {
     let mut stmt = conn.prepare_cached(
-        "SELECT idx, outcome, verdict, failure, wall_us, record, host FROM iterations
+        "SELECT idx, outcome, verdict, failure, wall_us, record, host, reset FROM iterations
          WHERE run_id = ?1 ORDER BY idx",
     )?;
     let rows = stmt.query_map([run_id], |row| {
         Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, Option<String>>(2)?,
-            row.get::<_, Option<String>>(3)?,
+            (
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ),
             row.get::<_, Option<i64>>(4)?,
             row.get::<_, Option<String>>(5)?,
             row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
         ))
     })?;
     let mut iterations = Vec::new();
     for row in rows {
-        let (idx, outcome, verdict, failure, wall_us, record, host) = row?;
+        let ((idx, outcome, verdict, failure), wall_us, record, host, reset) = row?;
+        let reset: Option<Reset> = reset.as_deref().map(json).transpose()?;
         let mut host: Option<HostTrace> = host.as_deref().map(json).transpose()?;
         if children && let Some(host) = &mut host {
             host.readings = load_readings(conn, run_id, idx)?;
@@ -281,6 +285,7 @@ fn load_iterations(
                 Vec::new()
             },
             host,
+            reset,
         });
     }
     Ok(iterations)

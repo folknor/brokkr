@@ -283,6 +283,8 @@ pub(crate) struct Script {
     preflight: bool,
     /// Whether the script declares `validate`, decided as `preflight` is.
     validate: bool,
+    /// Whether the script declares `fstrim`, decided as `preflight` is.
+    fstrim: bool,
     /// The modules `require` loads, frozen with the script.
     library: Option<Arc<super::library::Library>>,
 }
@@ -298,6 +300,12 @@ impl Script {
     /// every arm as soon as the params bind.
     pub(crate) fn has_validate(&self) -> bool {
         self.validate
+    }
+
+    /// Whether the script declares `fstrim`, so the runner asks it for every
+    /// arm, beside `validate`, whether that arm's iterations trim first.
+    pub(crate) fn has_fstrim(&self) -> bool {
+        self.fstrim
     }
 
     /// The script with the library its `require` loads from.
@@ -324,6 +332,7 @@ pub(crate) fn load_script(
         .map(|program| Script {
             preflight: assigns(&program, b"preflight"),
             validate: assigns(&program, b"validate"),
+            fstrim: assigns(&program, b"fstrim"),
             program,
             lines: lines.clone(),
             library: None,
@@ -601,6 +610,10 @@ pub(crate) enum Hook {
     /// `preflight(params, keys)`: does the host provide what the bench
     /// needs? External programs only.
     Preflight,
+    /// `fstrim(params, keys)`: does each iteration of this arm start on a
+    /// freshly trimmed scratch filesystem? Pure as `validate`, and answers
+    /// with exactly one boolean.
+    Fstrim,
 }
 
 impl Hook {
@@ -609,12 +622,13 @@ impl Hook {
         match self {
             Self::Validate => "validate",
             Self::Preflight => "preflight",
+            Self::Fstrim => "fstrim",
         }
     }
 
     fn phase(self) -> Phase {
         match self {
-            Self::Validate => Phase::Validate,
+            Self::Validate | Self::Fstrim => Phase::Validate,
             Self::Preflight => Phase::Preflight,
         }
     }
@@ -626,6 +640,8 @@ impl Hook {
 pub(crate) enum HookOutcome {
     /// The hook returned nothing.
     Passed,
+    /// `fstrim()` returned its one boolean.
+    Decided(bool),
     /// The script refused: `fail(reason)` or a failed `r:ok()`, what it
     /// checked is not there.
     Refused(String),
@@ -745,7 +761,24 @@ fn call_hook<H: Host>(
     if let Err(error) = called {
         return broken(error);
     }
-    match state.get_top().saturating_sub(base) {
+    let returned = state.get_top().saturating_sub(base);
+    if hook == Hook::Fstrim {
+        return if returned == 1 && state.typ(-1) == LuaType::Boolean {
+            HookOutcome::Decided(state.to_boolean(-1))
+        } else {
+            HookOutcome::Broken(format!(
+                "fstrim() returned {returned} value{}{}: it answers with exactly one boolean, \
+                 whether each iteration starts on a freshly trimmed scratch",
+                if returned == 1 { "" } else { "s" },
+                if returned == 1 {
+                    format!(", a {}", state.typ(-1).as_str())
+                } else {
+                    String::new()
+                }
+            ))
+        };
+    }
+    match returned {
         0 => HookOutcome::Passed,
         n => HookOutcome::Broken(format!(
             "{name}() returned {n} value{} (the first a {}): it passes by returning nothing \
@@ -1183,7 +1216,9 @@ impl Phase {
             Self::TopLevel => {
                 "at a chunk's top level (the script's, or a module's as require runs it)"
             }
-            Self::Validate => "inside validate(), which only judges the params",
+            Self::Validate => {
+                "inside validate() or fstrim(), which only judge the params"
+            }
             Self::Preflight => "inside preflight(), before anything is built",
             Self::Bench => "inside bench()",
         }

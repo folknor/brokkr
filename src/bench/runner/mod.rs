@@ -194,7 +194,7 @@ fn run_arms(
     // stored, and covers every arm: an invocation is refused whole.
     let mut arms = params::bind(bench, &given, &view)?;
     let frozen = freeze(bench)?;
-    let (config, labels, validated) = validate(name, bench, &view, &frozen, &arms)?;
+    let (config, labels, validated, trims) = validate(name, bench, &view, &frozen, &arms)?;
     if args.dry_run {
         return dry_run(
             name,
@@ -205,8 +205,10 @@ fn run_arms(
             detection,
             &mut arms,
             &labels,
+            &trims,
         );
     }
+    let helper = trim_helper(&trims)?;
     // Opened, or for a results server probed, before anything is built or
     // run and before a stop is caught: a run with nowhere to go is never
     // measured.
@@ -263,6 +265,7 @@ fn run_arms(
             argv: argv.clone(),
             measurement,
             preflight_modules: &modules[index],
+            fstrim: helper.as_ref().filter(|_| trims[index]),
         };
         let started = Instant::now();
         let document = match attempt.run(&commit, &tree, keep) {
@@ -273,6 +276,10 @@ fn run_arms(
             }
         };
         if let Err(error) = publish_arm(&mut destination, &document, &shown, started) {
+            not_run(name, &labels[index + 1..]);
+            return Err(error);
+        }
+        if let Err(error) = reap_confirmed(&document) {
             not_run(name, &labels[index + 1..]);
             return Err(error);
         }
@@ -553,13 +560,14 @@ fn preflight_and_digest(
     Ok(Prepared { commit, modules })
 }
 
-/// `config()`'s table, the arm labels and each arm's `validate()` modules,
-/// once every arm validated: a bench whose `validated` params have no
-/// `validate()` to check them is refused first.
+/// `config()`'s table, the arm labels, each arm's `validate()` modules and
+/// each arm's `fstrim()` answer, once every arm validated: a bench whose
+/// `validated` params have no `validate()` to check them is refused first.
 type Validated = (
     std::sync::Arc<lua::Value>,
     Vec<String>,
     Vec<BTreeSet<String>>,
+    Vec<bool>,
 );
 
 fn validate(
@@ -590,8 +598,95 @@ fn validate(
         1 => return Err(DevError::Config(refusals.concat())),
         _ => return Err(DevError::Preflight(refusals)),
     }
-    let modules = validate_arms(name, frozen, arms, &labels, &config)?;
-    Ok((config, labels, modules))
+    let mut modules = validate_arms(name, frozen, arms, &labels, &config)?;
+    let (trims, asked) = fstrim_arms(name, frozen, arms, &labels, &config)?;
+    for (validated, fstrim) in modules.iter_mut().zip(asked) {
+        validated.extend(fstrim);
+    }
+    Ok((config, labels, modules, trims))
+}
+
+/// Ask the script's `fstrim()`, when it declares one, for every arm in a
+/// fresh State as `validate()` runs: whether each iteration of that arm
+/// starts on a freshly trimmed scratch filesystem. The answers are frozen
+/// before anything is built; a script error or a refusal in any arm
+/// refuses the invocation whole. Returns each arm's answer and the library
+/// modules it asked for.
+fn fstrim_arms(
+    name: &str,
+    frozen: &Frozen,
+    arms: &[params::Bound],
+    labels: &[String],
+    config: &std::sync::Arc<lua::Value>,
+) -> Result<(Vec<bool>, Vec<BTreeSet<String>>), DevError> {
+    if !frozen.script.has_fstrim() {
+        return Ok((vec![false; arms.len()], vec![BTreeSet::new(); arms.len()]));
+    }
+    let guard = crate::shutdown::SigtermGuard::install();
+    let ran = (|| {
+        let mut refusals = Vec::new();
+        let mut answers = Vec::with_capacity(arms.len());
+        let mut modules = Vec::with_capacity(arms.len());
+        for (index, bound) in arms.iter().enumerate() {
+            if crate::shutdown::should_unwind() {
+                return Err(DevError::Interrupted);
+            }
+            let host = validate::ValidateHost {
+                config: std::sync::Arc::clone(config),
+            };
+            let (ran, _) = lua::run_hook(
+                lua::Hook::Fstrim,
+                &frozen.script,
+                &bound.preflight_args(),
+                host,
+            );
+            modules.push(ran.modules);
+            let shown = shown(name, &labels[index]);
+            match ran.outcome {
+                lua::HookOutcome::Decided(answer) => answers.push(answer),
+                outcome => {
+                    answers.push(false);
+                    judge(lua::Hook::Fstrim, &shown, outcome, &mut refusals)?;
+                }
+            }
+        }
+        settle(modules, refusals).map(|modules| (answers, modules))
+    })();
+    if guard.leave() {
+        return Err(DevError::Interrupted);
+    }
+    ran
+}
+
+/// Refuse to go on once a run stored a reset whose helper brokkr could not
+/// confirm had exited: it may still be trimming on the lock this
+/// invocation holds, which keeps no later arm or cell of this process out.
+/// The run itself is already published.
+fn reap_confirmed(document: &store::RunDocument) -> Result<(), DevError> {
+    if document
+        .iterations
+        .iter()
+        .any(|i| i.reset.as_ref().is_some_and(|r| r.reap_unconfirmed))
+    {
+        return Err(DevError::Reported(
+            "brokkr could not confirm the trim helper exited, so this invocation runs nothing \
+             more; the lock stays held until the helper does exit"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// The pinned trim helper when any arm's `fstrim()` answered true, probed
+/// before anything is built: a host that cannot trim refuses the
+/// invocation here rather than failing its first iteration.
+fn trim_helper(trims: &[bool]) -> Result<Option<crate::fstrim::Helper>, DevError> {
+    if !trims.contains(&true) {
+        return Ok(None);
+    }
+    crate::fstrim::require_ready()
+        .map(Some)
+        .map_err(|why| DevError::Refused(format!("fstrim() asks for a trimmed scratch: {why}")))
 }
 
 /// The bench's `rustflags` under one arm, which [`validate()`] already
@@ -669,7 +764,7 @@ fn judge(
 ) -> Result<(), DevError> {
     let name = hook.name();
     match outcome {
-        lua::HookOutcome::Passed => Ok(()),
+        lua::HookOutcome::Passed | lua::HookOutcome::Decided(_) => Ok(()),
         lua::HookOutcome::Interrupted => Err(DevError::Interrupted),
         lua::HookOutcome::Refused(why) => {
             refusals.push(format!("{shown}: {name} refused: {why}"));
@@ -716,6 +811,7 @@ fn dry_run(
     detection: &Detection,
     arms: &mut [params::Bound],
     labels: &[String],
+    trims: &[bool],
 ) -> Result<(), DevError> {
     let commit = crate::git::resolve_commit(
         detection.build_root.as_path(),
@@ -773,9 +869,12 @@ fn dry_run(
             None | Some("") => String::new(),
             Some(label) => format!(" ({label})"),
         };
-        let flags = arm_rustflags(bench, arm)?.map_or_else(String::new, |flags| {
+        let mut flags = arm_rustflags(bench, arm)?.map_or_else(String::new, |flags| {
             format!(", rustflags [{}]", flags.join(" "))
         });
+        if trims.get(index).copied().unwrap_or(false) {
+            flags.push_str(", trims scratch before each iteration");
+        }
         output::dry_run_msg(&format!(
             "arm {}/{}{label}: {}{flags}",
             index + 1,
@@ -1119,6 +1218,27 @@ fn profile_of(detection: &Detection, bench: &Bench) -> crate::build::RustProfile
         .unwrap_or_else(|| crate::runnables::build_profile(detection.config.bin.as_ref(), None))
 }
 
+/// One iteration's console line: its wall and verdict, or why it ended.
+fn report_iteration(label: &str, iteration: &store::Iteration) {
+    match (&iteration.outcome, iteration.wall_us) {
+        (store::IterationOutcome::Completed { verdict }, Some(wall)) => {
+            let wall = std::time::Duration::from_micros(u64::try_from(wall).unwrap_or(0));
+            output::bench_msg(&format!(
+                "{label}: {}{}",
+                output::format_duration(wall),
+                verdict
+                    .as_ref()
+                    .map(|v| format!(", verdict {v:?}"))
+                    .unwrap_or_default()
+            ));
+        }
+        (store::IterationOutcome::Failed { reason }, _) => {
+            output::warn(&format!("{label} failed: {reason}"));
+        }
+        _ => output::warn(&format!("{label} interrupted")),
+    }
+}
+
 /// Everything one attempt is made of before it runs.
 struct Attempt<'a> {
     detection: &'a Detection,
@@ -1138,6 +1258,8 @@ struct Attempt<'a> {
     measurement: store::Measurement,
     /// The library modules this arm's preflight asked for.
     preflight_modules: &'a BTreeSet<String>,
+    /// The pinned trim helper when this arm's `fstrim()` answered true.
+    fstrim: Option<&'a crate::fstrim::Helper>,
 }
 
 impl Attempt<'_> {
@@ -1537,29 +1659,14 @@ impl Attempt<'_> {
                     measurement: self.measurement,
                     budget,
                     run: document,
+                    fstrim: self.fstrim,
                 });
             since = returned;
             budget = budget_left;
             modules.extend(required);
             let label = format!("iteration {}/{total}", index + 1);
             let outcome = iteration.outcome.clone();
-            match (&outcome, iteration.wall_us) {
-                (store::IterationOutcome::Completed { verdict }, Some(wall)) => {
-                    let wall = std::time::Duration::from_micros(u64::try_from(wall).unwrap_or(0));
-                    output::bench_msg(&format!(
-                        "{label}: {}{}",
-                        output::format_duration(wall),
-                        verdict
-                            .as_ref()
-                            .map(|v| format!(", verdict {v:?}"))
-                            .unwrap_or_default()
-                    ));
-                }
-                (store::IterationOutcome::Failed { reason }, _) => {
-                    output::warn(&format!("{label} failed: {reason}"));
-                }
-                _ => output::warn(&format!("{label} interrupted")),
-            }
+            report_iteration(&label, &iteration);
             document.iterations.push(iteration);
             match outcome {
                 store::IterationOutcome::Completed { .. } => {}

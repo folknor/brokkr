@@ -14,14 +14,15 @@ use std::time::Instant;
 use super::host::{stop_pending, stopping};
 use crate::bench::lua::{self, Abort, CallOptions, CallOutcome, HandleRef, Word};
 
-/// The builtins' side for one arm's `validate()`.
+/// The builtins' side for one arm's `validate()`, and for its `fstrim()`,
+/// which is pure the same way.
 pub(super) struct ValidateHost {
     pub(super) config: Arc<lua::Value>,
 }
 
 fn refused(name: &str) -> Abort {
     Abort::Failed(format!(
-        "{name}() is not available inside validate(), which only judges the params"
+        "{name}() is not available inside validate() or fstrim(), which only judge the params"
     ))
 }
 

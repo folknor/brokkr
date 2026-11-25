@@ -40,6 +40,12 @@ establish that the device has settled.
 `brokkr fstrim` takes the lock and waits for it like `brokkr check`. The
 free-space gate doesn't apply, since a full disk is a reason to trim.
 
+A trim between two `brokkr bench` runs can't reach the cells of one
+`--rounds` invocation, which holds the lock throughout, and isn't stored
+with any run. A bench that needs every iteration to start trimmed asks
+for it with `fstrim()` instead (`brokkr man bench trimming-scratch`),
+which runs the same trim inside the run and stores it.
+
 ## Installing the helper
 
 The privileged step runs in `brokkr-fstrim`, a helper with one job:

@@ -228,16 +228,15 @@ impl Iteration {
         }
     }
 
-    /// The iteration directory.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the runner reaches the iteration through its handles"
-        )
-    )]
+    /// The iteration directory: what a managed reset trims through.
     pub(crate) fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// The `(st_dev, st_ino)` the lease recorded for the directory, so a
+    /// reopen can be checked against it.
+    pub(crate) fn dir_identity(&self) -> (u64, u64) {
+        self.identity
     }
 
     /// A fresh output path under `out/`, not created: the child writing it

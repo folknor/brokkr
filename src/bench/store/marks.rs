@@ -171,6 +171,16 @@ impl MarkView {
         let at = match parts.first().and_then(serde_json::Value::as_str) {
             Some("bench-pair-v1") => 2,
             Some("bench-pair-v2") => 3,
+            Some("bench-pair-v3") => 4,
+            // A reset wraps a whole key: resolve the inner one, keeping the
+            // procedure, so a trimmed run pairs only with a trimmed one.
+            Some("bench-pair-v4") => {
+                let Some(inner) = parts.get(2).and_then(serde_json::Value::as_str) else {
+                    return pairing_key.to_owned();
+                };
+                parts[2] = serde_json::Value::String(self.comparison_key(inner));
+                return serde_json::Value::Array(parts).to_string();
+            }
             _ => return pairing_key.to_owned(),
         };
         let Some(bench) = parts.get(at).and_then(serde_json::Value::as_str) else {

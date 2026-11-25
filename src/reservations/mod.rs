@@ -60,7 +60,9 @@ mod paths;
 mod store;
 
 pub(crate) use guard::{is_refusal, mutate, remove_dir_all, remove_file, remove_reserved_tree};
-pub(crate) use iteration::{Call, Iteration, NameArea, Names, Preview, Spool, open_input};
+pub(crate) use iteration::{
+    Call, ITERATION_DIR_PREFIX, Iteration, NameArea, Names, Preview, Spool, open_input,
+};
 pub(crate) use launch::{
     LaunchSpec, PRIVATE_DIR_PLACEHOLDER, ReadHold, hold_reads, inherit_in_child, take_armed,
 };

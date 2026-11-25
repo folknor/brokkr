@@ -386,9 +386,17 @@ ALTER TABLE children ADD COLUMN boot_interval_us INTEGER
     CHECK (boot_interval_us IS NULL OR boot_interval_us >= 0);
 ";
 
+/// Version 15: an iteration's managed device reset, a JSON object as the
+/// document holds it; NULL when no reset was recorded, which is every
+/// earlier iteration.
+const V15: &str = "
+ALTER TABLE iterations ADD COLUMN reset TEXT
+    CHECK (reset IS NULL OR json_type(reset) = 'object');
+";
+
 /// The chain. Shipped steps are frozen; append only.
 pub(super) const MIGRATIONS: &[&str] =
-    &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14];
+    &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 

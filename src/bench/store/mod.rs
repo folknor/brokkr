@@ -39,7 +39,8 @@ pub use document::{
     Cell, Child, ChildBootInterval, ChildEnding, Clock, Conditions, Cursor, DOCUMENT_FORMAT, Device, DeviceCounters,
     DeviceLayer, Evidence, Executable, ExecutableIdentity, HostTrace, HotpathCapture, Iteration,
     IterationOutcome, LfsPointer, LockSource, Lockfile, Loss, Measurement, PairingClass,
-    ParamValue, Placement, PreviousCommand, Reading, Record, ResolvedBuild, RunDocument,
+    ParamValue, Placement, PreviousCommand, RESET_TRIM_V1, Reading, Record, Reset, ResetStage,
+    ResolvedBuild, RunDocument,
     RunOutcome, Rustflags, STDERR_RUN_BYTES, STDERR_TAIL_BYTES, Sample, SinkEnd, StderrCapture,
     StderrTail,
 };
@@ -196,6 +197,7 @@ const SHIPPED_STEPS: &[&str] = &[
     "b0acbce9c93771d0585279e262af7e74",
     "4f9b7d11765333857749524fad239886",
     "467eec9e51c35c71d56adf56d732aa97",
+    "fc9de35ad223c3a7f68578f09b9d62e3",
 ];
 
 #[cfg(test)]

@@ -74,6 +74,7 @@ fn iteration(wall_us: i64, verdict: Option<&str>, record: &serde_json::Value) ->
             boot: None,
         }],
         host: None,
+        reset: None,
     }
 }
 

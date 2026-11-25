@@ -182,6 +182,7 @@ fn completed(wall_us: i64, verdict: Option<&str>) -> Iteration {
             ),
         ],
         host: Some(host_trace()),
+        reset: None,
     }
 }
 
@@ -551,6 +552,7 @@ fn a_config_text_is_stored_once_and_failed_attempts_keep_their_evidence() {
             record: None,
             children: Vec::new(),
             host: None,
+            reset: None,
         },
     ];
     store.publish(&interrupted).unwrap();
@@ -973,6 +975,106 @@ fn a_measured_child_must_be_one_and_agreed_on() {
     partial.validate().unwrap();
 }
 
+/// A completed `trim-v1` reset as the runner records one.
+fn trimmed_reset() -> super::store::Reset {
+    super::store::Reset {
+        procedure: super::store::RESET_TRIM_V1.to_owned(),
+        path: "/scratch/bench-iterations/.brokkr-iteration-x".to_owned(),
+        target: Some("259:2".to_owned()),
+        fsid: Some("0123456789abcdef".to_owned()),
+        lock_seen: true,
+        sync: super::store::ResetStage::Ok { ns: 1_500 },
+        trim: super::store::ResetStage::Ok { ns: 90_000_000_000 },
+        reported_bytes: Some(518 * 1024 * 1024 * 1024),
+        refused: None,
+        malformed: None,
+        output_cut: false,
+        reap_unconfirmed: false,
+        ending: "exit 0".to_owned(),
+        completed: true,
+        started_us: Some(1_000),
+        ended_us: Some(91_000_000),
+    }
+}
+
+/// A run whose iterations reset reads back with each reset, pairs apart
+/// from an unreset run under `bench-pair-v4`, and a document without one
+/// keeps the key it had.
+#[test]
+fn a_reset_reads_back_and_pairs_apart() {
+    let mut store = store("reset");
+    let mut doc = document("0000000000000000000000000000002a");
+    let plain = doc.pairing_key();
+    for iteration in &mut doc.iterations {
+        iteration.reset = Some(trimmed_reset());
+    }
+    assert_eq!(store.publish(&doc).unwrap(), Published::Stored);
+    assert_eq!(store.load(&doc.uuid).unwrap().as_ref(), Some(&doc));
+    let key = doc.pairing_key();
+    assert!(key.starts_with("[\"bench-pair-v4\",\"trim-v1\","), "{key}");
+    assert!(key.contains(&serde_json::to_string(&plain).unwrap()), "{key}");
+    assert_eq!(document(&doc.uuid).pairing_key(), plain);
+}
+
+/// A completed iteration over a reset that did not complete, a completed
+/// run whose iterations disagree on resetting, and an unknown procedure are
+/// refused; a failed run may stop at a failed reset.
+#[test]
+fn a_reset_must_complete_agree_and_be_known() {
+    let mut failed = document("0000000000000000000000000000002b");
+    for iteration in &mut failed.iterations {
+        iteration.reset = Some(trimmed_reset());
+    }
+    failed.iterations[0].reset.as_mut().unwrap().completed = false;
+    refused(&failed, "whose reset did not complete");
+
+    let mut partial = document("0000000000000000000000000000002c");
+    partial.iterations[0].reset = Some(trimmed_reset());
+    refused(&partial, "disagree on a managed reset");
+
+    let mut unknown = document("0000000000000000000000000000002d");
+    for iteration in &mut unknown.iterations {
+        iteration.reset = Some(super::store::Reset {
+            procedure: "trim-v9".to_owned(),
+            ..trimmed_reset()
+        });
+    }
+    refused(&unknown, "unknown reset procedure");
+
+    // A claim the evidence contradicts: a failed stage, a cut capture, an
+    // unconfirmed reap, each under completed = true.
+    let claims: [fn(&mut super::store::Reset); 5] = [
+        |r| r.trim = super::store::ResetStage::Failed { errno: 5 },
+        |r| r.output_cut = true,
+        |r| r.reap_unconfirmed = true,
+        |r| r.target = Some("bogus".to_owned()),
+        |r| r.fsid = Some("nope".to_owned()),
+    ];
+    for (i, claim) in claims.iter().enumerate() {
+        let mut doc = document(&format!("000000000000000000000000000003{i}a"));
+        for iteration in &mut doc.iterations {
+            let mut reset = trimmed_reset();
+            claim(&mut reset);
+            iteration.reset = Some(reset);
+        }
+        refused(&doc, "whose stages, ending or capture say otherwise");
+    }
+
+    let mut stopped = document("0000000000000000000000000000002e");
+    stopped.iterations.truncate(1);
+    stopped.iterations[0].outcome = IterationOutcome::Failed {
+        reason: "fstrim: trim failed".into(),
+    };
+    stopped.iterations[0].wall_us = None;
+    stopped.iterations[0].record = None;
+    stopped.iterations[0].reset = Some(super::store::Reset {
+        completed: false,
+        ..trimmed_reset()
+    });
+    stopped.outcome = RunOutcome::Failed { reason: "x".into() };
+    stopped.validate().unwrap();
+}
+
 #[test]
 fn a_profiled_run_must_capture_every_marked_call() {
     profiled("0000000000000000000000000000000e")
@@ -1045,7 +1147,8 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         store
             .conn()
             .execute_batch(
-                "ALTER TABLE children DROP COLUMN boot_interval_us;
+                "ALTER TABLE iterations DROP COLUMN reset;
+                 ALTER TABLE children DROP COLUMN boot_interval_us;
                  ALTER TABLE children DROP COLUMN boot_launch_us;
                  ALTER TABLE runs DROP COLUMN rustflags;
                  DROP INDEX runs_invocation;
@@ -1076,7 +1179,7 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 14);
+    assert_eq!(version, 15);
     assert!(store.marks(&doc.project).unwrap().is_empty());
     assert_eq!(store.load(&doc.uuid).unwrap(), Some(doc));
 }

@@ -275,6 +275,7 @@ fn frozen_document() -> RunDocument {
             record: Some(record),
             children: vec![child],
             host: Some(frozen_host()),
+            reset: Some(frozen_reset()),
         }],
         schedule: Some(super::store::Schedule {
             invocation: "fe".repeat(16),
@@ -313,6 +314,29 @@ fn frozen_rustflags() -> super::store::Rustflags {
 
 /// The protocol's host trace fixture: an ended predecessor, and each
 /// reading part present and absent. Frozen with the protocol.
+/// A completed `trim-v1` reset, every stage shape but `failed` (which the
+/// stage enum's encoding covers the same way).
+fn frozen_reset() -> super::store::Reset {
+    super::store::Reset {
+        procedure: super::store::RESET_TRIM_V1.to_owned(),
+        path: "/scratch/bench-iterations/.brokkr-iteration-x".to_owned(),
+        target: Some("259:2".to_owned()),
+        fsid: Some("0123456789abcdef".to_owned()),
+        lock_seen: true,
+        sync: super::store::ResetStage::Ok { ns: 1_500 },
+        trim: super::store::ResetStage::Ok { ns: 90_000 },
+        reported_bytes: Some(4096),
+        refused: None,
+        malformed: None,
+        output_cut: false,
+        reap_unconfirmed: false,
+        ending: "exit 0".to_owned(),
+        completed: true,
+        started_us: Some(1_000),
+        ended_us: Some(2_000),
+    }
+}
+
 fn frozen_host() -> super::store::HostTrace {
     use super::store::{Cell, Cursor, Device, DeviceCounters, DeviceLayer, Reading};
     let counters = DeviceCounters {

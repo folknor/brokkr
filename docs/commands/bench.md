@@ -13,7 +13,7 @@ reads is defined, run `brokkr check` (`brokkr man bench-config
 validating-a-script`).
 
 This page covers the options and refusals, the script's hooks (Validate,
-Preflight), Modules, Dry run and Contract tests, then how a run proceeds
+Trimming scratch, Preflight), Modules, Dry run and Contract tests, then how a run proceeds
 (Arms, Rounds, Build, Iteration), the reference for the script's builtins
 (Builtins, binary, binary_with, Hotpath capture, Files, Page cache, JSON),
 and what a run leaves behind (Interrupts, Iteration directory, Stored runs).
@@ -108,14 +108,18 @@ order:
 1. a param refusal in any arm: a `required` param not given among them, or
    a value not among its `choices`
 2. a bench whose `validated` params have no `validate()` to check them
-3. a `validate()` that refuses any arm (see Validate)
-4. a bound input another reservation writes, or whose pin doesn't match.
+3. a `validate()` that refuses any arm (see Validate), or an `fstrim()`
+   that refuses or answers wrongly in any arm (see Trimming scratch)
+4. an arm whose `fstrim()` answers true on a host whose `brokkr-fstrim`
+   helper can't trim, and under `--rounds` a workload whose competitors
+   don't all answer alike
+5. a bound input another reservation writes, or whose pin doesn't match.
    brokkr reserves every arm's inputs for reading, then hashes them, after
    the script is read and the store opened, before any build.
-5. a live `brokkr serve` server, since a serving process perturbs the
+6. a live `brokkr serve` server, since a serving process perturbs the
    measurement (`brokkr man serve`)
-6. a `--commit` that names no commit
-7. a preflight that refuses any arm (see Preflight)
+7. a `--commit` that names no commit
+8. a preflight that refuses any arm (see Preflight)
 
 From there on brokkr stores every attempt, a worktree that couldn't be set
 up included.
@@ -164,6 +168,61 @@ These rules apply:
   error`.
 - A module it asks `require` for is stored with the run, as a preflight's
   is.
+
+## Trimming scratch
+
+A script that assigns the global `fstrim` (`function fstrim(params, keys)
+... end`) asks for each iteration of an arm to start on a freshly trimmed
+scratch filesystem. A bench that writes and deletes hundreds of GB needs
+this, since an SSD's state after that much churn moves the next
+iteration's wall. brokkr asks it once per arm, and the answer holds for
+every iteration of that arm:
+
+```lua
+function fstrim(params)
+    return params.row == "altw-external"
+end
+```
+
+These rules apply to the hook:
+
+- It's pure as `validate()` is, and runs beside it, under `--dry-run`
+  too. It returns exactly one boolean; anything else is an `fstrim script
+  error` that refuses the invocation, and `fail(reason)` refuses it as
+  `fstrim refused`.
+- `--dry-run` names each arm that trims and checks nothing on the host.
+- A run with any arm that trims needs the `brokkr-fstrim` helper (`brokkr
+  man fstrim`). brokkr checks it before anything is built, and refuses
+  the invocation when it can't trim.
+- Under `--rounds`, every competitor of one workload must answer alike,
+  since cells compared against each other must all trim or none.
+
+Each iteration of a trimming arm runs this sequence:
+
+1. brokkr makes the iteration directory and writes the cell cursor (see
+   Host state), so a trim that is killed is still named. A cursor that
+   can't be written fails the iteration instead.
+2. It refuses when another iteration's directory is still in the
+   container, since blocks a kept directory holds aren't free to trim,
+   and when the iteration directory was replaced since it was made.
+3. It syncs and trims the filesystem holding the iteration directory, as
+   `brokkr fstrim` does, under the lock the run holds.
+4. It takes the host trace's start reading, then runs the chunk and
+   `bench()`.
+
+The trim is outside the wall and outside the host trace. A trim that
+fails or is stopped ends the iteration before `bench()` runs, failed or
+interrupted, and a trimmed iteration whose directory isn't released fails
+too, so the next trim would free its blocks. The iteration stores what
+the trim did: each stage, the length `FITRIM` returned, and how long it
+took. A run whose iterations trimmed pairs only with runs that trimmed
+the same way (see Stored runs). When brokkr can't confirm the helper
+exited, it publishes that run and runs no further arm or cell.
+
+What a trim establishes is what `brokkr man fstrim` says: the calls
+succeeded and what `FITRIM` reported. It doesn't establish that every
+block the previous iteration freed was eligible, or that the device has
+settled.
 
 ## Preflight
 
@@ -437,9 +496,11 @@ always is.
 
 The result has these fields:
 
-- **`stage`**: how far it got: `bind`, `validate`, `preflight` or `bench`.
-- **`outcome`**: at `bind`, `validate` or `preflight`, `refused` or
-  `broken`; at `bench`, `completed` or `failed`. `refused` is a param or
+- **`stage`**: how far it got: `bind`, `validate`, `fstrim`, `preflight`
+  or `bench`. A contract test asks `fstrim()` as a run does but never
+  trims.
+- **`outcome`**: at `bind`, `validate`, `fstrim` or `preflight`, `refused`
+  or `broken`; at `bench`, `completed` or `failed`. `refused` is a param or
   default the binder refuses, a `validated` param with no `validate()`, a
   `fail()` or a failed `r:ok()`. `broken` is a script error in a hook.
 - **`reason`**: why, when it didn't complete.
@@ -1221,7 +1282,8 @@ tail. brokkr never stores the whole stderr; a script that needs more reads
 Runs pair in classes that never pair with each other: timing, `--hotpath`,
 `--alloc`, and incidental. An incidental run is a timing run any of whose
 children captured a report, since its build was instrumented by other
-means.
+means. A run whose iterations trimmed (see Trimming scratch) pairs only
+with runs trimmed the same way.
 
 A run of a dirty tree, dirty as its attempt starts or after its build (see
 Build), is stored and marked dirty. `brokkr results` lists it with `-dirty`
@@ -1300,6 +1362,7 @@ command history and when `fstrim.timer` last fired.
 
 `brokkr results UUID` shows for each iteration:
 
+- its trim, when its arm trims (see Trimming scratch)
 - its device
 - the gap from its predecessor: elapsed, and what the device wrote and
   discarded in it, when both name one device instance
@@ -1308,8 +1371,9 @@ command history and when `fstrim.timer` last fired.
 
 `brokkr results --compare` names where the result iterations' start state
 or gap differ, and `brokkr sidecar` gives each phase of a child its host
-window. A manual `fstrim` shows as discards in the gap, never by name. A
-rest between cells is a `binary_with({program = "sleep"}, "60")` call, which
+window. A trim `fstrim()` asked for is stored by name with the iteration
+(see Trimming scratch). Any other trim, `brokkr fstrim` between two runs
+or a manual one, shows only as discards in the gap. A rest between cells is a `binary_with({program = "sleep"}, "60")` call, which
 its iteration then records, or a bench of its own that the next cell names
 as its predecessor.
 

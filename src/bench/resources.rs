@@ -169,6 +169,16 @@ impl Resources {
         })
     }
 
+    /// The iteration's own directory.
+    pub(crate) fn dir(&self) -> &Path {
+        self.iteration.dir()
+    }
+
+    /// The directory's identity as admission recorded it.
+    pub(crate) fn dir_identity(&self) -> (u64, u64) {
+        self.iteration.dir_identity()
+    }
+
     /// The inputs as handles, in the order `open` took them.
     pub(crate) fn inputs(&self) -> &[Handle] {
         &self.inputs

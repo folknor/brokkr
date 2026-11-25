@@ -18,6 +18,8 @@ pub(super) struct Entry<'a> {
     pub(super) given: params::Given,
     /// Each arm's `validate()` modules.
     pub(super) validated: Vec<BTreeSet<String>>,
+    /// Each arm's `fstrim()` answer.
+    pub(super) trims: Vec<bool>,
 }
 
 /// One planned cell's recipe: which bench, which of its arms, which commit.

@@ -214,6 +214,28 @@ An iteration holds:
   extracted empty table.
 - its children in launch order
 - its **host trace** (`host`)
+- its **managed reset** (`reset`), described below
+
+An iteration of an arm whose `fstrim()` answered true records the reset
+it attempted: the procedure (`trim-v1`, `syncfs` then `FITRIM` through the
+`brokkr-fstrim` helper), the iteration directory trimmed through, the
+device and `f_fsid` the helper reported, each stage as `ok` with its
+nanoseconds, `failed` with an errno or `unreported`, the length `FITRIM`
+returned, a refusal or the first malformed helper line, how the helper
+ended, whether the procedure completed, and boot-clock start and end. The
+reset runs after the in-progress cursor is written and before the `start`
+reading, so the trace never holds its I/O and the cursor names a reset
+that was killed.
+
+The record also keeps whether the helper's output was cut and whether
+brokkr could confirm the helper exited; a run that couldn't confirm it
+stops the invocation once it's published. Publication refuses an unknown
+procedure, a reset ending before it starts, a reset marked completed whose
+stages, target, length, ending or capture don't show it, a completed
+iteration over a reset that didn't complete, and a completed run whose
+iterations don't all record one or all omit it. The `iterations`
+column `reset` holds it as JSON (schema step 15); absent means no managed
+reset was recorded, which is every earlier iteration.
 
 The host trace is absent, and omitted, for an iteration never admitted and
 for every iteration stored without the field. Every time in it is
@@ -500,6 +522,11 @@ tagged by what the run measured:
 - A run any of whose iterations marked a measured child is keyed
   `bench-pair-v3` with its class and `measured-child`, so a run ranked on a
   child's wall never pairs with one ranked on the block's.
+- A run whose iterations recorded a managed reset is keyed `bench-pair-v4`
+  with the reset's procedure (`trim-v1`) around the key the rules above
+  give it, so a trimmed run pairs only with runs trimmed the same way. A
+  run that recorded none keeps that key unchanged: no recorded reset is not
+  evidence of an untrimmed device, but it never pairs with a trimmed run.
 
 Collection order, a digest change, whether a param is bound, and the class
 all split the key. The commit, the config text, the build and the record
@@ -593,8 +620,9 @@ Admission refuses:
 literal name and its contract (Derived, not submitted).
 `MarkView::comparison_key` is a separate, view-dependent projection: the
 stored key with its bench element replaced by the resolved name, its tag
-and class kept, so two algorithms' keys still never meet. A key of a shape
-it doesn't know comes back unchanged. It's computed from the stored key,
+and class kept, so two algorithms' keys still never meet. A
+`bench-pair-v4` key has its inner key projected and its reset procedure
+kept. A key of a shape it doesn't know comes back unchanged. It's computed from the stored key,
 never from a summary's document, whose children aren't there to give its
 class. `brokkr results --compare` groups a side's runs by resolved name and
 comparison key under its selection's one view. Every view shows the

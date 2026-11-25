@@ -22,6 +22,7 @@ fn setup<'a>(script: &'a lua::Script, root: &'a Path, container: &'a Path) -> It
         measurement: store::Measurement::Timing,
         budget: super::Budget::RUN,
         run: &RUN,
+        fstrim: None,
     }
 }
 

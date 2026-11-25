@@ -24,7 +24,12 @@ use std::path::{Path, PathBuf};
 use crate::error::DevError;
 
 /// Where the operator installs the helper (`brokkr man fstrim`).
+#[cfg(not(test))]
 pub(crate) const HELPER_PATH: &str = "/usr/local/libexec/brokkr-fstrim";
+/// Under test, a path nothing installs: no test ever trims a real
+/// filesystem, whatever the host has installed.
+#[cfg(test)]
+pub(crate) const HELPER_PATH: &str = "/usr/local/libexec/brokkr-fstrim-never-installed";
 
 /// The helper's line protocol this brokkr speaks.
 pub(crate) const PROTOCOL: u32 = 1;
@@ -270,22 +275,11 @@ fn run_helper(
     Ok(run)
 }
 
-/// One stage the helper reported: finished, failed with an errno, or never
-/// reported (not reached, or stopped before it said).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum Stage {
-    Ok {
-        ns: u64,
-    },
-    Failed {
-        errno: i32,
-    },
-    Unreported,
-}
+/// One stage the helper reported, as the bench store keeps it.
+pub(crate) use crate::bench::store::ResetStage as Stage;
 
 /// What one trim of one filesystem did, as the helper reported it.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Trim {
     /// The helper's protocol, from its first line.
     pub protocol: Option<u32>,
@@ -332,6 +326,34 @@ impl Trim {
             && matches!(self.sync, Stage::Ok { .. })
             && matches!(self.trim, Stage::Ok { .. })
             && self.reported_bytes.is_some()
+    }
+
+    /// The bench store's record of this trim, through `path`, between two
+    /// boot-clock readings.
+    pub(crate) fn to_reset(
+        &self,
+        path: &Path,
+        started_us: Option<i64>,
+        ended_us: Option<i64>,
+    ) -> crate::bench::store::Reset {
+        crate::bench::store::Reset {
+            procedure: crate::bench::store::RESET_TRIM_V1.to_owned(),
+            path: path.display().to_string(),
+            target: self.target.clone(),
+            fsid: self.fsid.clone(),
+            lock_seen: self.lock_seen,
+            sync: self.sync.clone(),
+            trim: self.trim.clone(),
+            reported_bytes: self.reported_bytes,
+            refused: self.refused.clone(),
+            malformed: self.malformed.clone(),
+            output_cut: self.output_cut,
+            reap_unconfirmed: self.reap_unconfirmed,
+            ending: self.ending.clone(),
+            completed: self.completed(),
+            started_us,
+            ended_us,
+        }
     }
 
     /// One line for the console.
@@ -500,11 +522,12 @@ pub(crate) fn parse(stdout: &str, ending: String, output_cut: bool, expected: Op
     trim
 }
 
-/// A target opened and checked: an ext4 directory, by its device.
+/// A target opened and checked: an ext4 directory, by its device and inode.
 pub(crate) struct Target {
     pub path: PathBuf,
     pub dir: OwnedFd,
     pub dev: u64,
+    pub ino: u64,
 }
 
 /// Open `path` as a directory and check it is on ext4.
@@ -512,6 +535,26 @@ pub(crate) fn open_target(path: &Path) -> Result<Target, String> {
     let text = path.to_str().ok_or_else(|| format!("{} is not UTF-8", path.display()))?;
     let dir = openat(None, text, libc::O_RDONLY | libc::O_DIRECTORY)
         .map_err(|e| format!("{}: {e} (a trim target is a directory)", path.display()))?;
+    check_target(dir, path)
+}
+
+/// Open `name`, one component, inside the directory `parent` without
+/// following a link, and check it is an ext4 directory; `path` is how it
+/// is shown.
+pub(crate) fn open_target_at(parent: &OwnedFd, name: &str, path: &Path) -> Result<Target, String> {
+    if name.is_empty() || name.contains('/') {
+        return Err(format!("{} is not one path component", path.display()));
+    }
+    let dir = openat(
+        Some(parent),
+        name,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    check_target(dir, path)
+}
+
+fn check_target(dir: OwnedFd, path: &Path) -> Result<Target, String> {
     let st = stat_fd(&dir).map_err(|e| format!("{}: {e}", path.display()))?;
     // SAFETY: a zeroed out-struct and a valid descriptor.
     let mut sfs: libc::statfs = unsafe { std::mem::zeroed() };
@@ -529,6 +572,7 @@ pub(crate) fn open_target(path: &Path) -> Result<Target, String> {
         path: path.to_path_buf(),
         dir,
         dev: st.st_dev,
+        ino: st.st_ino,
     })
 }
 

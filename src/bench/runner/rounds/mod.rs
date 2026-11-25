@@ -220,7 +220,8 @@ fn plan_invocation<'a>(
         }
         let arms = params::bind(bench, &given, &view).map_err(shared)?;
         let frozen = freeze(bench)?;
-        let (this, labels, validated) = validate(&bench.name, bench, &view, &frozen, &arms)?;
+        let (this, labels, validated, trims) =
+            validate(&bench.name, bench, &view, &frozen, &arms)?;
         config.get_or_insert(this);
         entries.push(Entry {
             bench,
@@ -229,6 +230,7 @@ fn plan_invocation<'a>(
             labels,
             given,
             validated,
+            trims,
         });
     }
     let config = config.ok_or_else(|| DevError::Internal("--rounds bound no bench".into()))?;
@@ -238,6 +240,7 @@ fn plan_invocation<'a>(
         (None, true) => plan::by_build(&entries[0], &commit_labels)?,
         (None, false) => plan::by_bench(&entries)?,
     };
+    trims_agree(&grid, &entries)?;
     // One build per distinct tree and cargo request, in the order the cells
     // first need them, workload by workload.
     let mut builds: Vec<BuildKey> = Vec::new();
@@ -283,6 +286,27 @@ fn plan_invocation<'a>(
         // A round is the repetition: a cell runs once unless asked.
         iterations: args.iterations.map_or(1, NonZeroU32::get),
     })
+}
+
+/// A workload's competitors are compared cell against cell: they all start
+/// trimmed or none does, else the comparison measures the trim.
+fn trims_agree(grid: &plan::Grid, entries: &[Entry<'_>]) -> Result<(), DevError> {
+    for (w, row) in grid.recipes.iter().enumerate() {
+        let answers: BTreeSet<bool> = row
+            .iter()
+            .map(|r| entries[r.bench].trims[r.arm])
+            .collect();
+        if answers.len() > 1 {
+            return Err(DevError::Refused(format!(
+                "--rounds: in workload {} ({}), fstrim() answers true for some competitors and \
+                 false for others; competitors compared cell against cell must all trim or all \
+                 not",
+                w + 1,
+                grid.workloads.get(w).map_or("", String::as_str)
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Refused past the cells one invocation may plan, which the store refuses
@@ -348,6 +372,20 @@ fn dry_run(planned: &mut Planned<'_>, detection: &Detection) -> Result<(), DevEr
         if !workload.is_empty() || !builds.is_empty() {
             output::dry_run_msg(&format!(
                 "workload {}/{}: {workload}{builds}",
+                w + 1,
+                grid.workloads.len()
+            ));
+        }
+    }
+    // Every competitor of a workload answers alike (`trims_agree`), so its
+    // first speaks for it; named even for an unlabelled workload.
+    for (w, row) in grid.recipes.iter().enumerate() {
+        if row
+            .first()
+            .is_some_and(|r| planned.entries[r.bench].trims[r.arm])
+        {
+            output::dry_run_msg(&format!(
+                "workload {}/{}: trims scratch before each iteration of every cell",
                 w + 1,
                 grid.workloads.len()
             ));
@@ -446,6 +484,8 @@ struct Run<'p, 'a> {
     argv: Vec<String>,
     modules: Modules,
     invocation: String,
+    /// The pinned trim helper when any planned cell's arm trims.
+    helper: Option<crate::fstrim::Helper>,
 }
 
 impl Run<'_, '_> {
@@ -467,6 +507,7 @@ impl Run<'_, '_> {
             argv: self.argv.clone(),
             measurement: self.planned.measurement,
             preflight_modules: &self.modules[&(recipe.bench, recipe.commit)][recipe.arm],
+            fstrim: self.helper.as_ref().filter(|_| entry.trims[recipe.arm]),
         }
     }
 
@@ -509,6 +550,15 @@ fn execute(
         .flat_map(|e| e.arms.clone())
         .collect();
     let _inputs_held = hold_inputs(&every_arm)?;
+    // Only the arms a cell runs count: an arm no workload plans never trims.
+    let planned_trims: Vec<bool> = planned
+        .grid
+        .recipes
+        .iter()
+        .flatten()
+        .map(|r| planned.entries[r.bench].trims[r.arm])
+        .collect();
+    let helper = super::trim_helper(&planned_trims)?;
     let keep = crate::context::worktree_keep(&detection.config)?;
     let tree = crate::tree_policy::TreePolicy::of(&detection.config);
     let mut sinces: Vec<host::Since> = planned
@@ -527,6 +577,7 @@ fn execute(
         argv: crate::history::redact_secret_argv(&invocation.argv),
         modules,
         invocation: crate::db::generate_uuid()?,
+        helper,
     };
     let mut failed: Vec<String> = Vec::new();
     let made = build_all(&run, &tree, keep, &mut destination, &mut failed)?;
@@ -684,7 +735,9 @@ fn run_cells(
                 let started = Instant::now();
                 let document = cell(run, &recipe, built, run.slot(w, c, round), sinces)?;
                 let shown = format!("{} ({label})", run.bench_name(&recipe));
-                if let Err(error) = publish_arm(destination, &document, &shown, started) {
+                if let Err(error) = publish_arm(destination, &document, &shown, started)
+                    .and_then(|()| super::reap_confirmed(&document))
+                {
                     if done < total {
                         not_run(
                             planned.names,

@@ -89,12 +89,56 @@ pub(crate) fn gap_line(trace: &HostTrace) -> String {
     }
 }
 
+/// An iteration's managed reset as one line: what each stage did and what
+/// `FITRIM` reported, which is not what the device discarded.
+pub(crate) fn reset_line(reset: &crate::bench::store::Reset) -> String {
+    use crate::bench::store::ResetStage;
+    let stage = |name: &str, s: &ResetStage| match s {
+        ResetStage::Ok { ns } => format!(
+            "{name} {}",
+            crate::output::format_duration(std::time::Duration::from_nanos(*ns))
+        ),
+        ResetStage::Failed { errno } => format!(
+            "{name} failed: {}",
+            std::io::Error::from_raw_os_error(*errno)
+        ),
+        ResetStage::Unreported => format!("{name} unreported"),
+    };
+    let mut text = format!(
+        "reset   {} through {}",
+        reset.procedure,
+        reset.target.as_deref().unwrap_or("an unreported device")
+    );
+    if let Some(why) = &reset.refused {
+        text.push_str(&format!(": refused, {why}"));
+        return text;
+    }
+    text.push_str(&format!(
+        ": {}, {}",
+        stage("sync", &reset.sync),
+        stage("trim", &reset.trim)
+    ));
+    if let Some(bytes) = reset.reported_bytes {
+        text.push_str(&format!(
+            ", FITRIM reported {}",
+            crate::output::format_bytes(bytes)
+        ));
+    }
+    if !reset.completed {
+        text.push_str(&format!(" (did not complete: {})", reset.ending));
+    }
+    text
+}
+
 /// An iteration's host lines, for `brokkr results UUID`.
 pub(crate) fn iteration_lines(iteration: &Iteration) -> Vec<String> {
-    let Some(trace) = &iteration.host else {
-        return Vec::new();
-    };
     let mut lines = Vec::new();
+    if let Some(reset) = &iteration.reset {
+        lines.push(reset_line(reset));
+    }
+    let Some(trace) = &iteration.host else {
+        return lines;
+    };
     let device = trace.device.as_ref().map_or_else(
         || "no block device resolved".to_owned(),
         |d| {

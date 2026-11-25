@@ -190,9 +190,15 @@ fn insert_iteration(
             })
         })
         .transpose()?;
+    let reset = iteration
+        .reset
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     tx.execute(
-        "INSERT INTO iterations (run_id, idx, outcome, verdict, failure, wall_us, record, host)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO iterations (run_id, idx, outcome, verdict, failure, wall_us, record, host,
+             reset)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             run_id,
             int(idx),
@@ -201,7 +207,8 @@ fn insert_iteration(
             failure,
             iteration.wall_us,
             record,
-            host
+            host,
+            reset
         ],
     )?;
     if let Some(host) = &iteration.host {

@@ -385,6 +385,95 @@ pub struct Iteration {
     /// Omitted when absent, so such a document encodes as it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<HostTrace>,
+    /// The managed device reset run for this iteration before its trace and
+    /// `bench()`: present for every iteration of an arm whose `fstrim()`
+    /// answered true that got as far as attempting it. Absent means no
+    /// managed reset was recorded, which is not evidence of an untrimmed
+    /// device. Omitted when absent, so an earlier document encodes as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset: Option<Reset>,
+}
+
+/// The procedure a [`Reset`] ran: `syncfs` then `FITRIM` on the scratch
+/// filesystem through the `brokkr-fstrim` helper.
+pub const RESET_TRIM_V1: &str = "trim-v1";
+
+/// One managed reset, as the helper reported it. Every time is
+/// `CLOCK_BOOTTIME` in microseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reset {
+    /// [`RESET_TRIM_V1`].
+    pub procedure: String,
+    /// The directory trimmed through: the iteration's own.
+    pub path: String,
+    /// `MAJOR:MINOR` of the filesystem as the helper read it; absent when it
+    /// never reported one.
+    pub target: Option<String>,
+    /// The filesystem's `f_fsid` in hex, evidence beside the device.
+    pub fsid: Option<String>,
+    /// Whether the helper saw the brokkr flock on its descriptor; a
+    /// diagnostic only.
+    pub lock_seen: bool,
+    pub sync: ResetStage,
+    pub trim: ResetStage,
+    /// The length `FITRIM` returned: what the filesystem reports it passed
+    /// on for discard, not what the device discarded.
+    pub reported_bytes: Option<u64>,
+    /// A refusal before the stages, or brokkr's own reason the reset could
+    /// not run.
+    pub refused: Option<String>,
+    /// The first helper line out of order or form.
+    pub malformed: Option<String>,
+    /// The helper's output was cut or truncated, so lines may be missing.
+    pub output_cut: bool,
+    /// brokkr could not confirm the helper exited: it may have run on past
+    /// the record, so the run stopped there.
+    pub reap_unconfirmed: bool,
+    /// How the helper ended, in words (`exit 0`, `signal 9`, `interrupted`).
+    pub ending: String,
+    /// Whether the procedure completed: every stage in order and
+    /// successful, the capture whole, exit 0.
+    pub completed: bool,
+    pub started_us: Option<i64>,
+    pub ended_us: Option<i64>,
+}
+
+impl Reset {
+    /// Whether the record itself shows a completed procedure: both stages
+    /// ok, a target, its fsid and the returned length, no refusal or
+    /// malformed line, a whole capture, a confirmed exit 0.
+    pub fn evidences_completion(&self) -> bool {
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let device = self
+            .target
+            .as_deref()
+            .and_then(|t| t.split_once(':'))
+            .is_some_and(|(major, minor)| digits(major) && digits(minor));
+        let fsid = self.fsid.as_deref().is_some_and(|f| {
+            f.len() == 16 && f.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        });
+        matches!(self.sync, ResetStage::Ok { .. })
+            && matches!(self.trim, ResetStage::Ok { .. })
+            && device
+            && fsid
+            && self.reported_bytes.is_some()
+            && self.refused.is_none()
+            && self.malformed.is_none()
+            && !self.output_cut
+            && !self.reap_unconfirmed
+            && self.ending == "exit 0"
+    }
+}
+
+/// One stage of a [`Reset`]: finished in `ns`, failed with an errno, or
+/// never reported (not reached, or stopped before it said).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum ResetStage {
+    Ok { ns: u64 },
+    Failed { errno: i32 },
+    Unreported,
 }
 
 /// One iteration's host trace. Every time is `CLOCK_BOOTTIME` in
@@ -1195,6 +1284,12 @@ impl RunDocument {
                         ));
                     }
                 }
+                let reset = self.iterations.iter().map(|i| i.reset.is_some());
+                if reset.clone().any(|r| r) && !reset.clone().all(|r| r) {
+                    return Err(refuse(
+                        "a completed run whose iterations disagree on a managed reset",
+                    ));
+                }
                 let measured = self.iterations.iter().map(|i| i.measured_child().is_some());
                 if measured.clone().any(|m| m) && !measured.clone().all(|m| m) {
                     return Err(refuse(
@@ -1284,7 +1379,27 @@ impl RunDocument {
     /// `bench-pair-v2` with its class, so neither ever pairs with timing. A
     /// run whose result is a measured child's wall is `bench-pair-v3` with
     /// its class, so it never pairs with one ranked on the block's wall.
+    /// A run whose iterations ran a managed reset is `bench-pair-v4` with
+    /// the procedure around that key, so it pairs only with runs reset the
+    /// same way.
     pub fn pairing_key(&self) -> String {
+        let inner = self.unreset_pairing_key();
+        match self.reset_procedure() {
+            None => inner,
+            Some(procedure) => serde_json::json!(["bench-pair-v4", procedure, inner]).to_string(),
+        }
+    }
+
+    /// The procedure the run's iterations reset with, from the first that
+    /// recorded one; a completed run's iterations all agree (`validate`).
+    pub fn reset_procedure(&self) -> Option<&str> {
+        self.iterations
+            .iter()
+            .find_map(|i| i.reset.as_ref())
+            .map(|r| r.procedure.as_str())
+    }
+
+    fn unreset_pairing_key(&self) -> String {
         let params: Vec<serde_json::Value> = self
             .params
             .iter()
@@ -1357,6 +1472,25 @@ impl Iteration {
         }
         if self.children.iter().filter(|c| c.measured).count() > 1 {
             return Err("more than one measured child".to_owned());
+        }
+        if let Some(reset) = &self.reset {
+            if reset.procedure != RESET_TRIM_V1 {
+                return Err(format!("unknown reset procedure {:?}", reset.procedure));
+            }
+            if let (Some(a), Some(b)) = (reset.started_us, reset.ended_us)
+                && (a < 0 || b < a)
+            {
+                return Err("a reset that ends before it starts".to_owned());
+            }
+            if matches!(self.outcome, IterationOutcome::Completed { .. }) && !reset.completed {
+                return Err("a completed iteration whose reset did not complete".to_owned());
+            }
+            if reset.completed && !reset.evidences_completion() {
+                return Err(
+                    "a reset claimed completed whose stages, ending or capture say otherwise"
+                        .to_owned(),
+                );
+            }
         }
         match &self.outcome {
             IterationOutcome::Completed { .. } => {
