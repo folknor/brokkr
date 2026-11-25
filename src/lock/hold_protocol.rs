@@ -596,7 +596,13 @@ pub(super) fn wait_for_flock(
     let ticket = super::queue::Ticket::join(queue, &record()).map_err(|source| {
         DevError::Lock(LockError::acquisition(AcquireRefusal::QueueJoin { source }))
     })?;
-    let mut waited = false;
+    // Counted however the wait ends - admitted, cancelled or interrupted - so
+    // a command killed in the queue still reports the time it spent there.
+    let mut wait_clock = WaitClock {
+        joined: std::time::Instant::now(),
+        waited: false,
+    };
+    let waited = &mut wait_clock.waited;
     loop {
         match ticket.cancelled() {
             Ok(false) => {}
@@ -627,10 +633,10 @@ pub(super) fn wait_for_flock(
                 DevError::Lock(LockError::acquisition(AcquireRefusal::QueueAdmit { source }))
             })?;
         if admitted {
-            return Ok((ticket, waited));
+            return Ok((ticket, *waited));
         }
-        if !waited {
-            waited = true;
+        if !*waited {
+            *waited = true;
             // Deliberately terse, and fixed wording (see the acquired line
             // in `Gated::drain`): who holds the lock and how busy it is
             // lives in `brokkr lock`, which re-samples on every invocation.
@@ -643,6 +649,21 @@ pub(super) fn wait_for_flock(
             return Err(DevError::Interrupted);
         }
         std::thread::sleep(LOCK_POLL);
+    }
+}
+
+/// The span of one queued acquisition, added to the process's lock-wait
+/// total when it ends if the acquisition had to wait.
+struct WaitClock {
+    joined: std::time::Instant,
+    waited: bool,
+}
+
+impl Drop for WaitClock {
+    fn drop(&mut self) {
+        if self.waited {
+            super::add_lock_wait(self.joined.elapsed());
+        }
     }
 }
 

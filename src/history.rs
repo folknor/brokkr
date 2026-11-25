@@ -17,8 +17,11 @@ use crate::git::ShortCommit;
 // Schema
 // ---------------------------------------------------------------------------
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
+/// `elapsed_ms` is the whole invocation, lock queue included; `lock_wait_ms`
+/// is the part of it spent queued for the global lock, NULL on rows written
+/// before it was recorded.
 const CREATE_TABLE: &str = "\
     CREATE TABLE IF NOT EXISTS history (
         id              INTEGER PRIMARY KEY,
@@ -30,8 +33,12 @@ const CREATE_TABLE: &str = "\
         commit_hash     TEXT,
         dirty           INTEGER,
         kernel          TEXT,
-        avail_memory_mb INTEGER
+        avail_memory_mb INTEGER,
+        lock_wait_ms    INTEGER
     )";
+
+const SELECT_COLUMNS: &str = "id, timestamp, project, command, elapsed_ms, exit_status, \
+     commit_hash, dirty, kernel, avail_memory_mb, lock_wait_ms";
 
 const CREATE_INDEXES: &str = "\
     CREATE INDEX IF NOT EXISTS idx_history_timestamp ON history(timestamp);
@@ -164,8 +171,8 @@ impl HistoryDb {
         let commit_hash = row.commit_hash.as_ref().map(ShortCommit::as_str);
         self.conn.execute(
             "INSERT INTO history (project, command, elapsed_ms, exit_status, \
-                commit_hash, dirty, kernel, avail_memory_mb) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                commit_hash, dirty, kernel, avail_memory_mb, lock_wait_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 row.project,
                 row.command,
@@ -175,6 +182,7 @@ impl HistoryDb {
                 row.dirty,
                 row.kernel,
                 row.avail_memory_mb,
+                row.lock_wait_ms,
             ],
         )?;
         Ok(())
@@ -204,27 +212,13 @@ impl HistoryDb {
     /// Look up a single entry by row id. Returns `Ok(None)` when the id
     /// doesn't exist.
     pub fn get_by_id(&self, id: i64) -> Result<Option<HistoryEntry>, DevError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, timestamp, project, command, elapsed_ms, exit_status, \
-                    commit_hash, dirty, kernel, avail_memory_mb \
-             FROM history WHERE id = ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {SELECT_COLUMNS} FROM history WHERE id = ?1"))?;
         let mut rows = stmt.query([id])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(HistoryEntry {
-                id: row.get(0)?,
-                timestamp: row.get(1)?,
-                project: row.get(2)?,
-                command: row.get(3)?,
-                elapsed_ms: row.get(4)?,
-                exit_status: row.get(5)?,
-                commit_hash: row.get(6)?,
-                dirty: row.get(7)?,
-                kernel: row.get(8)?,
-                avail_memory_mb: row.get(9)?,
-            }))
-        } else {
-            Ok(None)
+        match rows.next()? {
+            Some(row) => Ok(Some(entry_from_row(row)?)),
+            None => Ok(None),
         }
     }
 
@@ -266,7 +260,12 @@ impl HistoryDb {
         }
         if let Some(slow_ms) = filter.slow_ms {
             params.push(Box::new(slow_ms));
-            clauses.push(format!("elapsed_ms >= ?{}", params.len()));
+            // The command's own time, as the listing shows it: a run that
+            // was only slow to get the lock is not a slow command.
+            clauses.push(format!(
+                "elapsed_ms - COALESCE(lock_wait_ms, 0) >= ?{}",
+                params.len()
+            ));
         }
 
         let where_clause = if clauses.is_empty() {
@@ -282,9 +281,7 @@ impl HistoryDb {
         };
 
         let sql = format!(
-            "SELECT id, timestamp, project, command, elapsed_ms, exit_status, \
-                    commit_hash, dirty, kernel, avail_memory_mb \
-             FROM history{where_clause} ORDER BY id DESC{limit}"
+            "SELECT {SELECT_COLUMNS} FROM history{where_clause} ORDER BY id DESC{limit}"
         );
 
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -292,24 +289,28 @@ impl HistoryDb {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
-            .query_map(param_refs.as_slice(), |row| {
-                Ok(HistoryEntry {
-                    id: row.get(0)?,
-                    timestamp: row.get(1)?,
-                    project: row.get(2)?,
-                    command: row.get(3)?,
-                    elapsed_ms: row.get(4)?,
-                    exit_status: row.get(5)?,
-                    commit_hash: row.get(6)?,
-                    dirty: row.get(7)?,
-                    kernel: row.get(8)?,
-                    avail_memory_mb: row.get(9)?,
-                })
-            })?
+            .query_map(param_refs.as_slice(), entry_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(rows)
     }
+}
+
+/// One row selected with [`SELECT_COLUMNS`].
+fn entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryEntry> {
+    Ok(HistoryEntry {
+        id: row.get(0)?,
+        timestamp: row.get(1)?,
+        project: row.get(2)?,
+        command: row.get(3)?,
+        elapsed_ms: row.get(4)?,
+        exit_status: row.get(5)?,
+        commit_hash: row.get(6)?,
+        dirty: row.get(7)?,
+        kernel: row.get(8)?,
+        avail_memory_mb: row.get(9)?,
+        lock_wait_ms: row.get(10)?,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +327,8 @@ pub struct HistoryRow {
     pub dirty: Option<bool>,
     pub kernel: Option<String>,
     pub avail_memory_mb: Option<i64>,
+    /// The part of `elapsed_ms` spent queued for the global lock.
+    pub lock_wait_ms: i64,
 }
 
 /// Row data returned from queries.
@@ -341,6 +344,21 @@ pub struct HistoryEntry {
     pub dirty: Option<bool>,
     pub kernel: Option<String>,
     pub avail_memory_mb: Option<i64>,
+    /// `None` on rows written before the wait was recorded.
+    pub lock_wait_ms: Option<i64>,
+}
+
+impl HistoryEntry {
+    /// The command's own time: the whole invocation less its lock queue.
+    fn run_ms(&self) -> Option<i64> {
+        self.elapsed_ms
+            .map(|ms| ms.saturating_sub(self.lock_wait_ms.unwrap_or(0)).max(0))
+    }
+
+    /// The lock queue time, when there was any.
+    fn wait_ms(&self) -> Option<i64> {
+        self.lock_wait_ms.filter(|ms| *ms > 0)
+    }
 }
 
 /// Filters for history queries.
@@ -371,8 +389,11 @@ pub fn format_detail(entry: &HistoryEntry) -> String {
         fields.push(("project", p.clone()));
     }
     fields.push(("command", format_history_command(&entry.command)));
-    if let Some(ms) = entry.elapsed_ms {
+    if let Some(ms) = entry.run_ms() {
         fields.push(("elapsed", format!("{ms} ms")));
+    }
+    if let Some(ms) = entry.wait_ms() {
+        fields.push(("lock wait", format!("{ms} ms")));
     }
     fields.push(("exit_status", entry.exit_status.to_string()));
     if let Some(ref c) = entry.commit_hash {
@@ -416,12 +437,12 @@ pub fn format_history(entries: &[HistoryEntry]) -> String {
     let mut lines = Vec::with_capacity(entries.len());
     for entry in entries {
         let project = entry.project.as_deref().unwrap_or("-");
-        let elapsed = match entry.elapsed_ms {
-            Some(ms) if ms >= 60_000 => format!("{:.1}m", ms as f64 / 60_000.0),
-            Some(ms) if ms >= 1_000 => format!("{:.1}s", ms as f64 / 1_000.0),
-            Some(ms) => format!("{ms}ms"),
-            None => "-".to_owned(),
-        };
+        let elapsed = entry.run_ms().map_or_else(|| "-".to_owned(), short_duration);
+        // The queue time rides after the command's own, only when there was
+        // one: it says how busy the lock was, not how long the command took.
+        let wait_tag = entry
+            .wait_ms()
+            .map_or_else(String::new, |ms| format!("  (+{} lock)", short_duration(ms)));
 
         let fail_tag = if entry.exit_status != 0 {
             format!("  [FAIL:{}]", entry.exit_status)
@@ -438,7 +459,7 @@ pub fn format_history(entries: &[HistoryEntry]) -> String {
         };
 
         lines.push(format!(
-            "{id:>id_width$}  {ts}  {project:<10} {elapsed:>7}  {cmd}{commit_display}{fail_tag}",
+            "{id:>id_width$}  {ts}  {project:<10} {elapsed:>7}  {cmd}{commit_display}{fail_tag}{wait_tag}",
             id = entry.id,
             ts = entry.timestamp,
             cmd = format_history_command(&entry.command),
@@ -446,6 +467,17 @@ pub fn format_history(entries: &[HistoryEntry]) -> String {
     }
 
     lines.join("\n")
+}
+
+#[allow(clippy::cast_precision_loss)] // Display rounding to one decimal.
+fn short_duration(ms: i64) -> String {
+    if ms >= 60_000 {
+        format!("{:.1}m", ms as f64 / 60_000.0)
+    } else if ms >= 1_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else {
+        format!("{ms}ms")
+    }
 }
 
 /// Render the structured argv used by new history rows. Older rows retain
@@ -926,6 +958,11 @@ fn run_migrations(conn: &Connection) -> Result<(), StoreError> {
             )?;
             redact_project_dir_commands(conn)?;
         }
+        // Version 3 adds the lock queue time. A version 1 store was just
+        // rebuilt with it; a version 2 one gains it, NULL on every old row.
+        if current == 2 && has_history {
+            conn.execute_batch("ALTER TABLE history ADD COLUMN lock_wait_ms INTEGER;")?;
+        }
         conn.execute_batch(CREATE_INDEXES)?;
         Ok(())
     })
@@ -1043,7 +1080,87 @@ mod tests {
             dirty: Some(false),
             kernel: Some("6.18.0".into()),
             avail_memory_mb: Some(16000),
+            lock_wait_ms: 0,
         }
+    }
+
+    #[test]
+    fn listing_shows_own_time_and_tags_the_lock_wait() {
+        let db = test_db();
+        let mut row = make_row("fstrim", 0);
+        row.elapsed_ms = 132_000;
+        row.lock_wait_ms = 128_000;
+        db.insert(&row).unwrap();
+        db.insert(&make_row("check", 0)).unwrap();
+
+        let entries = db
+            .query(&HistoryFilter {
+                limit: 25,
+                ..Default::default()
+            })
+            .unwrap();
+        let output = format_history(&entries);
+        let lines: Vec<&str> = output.lines().collect();
+        assert!(lines[1].contains("4.0s"), "own time: {output}");
+        assert!(lines[1].ends_with("(+2.1m lock)"), "wait tag: {output}");
+        assert!(!lines[0].contains("lock)"), "no wait, no tag: {output}");
+
+        let detail = format_detail(&entries[1]);
+        assert!(detail.contains("4000 ms"), "{detail}");
+        assert!(
+            detail
+                .lines()
+                .any(|l| l.starts_with("lock wait") && l.ends_with(" 128000 ms")),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn slow_filter_reads_own_time() {
+        let db = test_db();
+        let mut row = make_row("queued", 0);
+        row.elapsed_ms = 120_000;
+        row.lock_wait_ms = 119_000;
+        db.insert(&row).unwrap();
+        let mut row = make_row("slow", 0);
+        row.elapsed_ms = 90_000;
+        db.insert(&row).unwrap();
+
+        let got: Vec<String> = db
+            .query(&HistoryFilter {
+                slow_ms: Some(60_000),
+                limit: 25,
+                ..Default::default()
+            })
+            .unwrap()
+            .into_iter()
+            .map(|e| e.command)
+            .collect();
+        assert_eq!(got, vec!["slow"]);
+    }
+
+    #[test]
+    fn a_version_2_store_gains_the_wait_column_null_on_old_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE history (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                project TEXT, command TEXT NOT NULL, elapsed_ms INTEGER,
+                exit_status INTEGER NOT NULL, commit_hash TEXT, dirty INTEGER,
+                kernel TEXT, avail_memory_mb INTEGER);
+             INSERT INTO history (command, elapsed_ms, exit_status)
+                VALUES ('check', 5000, 0);
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+        run_migrations(&conn).unwrap();
+        let db = HistoryDb { conn };
+        let entry = db.get_by_id(1).unwrap().unwrap();
+        assert_eq!(entry.lock_wait_ms, None);
+        assert_eq!(entry.run_ms(), Some(5000));
+        db.insert(&make_row("new", 0)).unwrap();
+        assert_eq!(db.get_by_id(2).unwrap().unwrap().lock_wait_ms, Some(0));
     }
 
     #[test]

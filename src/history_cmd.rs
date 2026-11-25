@@ -90,6 +90,8 @@ pub(crate) fn record_history(
 
         #[allow(clippy::cast_possible_wrap)]
         let elapsed = elapsed_ms as i64;
+        let lock_wait_ms =
+            i64::try_from(crate::lockfile::total_lock_wait().as_millis()).unwrap_or(i64::MAX);
 
         db.insert(&history::HistoryRow {
             project: project_name,
@@ -100,6 +102,7 @@ pub(crate) fn record_history(
             dirty,
             kernel,
             avail_memory_mb,
+            lock_wait_ms,
         })?;
         Ok(())
     };

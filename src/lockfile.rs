@@ -12,6 +12,6 @@ pub(crate) use self::lock::{
     CAPABILITY_ENV, GUARD_HANDSHAKE_PREFIX, GUARD_INFO_ARG, GUARD_PROTOCOL, LEASE_MARKER_ENV,
 };
 pub(crate) use self::lock::{
-    activity, cell_cursor_path, collector, observe, queue, queue_dir, report,
+    activity, cell_cursor_path, collector, observe, queue, queue_dir, report, total_lock_wait,
 };
 pub(crate) use self::lock::{escape_value, unescape_value};

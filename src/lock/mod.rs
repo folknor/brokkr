@@ -571,6 +571,22 @@ pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     acquire_at(&path, ctx, &HOST_EFFECTS)
 }
 
+/// Time this process spent queued for the global lock, summed over every
+/// acquisition that had to wait. Measured from joining the queue to winning
+/// the flock; an acquisition admitted on its first try adds nothing. History
+/// records it beside the command's total so a listing can tell the command's
+/// own time from the queue's.
+static LOCK_WAIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn total_lock_wait() -> std::time::Duration {
+    std::time::Duration::from_millis(LOCK_WAIT_MS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn add_lock_wait(waited: std::time::Duration) {
+    let ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX);
+    LOCK_WAIT_MS.fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Acquire the global lock without applying the configured build-root tree
 /// policy. Worktree execution uses this because its own tree is activated
 /// explicitly after the checkout exists.
