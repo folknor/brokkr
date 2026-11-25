@@ -229,14 +229,14 @@ impl Drop for LockInner {
         // is still held, so the next acquisition's sweep never races it.
         drop(self.cgroup.take());
         // Undo the tree edits (if any) while we still hold the flock, then
-        // release. Doing it before LOCK_UN keeps the edited window inside the
+        // release. Doing it before the close keeps the edited window inside the
         // locked window, so a concurrent brokkr can never observe it.
         drop(self.tree.take());
-        // The flock is released automatically when the fd is closed, but
-        // unlock explicitly for clarity. OwnedFd handles close.
-        unsafe {
-            libc::flock(self.fd.as_raw_fd(), libc::LOCK_UN);
-        }
+        // Released by closing the descriptor (the `OwnedFd` field), never by
+        // an explicit `LOCK_UN`: the flock belongs to the open file
+        // description, so a privileged trim that inherited a duplicate of it
+        // (`crate::fstrim`) keeps the lock held until it exits, whatever path
+        // ends this process. An unlock here would release it under the trim.
     }
 }
 
@@ -281,6 +281,21 @@ pub(crate) struct MaintenancePhase<'g> {
 }
 
 impl LockGuard {
+    /// A close-on-exec duplicate of the descriptor holding the flock, numbered
+    /// 10 or above so a spawn's own descriptors never collide with it. It
+    /// shares the open file description, so whoever keeps it open keeps the
+    /// lock held: only `crate::fstrim` hands one to a child, which it reaps
+    /// before the hold can drop.
+    pub(crate) fn duplicate_flock(&self) -> std::io::Result<OwnedFd> {
+        // SAFETY: a valid descriptor this hold owns for its whole life.
+        let fd = unsafe { libc::fcntl(self.inner.fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: fcntl just returned this descriptor, owned by nobody else.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
     /// The maintenance phase of a hold [`acquire_for_command`] made, once:
     /// `None` for any other hold, and on every call after the first.
     pub(crate) fn take_maintenance(&self) -> Option<MaintenancePhase<'_>> {

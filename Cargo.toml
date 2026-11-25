@@ -28,6 +28,13 @@ path = "src/bin/rustc_guard.rs"
 name = "brokkr-results-server"
 path = "src/bin/results_server/main.rs"
 
+# The privileged trim step. `cargo install` puts a copy in ~/.cargo/bin, which
+# brokkr never runs: the operator installs it root-owned with cap_sys_admin at
+# the fixed path `crate::fstrim` names (`brokkr man fstrim`).
+[[bin]]
+name = "brokkr-fstrim"
+path = "src/bin/fstrim_helper.rs"
+
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
 toml = "1.1.3"

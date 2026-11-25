@@ -120,6 +120,7 @@ pub(crate) fn cmd_env(
         sources,
     );
     print(&info);
+    print_fstrim(&crate::fstrim::env_status());
     crate::health::print_env(project_root.as_path());
     if let Some(note) = crate::config::unmatched_host_note(dev_config, &paths.hostname) {
         output::warn(&format!(
@@ -354,6 +355,11 @@ fn print_tools(info: &EnvInfo) {
         .map(|(name, ver)| format!("{name} {ver}"))
         .collect();
     println!("{:<12} {}", "tools:", parts.join("  "));
+}
+
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
+fn print_fstrim(status: &str) {
+    println!("{:<12} {status}", "fstrim:");
 }
 
 #[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.

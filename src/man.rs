@@ -130,6 +130,12 @@ const TOPICS: &[Topic] = &[
         commands: &[CommandId::Serve],
     },
     Topic {
+        name: "fstrim",
+        summary: "fstrim: sync and trim under the lock, the brokkr-fstrim helper and its install",
+        content: include_str!("../docs/commands/fstrim.md"),
+        commands: &[CommandId::Fstrim],
+    },
+    Topic {
         name: "clean",
         summary: "what clean removes, what is permanently out of scope",
         content: include_str!("../docs/commands/clean.md"),

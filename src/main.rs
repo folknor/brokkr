@@ -36,6 +36,7 @@ mod error;
 mod executable_artifact;
 mod fmt_cmd;
 mod fs_probe;
+mod fstrim;
 mod git;
 mod globs;
 mod gremlins;

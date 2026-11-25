@@ -379,6 +379,22 @@ overwrite a foreign wrapper such as sccache); --remove unsets it.
 Enrollment invalidates cargo's compile fingerprint once per target dir."
     )]
     Guard(GuardCmd),
+    /// Sync and trim filesystems under the lock (FITRIM, ext4), through the installed helper
+    #[command(
+        display_order = 6,
+        long_about = "\
+Sync and trim each filesystem holding a PATH, one at a time, under the
+brokkr lock, so no bench measures while a trim runs. Each PATH is a
+directory on ext4; with none, the project's resolved scratch directory,
+else the current directory. Every PATH is checked before the first trim.
+
+The privileged step is the brokkr-fstrim helper, installed once
+root-owned with cap_sys_admin at /usr/local/libexec/brokkr-fstrim. No
+sudo or polkit is involved. The free-space gate does not apply.
+
+In depth, including the install: `brokkr man fstrim`."
+    )]
+    Fstrim(FstrimCmd),
     /// Stop this project's brokkr commands: the queued ones and the lock holder
     #[command(
         display_order = 6,
@@ -1339,6 +1355,13 @@ pub(crate) struct StraysCmd {
     /// SIGKILL the strays instead of only listing them.
     #[arg(long)]
     pub(crate) kill: bool,
+}
+
+// `brokkr fstrim`'s arguments; see `Command::Fstrim`.
+#[derive(Args)]
+pub(crate) struct FstrimCmd {
+    /// Directories whose filesystems to trim.
+    pub(crate) paths: Vec<std::path::PathBuf>,
 }
 
 // `brokkr guard`'s arguments; see `Command::Guard`.

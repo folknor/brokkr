@@ -109,6 +109,7 @@ Clean => ("clean", Visibility::Any, Required, Blocking, false, crate::measure::M
 Lock => ("lock", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Strays => ("strays", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Guard => ("guard", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
+Fstrim => ("fstrim", Visibility::Any, Optional, Blocking, false, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &[]),
 Kill => ("kill", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
 History => ("history", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Invalidate => ("invalidate", Visibility::Except(MEASURED_DB_ABSENT), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),

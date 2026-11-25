@@ -24,6 +24,7 @@ The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bar
 - `docs/commands/check.hygiene.md` - time ceilings, `brokkr lock` and the lock queue, `brokkr kill`'s scope, strays and orphans, the rustc guard.
 - `reference/check-internals.md` - how the check/test pipeline is built. Read before changing it.
 - `docs/commands/test.md`, `clippy.md`, `deps.md`, `crit.md`, `run.md` (also `build`, `install`), `serve.md`, `clean.md`, `results.md` - those commands.
+- `docs/commands/fstrim.md` - `brokkr fstrim`: sync and trim under the lock, and the root-owned `brokkr-fstrim` helper it runs. Read before changing `src/fstrim.rs` or `src/bin/fstrim_helper.rs`.
 - `docs/commands/bench.md` - `brokkr bench NAME`: running a script bench, its builtins, what a run stores.
 - `docs/commands/measure.md` - `--bench`/`--hotpath`/`--alloc`/`--stop`, the sidecar profiler, `brokkr sidecar`.
 - `docs/commands/output-channels.md` - where a run's output goes.
@@ -40,7 +41,7 @@ The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bar
 
 ## Architecture
 
-Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-results-server` bins, which include shared sources by path. No workspace. Each file's `//!` module doc (a `//` head comment in an `include!`d file) says what it owns; read it before changing the file. The landmarks:
+Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-results-server` bins, which include shared sources by path, and the self-contained `brokkr-fstrim` helper. No workspace. Each file's `//!` module doc (a `//` head comment in an `include!`d file) says what it owns; read it before changing the file. The landmarks:
 
 - `src/main.rs`, `src/main_parts/` - startup and dispatch. `src/cli/` - clap schema, and `visibility.rs`'s `CommandSpec` catalogue, which drives the project gate, help visibility, lock policy, worktree selection and man topics.
 - `src/check_cmd/`, `src/test_runner/`, `src/test_cmd/`, `src/build_purpose/` - the check/test/clippy pipeline.
@@ -60,6 +61,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `wc [threshold]` - tracked `.rs` files over `threshold` lines (default 800).
 - `history` - global command history.
 - `lock`, `strays [--kill]`, `guard [--install|--remove]`, `kill [--hard] [--project NAME | --all]` - lock status and queue, process hygiene, and stopping this project's commands (another project's only when named).
+- `fstrim [PATH...]` - sync and trim filesystems under the lock, through the installed helper.
 - `sidecar <uuid>` - sidecar profiler data.
 - `fmt` - locked `cargo fmt` wrapper.
 - Project-specific: `mogwai`, `hotpath` - see the project docs.

@@ -159,6 +159,15 @@ pub(super) fn run(
         Command::Guard(cli::GuardCmd { install, remove }) => {
             crate::guard::cmd_guard(*install, *remove)
         }
+        Command::Fstrim(cli::FstrimCmd { paths }) => {
+            let default = match (paths.is_empty(), detection) {
+                (true, Some(d)) => Some(
+                    crate::context::bootstrap_config(&d.config, &d.project_root)?.scratch_dir,
+                ),
+                _ => None,
+            };
+            crate::fstrim::cmd_fstrim(paths, default)
+        }
         Command::History(cli::HistoryCmd {
             id,
             command,
@@ -442,6 +451,7 @@ fn run_project(
         | Command::Kill(_)
         | Command::Strays(_)
         | Command::Guard(_)
+        | Command::Fstrim(_)
         | Command::History(_)
         | Command::Check(_)
         | Command::Clippy(_)
