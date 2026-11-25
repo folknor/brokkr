@@ -381,9 +381,20 @@ pub(crate) struct SupervisedChild {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub elapsed: Duration,
+    /// The boot clock read at the same end observation as `elapsed`, for a
+    /// caller whose child clock is the boot clock; `None` when the read
+    /// failed.
+    pub ended_boot: Option<crate::boot_clock::BootInstant>,
     pub output_cut: bool,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+}
+
+/// One end observation of a supervised child on both clocks: the wall from
+/// `start`, and the boot clock read straight after it.
+fn observe_end(start: Instant) -> (Duration, Option<crate::boot_clock::BootInstant>) {
+    let elapsed = start.elapsed();
+    (elapsed, crate::boot_clock::BootInstant::now().ok())
 }
 
 /// Spawn a subprocess with captured stdio and a wall-clock deadline.
@@ -690,18 +701,18 @@ pub(crate) enum Wake {
 }
 
 /// Wait until `next_tick`, waking early if the pidfd reports the exit, and
-/// return the exit time measured from `start` when it does. A wait already
+/// return the exit observation ([`observe_end`]) when it does. A wait already
 /// past its tick still checks the pidfd once. A pidfd that fails is dropped,
 /// and the rest of the wait, and every later one, is a plain sleep.
 fn wait_for_tick(
     pidfd: &mut Option<std::os::fd::OwnedFd>,
     next_tick: Instant,
     start: Instant,
-) -> Option<Duration> {
+) -> Option<(Duration, Option<crate::boot_clock::BootInstant>)> {
     use crate::process::pidfd::{PidfdWait, wait};
     while let Some(fd) = pidfd.as_ref() {
         match wait(fd, next_tick.saturating_duration_since(Instant::now())) {
-            PidfdWait::Exited => return Some(start.elapsed()),
+            PidfdWait::Exited => return Some(observe_end(start)),
             PidfdWait::TimedOut => return None,
             PidfdWait::Interrupted => {}
             PidfdWait::Failed(error) => {
@@ -767,14 +778,14 @@ fn supervise_child_capped(
                 expired(),
                 marker,
             );
-            child_elapsed = Some(start.elapsed());
+            child_elapsed = Some(observe_end(start));
             break ending;
         }
 
         if crate::shutdown::is_shutdown_requested() {
             let ending =
                 terminate_and_wait(&mut child, isolation, true, &options, Ending::Interrupted);
-            child_elapsed = Some(start.elapsed());
+            child_elapsed = Some(observe_end(start));
             break ending;
         }
 
@@ -784,7 +795,7 @@ fn supervise_child_capped(
         // later reading can rule out. Its own ending stands.
         match child.try_wait() {
             Ok(Some(status)) => {
-                child_elapsed = Some(exit_at.unwrap_or_else(|| start.elapsed()));
+                child_elapsed = Some(exit_at.unwrap_or_else(|| observe_end(start)));
                 break Ending::from_status(&status).unwrap_or_else(|| {
                     Ending::WaitFailed("wait returned no exit code or signal".to_owned())
                 });
@@ -798,7 +809,7 @@ fn supervise_child_capped(
                         &options,
                         Ending::Deadline(duration),
                     );
-                    child_elapsed = Some(start.elapsed());
+                    child_elapsed = Some(observe_end(start));
                     break ending;
                 }
             }
@@ -812,7 +823,7 @@ fn supervise_child_capped(
                     None,
                 );
                 child.wait().ok();
-                child_elapsed = Some(start.elapsed());
+                child_elapsed = Some(observe_end(start));
                 break Ending::WaitFailed(error.to_string());
             }
         }
@@ -832,11 +843,13 @@ fn supervise_child_capped(
     let mut bufs = bufs.into_iter();
     let stdout = bufs.next().unwrap_or_default();
     let stderr = bufs.next().unwrap_or_default();
+    let (elapsed, ended_boot) = child_elapsed.unwrap_or_else(|| observe_end(start));
     SupervisedChild {
         ending,
         stdout: stdout.bytes,
         stderr: stderr.bytes,
-        elapsed: child_elapsed.unwrap_or_else(|| start.elapsed()),
+        elapsed,
+        ended_boot,
         output_cut,
         stdout_truncated: stdout.truncated,
         stderr_truncated: stderr.truncated,

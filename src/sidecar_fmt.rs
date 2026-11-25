@@ -17,14 +17,18 @@ pub(crate) use compare::{CompareSide, print_compare_timeline};
 /// is bounded and rendered (`docs/commands/measure.md`, Script-bench
 /// children). A typed run's process is known through its samples alone, and
 /// its views keep the output they always had. A script-bench child's
-/// interval is known exactly, from its spawn to its stored wall, so its
-/// timeline closes at the wall, a phase no sample landed in is still a
-/// phase (its resource readings absent, never zero), phase records carry
-/// microseconds, and a call's sink end shows without boundaries.
+/// interval is known exactly, from its spawn to its stored end, so its
+/// timeline closes at `end` on the child's own clock, a phase no sample
+/// landed in is still a phase (its resource readings absent, never zero),
+/// phase records carry microseconds, and a call's sink end shows without
+/// boundaries. `wall_us` stays the measured wall.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Process {
     Sampled,
-    Child { wall_us: i64 },
+    Child {
+        wall_us: i64,
+        end: sidecar::ChildEnd,
+    },
 }
 
 impl Process {
@@ -33,7 +37,7 @@ impl Process {
     pub(crate) fn wall_us(self) -> Option<i64> {
         match self {
             Self::Sampled => None,
-            Self::Child { wall_us } => Some(wall_us),
+            Self::Child { wall_us, .. } => Some(wall_us),
         }
     }
 
@@ -49,31 +53,29 @@ impl Process {
     ) -> sidecar::Timeline<'a> {
         match self {
             Self::Sampled => sidecar::Timeline::new(markers, samples),
-            Self::Child { wall_us } => sidecar::Timeline::walled(markers, wall_us),
+            Self::Child { end, .. } => sidecar::Timeline::walled(markers, end),
         }
     }
 }
 
 /// A script-bench iteration's host trace as seen from one of its children:
-/// `child_zero_us` is the child's clock zero on the trace's boot clock, its
-/// iteration's block start plus its origin offset.
+/// `child_zero` is the child's clock zero on the trace's boot clock.
 #[derive(Clone, Copy)]
 pub(crate) struct HostProjection<'a> {
     pub trace: &'a crate::bench::store::HostTrace,
-    pub child_zero_us: i64,
+    pub child_zero: crate::boot_clock::BootInstant,
 }
 
 impl HostProjection<'_> {
     /// The readings stamped inside a window of the child's clock, and
     /// whether the run's reading budget ran out in its iteration, so the
-    /// window may lack later readings.
+    /// window may lack later readings. The bounds are child-clock stamps,
+    /// decoded from stored markers.
     fn window(&self, from_us: i64, to_us: i64) -> HostWindow {
+        use crate::boot_clock::ChildUs;
+        let on_trace = |us: i64| self.child_zero.offset_by(ChildUs::decoded(us)).as_us();
         (
-            crate::bench::host_trace::window(
-                self.trace,
-                self.child_zero_us.saturating_add(from_us),
-                self.child_zero_us.saturating_add(to_us),
-            ),
+            crate::bench::host_trace::window(self.trace, on_trace(from_us), on_trace(to_us)),
             self.trace.capped,
         )
     }
@@ -1846,7 +1848,10 @@ mod stall_tests {
                 &[],
                 Some("a"),
                 None,
-                Process::Child { wall_us: 1_000 }
+                Process::Child {
+                    wall_us: 1_000,
+                    end: sidecar::ChildEnd::Wall(1_000),
+                }
             )
             .is_err()
         );

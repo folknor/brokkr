@@ -186,6 +186,7 @@ pub(super) fn run_iteration(
         cwd: setup.cwd.to_path_buf(),
         state_root: setup.state_root.to_path_buf(),
         block_start: None,
+        block_start_boot: None,
         children: Vec::new(),
         stages: BTreeMap::new(),
         budget,
@@ -243,10 +244,9 @@ struct TraceStart {
     cell: store::Cell,
     previous: Option<store::Cursor>,
     cursor_written: bool,
-    start: store::Reading,
+    /// `None` when the boot clock could not be read.
+    start: Option<store::Reading>,
     sampler: host_trace::Sampler,
-    /// An instant and the boot clock read together, to place the block.
-    anchor: (Instant, i64),
 }
 
 impl TraceStart {
@@ -256,12 +256,9 @@ impl TraceStart {
         let (readings, capped) = self.sampler.finish();
         let end = host_trace::read(self.device.as_ref());
         host.budget.host_readings = host.budget.host_readings.saturating_sub(readings.len());
-        let anchor = self.anchor;
-        let block_start_us = host.block_start.map(|at| {
-            let after = i64::try_from(at.saturating_duration_since(anchor.0).as_micros())
-                .unwrap_or(i64::MAX);
-            anchor.1.saturating_add(after)
-        });
+        // Read on the boot clock when the block began, never converted from
+        // its `Instant`, which a suspend in between would shift.
+        let block_start_us = host.block_start_boot.map(crate::boot_clock::BootInstant::as_us);
         let mut release_completed = true;
         if let Some(resources) = host.resources.take()
             && let Err(error) = resources.release()
@@ -274,13 +271,22 @@ impl TraceStart {
             ));
         }
         let released = host_trace::read(self.device.as_ref());
-        if let Err(error) = host_trace::write_cursor(&store::Cursor::Ended {
+        let ended = released.clone().map(|reading| store::Cursor::Ended {
             cell: self.cell.clone(),
             device: self.device.clone(),
-            reading: released.clone(),
+            reading,
             release_completed,
-        }) {
-            crate::output::warn(&format!("bench cell cursor not written: {error}"));
+        });
+        match ended.map(|cursor| host_trace::write_cursor(&cursor)) {
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                crate::output::warn(&format!("bench cell cursor not written: {error}"));
+            }
+            // No stamp to end on: the in-progress entry stays, so the next
+            // cell reads this one's end as unknown, which it is.
+            None => crate::output::warn(
+                "bench cell cursor not ended: the boot clock could not be read",
+            ),
         }
         let mut trace = store::HostTrace {
             boot_id: self.cell.boot_id,
@@ -288,9 +294,9 @@ impl TraceStart {
             previous: self.previous,
             cursor_written: self.cursor_written,
             block_start_us,
-            start: Some(self.start),
-            end: Some(end),
-            released: Some(released),
+            start: self.start,
+            end,
+            released,
             release_completed,
             readings,
             capped,
@@ -336,7 +342,6 @@ impl TraceStart {
             };
         let start = host_trace::read(device.as_ref());
         let sampler = host_trace::Sampler::start(device.clone(), budget);
-        let anchor = (Instant::now(), host_trace::boottime_us());
         Self {
             device,
             cell,
@@ -344,7 +349,6 @@ impl TraceStart {
             cursor_written,
             start,
             sampler,
-            anchor,
         }
     }
 }
@@ -395,6 +399,9 @@ struct IterationHost {
     cwd: PathBuf,
     state_root: PathBuf,
     block_start: Option<Instant>,
+    /// The boot clock read as the block began, the host trace's block start;
+    /// `None` until then, or when the clock could not be read.
+    block_start_boot: Option<crate::boot_clock::BootInstant>,
     children: Vec<store::Child>,
     /// Each stage's marked calls so far, whatever became of them.
     stages: BTreeMap<String, u32>,
@@ -541,8 +548,17 @@ impl IterationHost {
                 return Err(abort);
             }
         };
+        // Both clocks, just before the spawn: the wall's start and the child
+        // clock's zero. An unreadable boot clock refuses the launch rather
+        // than stamping the child on the wrong clock.
+        let start = match crate::boot_clock::RunStart::now() {
+            Ok(start) => start,
+            Err(error) => {
+                drop(admitted.finish());
+                return Err(failed("the boot clock could not be read", &error));
+            }
+        };
         let guard = crate::shutdown::SigtermGuard::install();
-        let start = Instant::now();
         let child = spawn_child(
             &Launch {
                 program: &program_str,
@@ -606,7 +622,7 @@ impl IterationHost {
         let mut open = open;
         let finished = admitted.finish_observed(&mut || open.pump(&mut fifo));
         let run = open.finish(&mut fifo, finished.is_ok());
-        self.keep_child(program_str, argv, &env, pid, start, &run, executable);
+        self.keep_child(program_str, argv, &env, pid, start.at, &run, executable);
         if let Some(child) = self.children.last_mut() {
             child.cache = cache;
         }
@@ -755,6 +771,10 @@ impl IterationHost {
             stderr: None,
             measured: false,
             cache: None,
+            boot: Some(store::ChildBootInterval {
+                launch_us: run.boot.launch.as_us(),
+                interval_us: run.boot.interval.map(crate::boot_clock::BootElapsed::as_us),
+            }),
         });
     }
 
@@ -1112,6 +1132,7 @@ impl lua::Host for IterationHost {
 
     fn begin_block(&mut self, at: Instant) {
         self.block_start = Some(at);
+        self.block_start_boot = crate::boot_clock::BootInstant::now().ok();
     }
 
     fn binary(&mut self, words: Vec<Word>, options: CallOptions) -> Result<CallOutcome, Abort> {

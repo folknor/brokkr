@@ -392,9 +392,10 @@ fn insert_child(
             run_id, iteration, idx, program, argv, env, pid, origin_offset_us, wall_us,
             ending_kind, ending_value, ending_text, rejected_lines, fifo_unread,
             records_capped, samples_capped, output_truncated, clock_outliers,
-            clock_outlier_min_us, calls_seen, calls_overflowed, measured
+            clock_outlier_min_us, calls_seen, calls_overflowed, measured, boot_launch_us,
+            boot_interval_us
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                   ?17, ?18, ?19, ?20, ?21, ?22)",
+                   ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         params![
             run_id,
             int(iteration),
@@ -418,6 +419,8 @@ fn insert_child(
             serde_json::to_string(&evidence.calls_seen)?,
             evidence.calls_overflowed,
             child.measured,
+            child.boot.map(|b| b.launch_us),
+            child.boot.and_then(|b| b.interval_us),
         ],
     )?;
     Ok(tx.last_insert_rowid())

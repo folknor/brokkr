@@ -28,20 +28,6 @@ const INTERVAL: Duration = crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES.sample_i
 /// The periodic readings one run may keep across its iterations.
 pub(crate) const RUN_READINGS: usize = 100_000;
 
-/// Microseconds since boot, suspend included: the clock every reading uses.
-pub(crate) fn boottime_us() -> i64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: `ts` is a valid, writable timespec for the call's duration.
-    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &raw mut ts) } != 0 {
-        return 0;
-    }
-    ts.tv_sec
-        .saturating_mul(1_000_000)
-        .saturating_add(ts.tv_nsec / 1_000)
-}
 
 pub(crate) fn boot_id() -> Option<String> {
     std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
@@ -136,10 +122,12 @@ pub(crate) fn parse_stat(text: &str) -> Option<DeviceCounters> {
     })
 }
 
-/// One reading now: meminfo, then the device, then the clock. The device's
-/// counters are kept only while its name still holds the instance resolved:
-/// its numbers and, where it has one, its `diskseq` unchanged.
-pub(crate) fn read(device: Option<&Device>) -> Reading {
+/// One reading now: meminfo, then the device, then the boot clock, which
+/// keeps counting through suspend. The device's counters are kept only while
+/// its name still holds the instance resolved: its numbers and, where it has
+/// one, its `diskseq` unchanged. `None` when the clock can't be read, so no
+/// reading carries a made-up stamp.
+pub(crate) fn read(device: Option<&Device>) -> Option<Reading> {
     let (dirty_kb, writeback_kb) = writeback();
     let device = device.and_then(|d| {
         let node = PathBuf::from(format!("/sys/class/block/{}", d.name));
@@ -153,12 +141,13 @@ pub(crate) fn read(device: Option<&Device>) -> Reading {
             });
         same.then(|| parse_stat(&stat)).flatten()
     });
-    Reading {
-        at_us: boottime_us(),
+    let at = crate::boot_clock::BootInstant::now().ok()?;
+    Some(Reading {
+        at_us: at.as_us(),
         dirty_kb,
         writeback_kb,
         device,
-    }
+    })
 }
 
 /// The periodic sampler: a thread reading every [`INTERVAL`] until stopped.
@@ -198,7 +187,8 @@ impl Sampler {
                         continue;
                     }
                     if readings.len() < budget {
-                        readings.push(read(device.as_ref()));
+                        // A reading whose clock read failed is left out.
+                        readings.extend(read(device.as_ref()));
                     } else {
                         capped = true;
                     }
@@ -394,6 +384,9 @@ pub(crate) enum Gap {
     /// Another boot, an unknown one, or an end stamped after this start: no
     /// elapsed time or delta applies.
     OtherBoot { cell: Cell },
+    /// The previous cell recorded its end, but this iteration's start
+    /// reading is absent (its boot clock read failed): the gap is unknown.
+    NoStart { cell: Cell },
     Ended {
         cell: Cell,
         elapsed_us: i64,
@@ -409,9 +402,8 @@ pub(crate) fn gap(trace: &crate::bench::store::HostTrace) -> Gap {
     let Some(previous) = &trace.previous else {
         return Gap::None;
     };
-    let Some(start) = &trace.start else {
-        return Gap::None;
-    };
+    // The predecessor is named whatever this start holds; only the gap's
+    // size needs the start reading.
     match previous {
         Cursor::InProgress { cell } => Gap::Unended { cell: cell.clone() },
         Cursor::Ended {
@@ -420,6 +412,9 @@ pub(crate) fn gap(trace: &crate::bench::store::HostTrace) -> Gap {
             reading,
             release_completed,
         } => {
+            let Some(start) = &trace.start else {
+                return Gap::NoStart { cell: cell.clone() };
+            };
             // Validation refuses a same-boot predecessor ending after this
             // start; a reversed pair is treated as another boot all the same.
             if cell.boot_id.is_none()

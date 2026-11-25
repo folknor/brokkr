@@ -478,7 +478,14 @@ mod tests {
         // A bench child's known wall closes its last phase, samples or not;
         // a marker past the wall moves only the boundary; a markerless child
         // is its whole interval.
-        let child = Process::Child { wall_us: 900_000 };
+        // Closed on the child's boot interval, which a suspend makes longer
+        // than its wall: the phases follow the stamps' clock.
+        let child = Process::Child {
+            wall_us: 700_000,
+            end: crate::sidecar::ChildEnd::Boot(crate::boot_clock::BootElapsed::decoded_us(
+                900_000,
+            )),
+        };
         assert_eq!(
             build_phases(&markers, &[], child),
             [
@@ -486,7 +493,11 @@ mod tests {
                 ("B".to_owned(), 500_000, 900_000)
             ]
         );
-        let short = Process::Child { wall_us: 400_000 };
+        // A child stored before its boot interval closes on its wall.
+        let short = Process::Child {
+            wall_us: 400_000,
+            end: crate::sidecar::ChildEnd::Wall(400_000),
+        };
         assert_eq!(
             build_phases(&markers, &samples, short),
             [

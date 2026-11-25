@@ -137,6 +137,10 @@ fn child(offset: i64, ending: ChildEnding) -> Child {
         }),
         measured: false,
         cache: None,
+        boot: Some(crate::bench::store::ChildBootInterval {
+            launch_us: 9_000_000,
+            interval_us: Some(1_200),
+        }),
     }
 }
 
@@ -1031,6 +1035,7 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
     }
     for child in doc.iterations.iter_mut().flat_map(|i| &mut i.children) {
         child.stderr = None;
+        child.boot = None;
     }
     {
         let mut store = Store::open(&path).unwrap();
@@ -1040,7 +1045,9 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         store
             .conn()
             .execute_batch(
-                "ALTER TABLE runs DROP COLUMN rustflags;
+                "ALTER TABLE children DROP COLUMN boot_interval_us;
+                 ALTER TABLE children DROP COLUMN boot_launch_us;
+                 ALTER TABLE runs DROP COLUMN rustflags;
                  DROP INDEX runs_invocation;
                  ALTER TABLE runs DROP COLUMN invocation;
                  ALTER TABLE runs DROP COLUMN schedule;
@@ -1069,9 +1076,33 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
     assert!(store.marks(&doc.project).unwrap().is_empty());
     assert_eq!(store.load(&doc.uuid).unwrap(), Some(doc));
+}
+
+/// A child's boot interval reads back whole, with its span, with its launch
+/// alone when the end read failed, and absent as a child stored before it;
+/// a negative reading is refused.
+#[test]
+fn a_child_boot_interval_reads_back_in_each_shape_and_a_negative_one_is_refused() {
+    use crate::bench::store::ChildBootInterval;
+    let mut store = store("boot_interval");
+    let mut doc = document("00000000000000000000000000000020");
+    doc.iterations[0].children[0].boot = Some(ChildBootInterval {
+        launch_us: 7_000_000,
+        interval_us: None,
+    });
+    doc.iterations[0].children[1].boot = None;
+    store.publish(&doc).unwrap();
+    assert_eq!(store.load(&doc.uuid).unwrap().as_ref(), Some(&doc));
+
+    let mut negative = document("00000000000000000000000000000021");
+    negative.iterations[0].children[0].boot = Some(ChildBootInterval {
+        launch_us: 1,
+        interval_us: Some(-1),
+    });
+    refused(&negative, "negative boot");
 }
 
 /// A `program` child's executable reads back as published, a digest and an

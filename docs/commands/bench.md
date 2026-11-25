@@ -129,13 +129,22 @@ declared `validated = true` (`brokkr man bench-config`, Params) is checked
 there, and a rule between params belongs there, such as `--osc` only for
 one row.
 
-brokkr runs it for every arm as soon as the params bind, before anything
-else the invocation does, on every run and under `--dry-run`. It runs in a
-fresh Lua state: the chunk's top level, then `validate(params, keys)`.
-Returning nothing passes. `fail(reason)` refuses the invocation whole,
-naming every refusing arm, before anything is opened, reserved,
-preflighted, built or stored. A typo in a queued invocation is then refused
-at once, not hours later as a failed run:
+It also holds a project's own rule on the keys a `from` param selects.
+`keys.NAME` is the selected key, or the list of them for a `many` param,
+however it was chosen: given, defaulted, a sole entry, `all` or a range.
+So a project whose tools require canonical sequence keys can refuse
+`--osc 011` there, before the bench runs on an entry its tools would
+refuse. Such a rule judges what the invocation selected, not the whole
+registry; a key no invocation selects stays the registry owner's to check.
+
+brokkr runs it for every arm as soon as the params bind, on every run and
+under `--dry-run`, after reading and compiling the script but before
+anything else. It runs in a fresh Lua state: the chunk's top level, then
+`validate(params, keys)`. Returning nothing passes. `fail(reason)` refuses
+the invocation whole, naming every refusing arm, before any bound input is
+opened or reserved, and before anything is preflighted, built or stored. A
+typo in a queued invocation is then refused at once, not hours later as a
+failed run:
 
 ```lua
 local ROWS = { inspect = true, sort = true }

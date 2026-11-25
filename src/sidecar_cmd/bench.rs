@@ -341,19 +341,35 @@ impl BenchRun {
     /// Iteration `run`'s host trace as its selected child sees it; `None`
     /// for an iteration stored without one, or whose `bench()` never ran.
     pub(super) fn host(&self, run: usize) -> Option<crate::sidecar_fmt::HostProjection<'_>> {
+        use crate::boot_clock::BootInstant;
         let trace = self.run.doc.iterations.get(run)?.host.as_ref()?;
         let child = self.child_of(run)?;
-        Some(crate::sidecar_fmt::HostProjection {
-            trace,
-            child_zero_us: trace.block_start_us?.saturating_add(child.origin_offset_us),
-        })
+        // Its stored launch reading, kept whether or not its end was read; a
+        // child stored before the field existed falls back to the block
+        // start plus its monotonic offset, which a suspend between the two
+        // would shift.
+        let child_zero = match child.boot {
+            Some(boot) => BootInstant::decoded(boot.launch_us),
+            None => BootInstant::decoded(
+                trace.block_start_us?.saturating_add(child.origin_offset_us),
+            ),
+        };
+        Some(crate::sidecar_fmt::HostProjection { trace, child_zero })
     }
 
-    /// The process of iteration `run`'s child: its interval is known.
+    /// The process of iteration `run`'s child: its interval is known, on
+    /// its boot clock when stored, else from its wall.
     pub(super) fn process(&self, run: usize) -> Process {
+        use crate::sidecar::ChildEnd;
         self.child_of(run)
             .map_or(Process::Sampled, |child| Process::Child {
                 wall_us: child.wall_us,
+                end: child
+                    .boot
+                    .and_then(|boot| boot.interval_us)
+                    .map_or(ChildEnd::Wall(child.wall_us), |us| {
+                        ChildEnd::Boot(crate::boot_clock::BootElapsed::decoded_us(us))
+                    }),
             })
     }
 

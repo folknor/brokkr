@@ -370,12 +370,15 @@ labelled `--run N --child N`.
 
 ### Child timeline
 
-A child's interval is known, from its spawn to its stored wall. So its
-process timeline closes at the wall, not at its last sample:
+A child's interval is known, from its spawn to its stored end. brokkr keeps
+that end on the boot clock its stamps count on, so it matches the wall
+unless the run spanned a suspend. A child stored before it was kept, or
+whose end brokkr couldn't read on that clock, ends at its wall. So its process timeline closes at that end, not at its last
+sample:
 
-- The last phase ends at the wall, or at a marker stamped past it, which
-  moves only the segment end.
-- A markerless child is one `(all)` segment from 0 to the wall.
+- The last phase ends there, or at a marker stamped past it, which moves
+  only the segment end.
+- A markerless child is one `(all)` segment from 0 to the end.
 - The default summary and `--compare` need no sample.
 
 A phase no sample fell in is still a phase. The `--human` table shows it with
@@ -426,10 +429,15 @@ completed request, queueing included, and a request completing inside the
 phase may have waited before it.
 
 These are host-wide readings: other work on the host and sibling partitions
-of the disk count. The child's clock is placed on the trace's boot clock
-through one anchor taken before `bench()`. So a host suspend during the
-iteration misplaces the windows by its length. No sample field names the host
-readings, so `--fields`, `--where` and `--stat` don't reach them.
+of the disk count. Both the trace and the child's stamps are on the boot
+clock, and the child's zero is the boot reading brokkr took just before
+spawning it, so a suspend during the iteration doesn't move the windows.
+Only a suspend inside the spawn itself, between that reading and the
+process's start, still shifts them by its length. A child stored before
+that reading was kept is placed at its block start plus its launch offset,
+which a suspend between the two misplaces too. No sample
+field names the host readings, so `--fields`, `--where` and `--stat` don't
+reach them.
 
 Every human table prints whole milliseconds, so a sub-millisecond phase of a
 short child reads `0ms` there; the JSONL has microseconds.
@@ -463,8 +471,9 @@ would corrupt phase deltas. The field names below are the tokens `--fields`,
 
 A few fields need more than the table says:
 
-- `t` is seconds since brokkr spawned the process, from an `Instant` taken
-  just before the spawn ("The clock" under "Marker & counter rules").
+- `t` is seconds since brokkr spawned the process, on the boot clock from a
+  reading taken just before the spawn ("The clock" under "Marker & counter
+  rules").
 - `anon` is the usual "real memory" signal.
 - `hwm` is carried monotonically.
 - `utime` and `stime` decode through `_SC_CLK_TCK`.
@@ -553,21 +562,26 @@ incomplete, which it stays.
 ### The clock
 
 Every timestamp on the FIFO is a non-negative integer count of microseconds
-on one monotonic elapsed-time clock. Its zero is the start of the process
-brokkr spawned. Every thread, call stream, counter and sink end shares that
-origin, and so do a harness's call boundaries. Nothing resets it: not opening
-the FIFO, not initialising instrumentation, not beginning a call, not the
-first record. UNIX-epoch stamps don't conform.
+elapsed on the boot clock (`CLOCK_BOOTTIME`), which keeps counting through a
+system suspend. Its zero is the start of the process brokkr spawned. Every
+thread, call stream, counter and sink end shares that origin, and so do a
+harness's call boundaries. Nothing resets it: not opening the FIFO, not
+initialising instrumentation, not beginning a call, not the first record.
+UNIX-epoch stamps don't conform.
 
 The origin matters because brokkr stamps each `/proc` sample (the `t` field)
-from an `Instant` it takes just before spawning that process. Every view that
-lines markers up against samples compares the two clocks directly: the
-per-phase summary, and `--phase` with `--samples`, `--stat` or `--counters`.
+on the same clock, from a reading it takes just before spawning that
+process. Every view that lines markers up against samples compares the two
+directly: the per-phase summary, and `--phase` with `--samples`, `--stat` or
+`--counters`.
 
 The alignment is approximate. It includes the launch overhead between
-brokkr's `Instant` and the process start, and however the writer estimates
-its own start. pbfhogg reads its process age from procfs; an `Instant` taken
-as early as possible in `main` is the portable approximation.
+brokkr's reading and the process start, and however the writer estimates
+its own start. pbfhogg reads its process age from procfs, which counts on
+the boot clock. A writer timing itself from a monotonic clock that stops in
+suspend (Rust's `Instant`, `CLOCK_MONOTONIC`) conforms only while the host
+stays awake: after a suspend its stamps fall behind the samples by the
+suspend's length.
 
 A writer that takes its origin later, at its first FIFO open or first record,
 conforms only as far as that delay is negligible: every stamp is early
@@ -580,16 +594,28 @@ against the samples by it. Some readings don't depend on the origin:
 ### Clock check
 
 brokkr checks what it can. At the end of a capture, it counts any retained
-record stamped negative, or later than the run's wall plus one second, as
-outside the run interval. It warns about them once and stores the count on
-the run's sidecar.db summary (`clock_outliers` and the smallest such stamp,
-since v11). Every `brokkr sidecar` query of that run repeats the warning, one
+record stamped negative, or later than the run interval plus one second, as
+outside the run interval. The interval runs from brokkr's boot reading
+before the spawn to the one at the child's observed end, so it includes any
+suspend, as the stamps do; the wall, which excludes suspend, is not the
+bound. When that end reading fails, brokkr warns and skips the check rather
+than judge the stamps against the wall. It warns about outliers once and
+stores the count: on the run's sidecar.db summary for a typed run
+(`clock_outliers` and the smallest such stamp, since v11), and on the
+child's evidence for a script-bench child. Every `brokkr sidecar` query of that run repeats the warning, one
 line per run. The records themselves are stored and shown as written; nothing
 is rebased.
 
 Such a record is off the contract clock, or was written after the process
 exited by a descendant still holding the FIFO. Passing proves nothing: a late
 origin stamps early, never late, so it passes.
+
+When the interval exceeds the wall by more than a second, brokkr warns once
+that the boot clock ran ahead of the wall over the capture interval. A
+system suspend is the usual cause, and the wall leaves it out. brokkr reads
+the two clocks one after the other, so being descheduled between the reads
+widens the gap as well. The child may also have exited before a suspend and
+only been observed after it.
 
 A run stored before v11 was never checked, and the run's wall is no longer in
 sidecar.db. The upgrade marks one only for a stamp that's negative or at or

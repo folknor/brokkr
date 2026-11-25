@@ -5,6 +5,7 @@
 
 mod atomic_write;
 mod bench;
+mod boot_clock;
 mod build;
 mod build_info;
 mod build_provenance;

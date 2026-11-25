@@ -625,6 +625,26 @@ pub struct Child {
     /// document encodes as it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<CachePreparation>,
+    /// The child's interval on its own clock, the boot clock: where it sits
+    /// on the host trace and where its timeline ends. Absent for a child
+    /// stored before the field existed, whose readers fall back to its wall
+    /// and origin offset. Omitted when absent, so such a document encodes as
+    /// it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot: Option<ChildBootInterval>,
+}
+
+/// A child's interval on the boot clock (`CLOCK_BOOTTIME`, microseconds):
+/// `launch_us` its child clock's zero, read just before the spawn, and
+/// `interval_us` the span to the end observation its wall also stamps,
+/// absent when the boot clock could not be read there. The span differs from
+/// the wall by any suspend, and by the skew of reading two clocks in turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildBootInterval {
+    pub launch_us: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_us: Option<i64>,
 }
 
 /// The page-cache procedure a preparation followed, as stored accounts name
@@ -1415,6 +1435,11 @@ impl Child {
         }
         if self.wall_us < 0 {
             return Err("negative wall".to_owned());
+        }
+        if let Some(boot) = self.boot
+            && (boot.launch_us < 0 || boot.interval_us.is_some_and(|us| us < 0))
+        {
+            return Err("negative boot launch or interval".to_owned());
         }
         if let ChildEnding::Deadline { nanos, .. } = self.ending
             && nanos >= 1_000_000_000

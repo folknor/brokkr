@@ -34,7 +34,8 @@ impl BenchHarness {
         // Held until the sidecar has reaped the child: the grouped child leaves
         // brokkr's terminal process group, so signals must be bridged to it.
         let signal_guard = crate::shutdown::SigtermGuard::install();
-        let start = std::time::Instant::now();
+        // The wall's start and the child clock's zero, both before the spawn.
+        let start = crate::boot_clock::RunStart::now()?;
         let process = child::spawn_captured(
             &program_str,
             args,

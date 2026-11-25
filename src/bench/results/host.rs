@@ -62,6 +62,10 @@ pub(crate) fn gap_line(trace: &HostTrace) -> String {
             "after {}, in another boot or not shown to precede this one: no gap applies",
             cell_name(&cell)
         ),
+        Gap::NoStart { cell } => format!(
+            "after the end of {}; this iteration's start reading is missing, so the gap is unknown",
+            cell_name(&cell)
+        ),
         Gap::Ended {
             cell,
             elapsed_us,
@@ -290,6 +294,19 @@ mod tests {
         let mut other = trace(Some(ended(Some(7))), Some(7));
         other.boot_id = Some("other".to_owned());
         assert!(gap_line(&other).contains("another boot"));
+    }
+
+    /// A start reading lost to a failed clock read still names the recorded
+    /// predecessor; only the gap's size is unknown.
+    #[test]
+    fn a_missing_start_names_the_predecessor_with_an_unknown_gap() {
+        let mut ended_before = trace(Some(ended(Some(7))), Some(7));
+        ended_before.start = None;
+        let line = gap_line(&ended_before);
+        assert!(line.contains("start reading is missing"), "{line}");
+        let mut unended = trace(Some(Cursor::InProgress { cell: cell() }), Some(7));
+        unended.start = None;
+        assert!(gap_line(&unended).contains("never recorded its end"));
     }
 
     #[test]

@@ -375,8 +375,20 @@ ALTER TABLE runs ADD COLUMN rustflags TEXT
     CHECK (rustflags IS NULL OR json_type(rustflags) = 'object');
 ";
 
+/// Version 14: a child's interval on the boot clock, its launch reading and
+/// the span to its end observation, the span NULL when the end read failed;
+/// both NULL for every earlier child. The reader refuses a span without a
+/// launch.
+const V14: &str = "
+ALTER TABLE children ADD COLUMN boot_launch_us INTEGER
+    CHECK (boot_launch_us IS NULL OR boot_launch_us >= 0);
+ALTER TABLE children ADD COLUMN boot_interval_us INTEGER
+    CHECK (boot_interval_us IS NULL OR boot_interval_us >= 0);
+";
+
 /// The chain. Shipped steps are frozen; append only.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13];
+pub(super) const MIGRATIONS: &[&str] =
+    &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 

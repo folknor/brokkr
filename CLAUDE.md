@@ -19,7 +19,7 @@ Do not use your Memory functionality. Durable context belongs in CLAUDE.md or th
 
 ### Session workflow
 
-After a code change, carry it all the way through without checking in first: update the affected markdown (including stale lines adjacent to the change, not only the lines the change touched), run `brokkr check`, commit on master, `brokkr install`. Markdown updates land BEFORE the code commit and ride in the same commit (never a pure-markdown commit). Do not end a turn with "want me to commit?" or "should I update the docs too?".
+After a code change, carry it all the way through without checking in first: update the affected markdown (including stale lines adjacent to the change, not only the lines the change touched), run `brokkr check`, commit on master. Markdown updates land BEFORE the code commit and ride in the same commit (never a pure-markdown commit). Do not end a turn with "want me to commit?" or "should I update the docs too?".
 
 ### Subagents
 

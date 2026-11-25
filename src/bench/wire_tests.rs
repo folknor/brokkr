@@ -125,6 +125,10 @@ fn frozen_child() -> Child {
         }),
         measured: true,
         cache: Some(frozen_cache()),
+        boot: Some(crate::bench::store::ChildBootInterval {
+            launch_us: i64::MAX,
+            interval_us: Some(1_700),
+        }),
     }
 }
 

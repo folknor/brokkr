@@ -6,7 +6,8 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::StoreError;
 use super::document::{
-    BoundParam, Build, CacheFile, CacheMode, CachePreparation, CaptureOutcome, Child, ChildEnding,
+    BoundParam, Build, CacheFile, CacheMode, CachePreparation, CaptureOutcome, Child,
+    ChildBootInterval, ChildEnding,
     Clock, Conditions, DeviceCounters, Evidence, Executable, ExecutableIdentity, HostTrace,
     HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue, Reading, Record,
     ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd, StderrCapture, StderrTail,
@@ -345,6 +346,7 @@ struct ChildRow {
     calls_seen: String,
     calls_overflowed: bool,
     measured: bool,
+    boot: (Option<i64>, Option<i64>),
 }
 
 /// A non-negative count column; a negative one does not read back.
@@ -380,6 +382,7 @@ fn child_row(row: &Row<'_>) -> rusqlite::Result<ChildRow> {
         calls_seen: row.get(18)?,
         calls_overflowed: row.get(19)?,
         measured: row.get(20)?,
+        boot: (row.get(21)?, row.get(22)?),
     })
 }
 
@@ -408,7 +411,7 @@ fn load_children(conn: &Connection, run_id: i64, iteration: i64) -> Result<Vec<C
         "SELECT id, idx, program, argv, env, pid, origin_offset_us, wall_us, ending_kind,
                 ending_value, ending_text, rejected_lines, fifo_unread, records_capped,
                 samples_capped, output_truncated, clock_outliers, clock_outlier_min_us,
-                calls_seen, calls_overflowed, measured
+                calls_seen, calls_overflowed, measured, boot_launch_us, boot_interval_us
          FROM children WHERE run_id = ?1 AND iteration = ?2 ORDER BY idx",
     )?;
     let rows = stmt
@@ -440,6 +443,14 @@ fn load_children(conn: &Connection, run_id: i64, iteration: i64) -> Result<Vec<C
             stderr: load_stderr(conn, row.id)?,
             measured: row.measured,
             cache: load_cache(conn, row.id, row.origin_offset_us)?,
+            boot: match row.boot {
+                (Some(launch_us), interval_us) => Some(ChildBootInterval {
+                    launch_us,
+                    interval_us,
+                }),
+                (None, None) => None,
+                (None, Some(_)) => return Err(unreadable("child boot interval")),
+            },
         });
     }
     Ok(children)

@@ -71,6 +71,7 @@ fn iteration(wall_us: i64, verdict: Option<&str>, record: &serde_json::Value) ->
             stderr: None,
             measured: false,
             cache: None,
+            boot: None,
         }],
         host: None,
     }

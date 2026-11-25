@@ -168,7 +168,13 @@ fn stored_evidence_reads_back_with_its_positions_and_iteration() {
         ends[0].kind,
         SinkEndKind::Terminal { drops: 17, .. }
     ));
-    assert_eq!(selected.process(1), Process::Child { wall_us: 900 });
+    assert_eq!(
+        selected.process(1),
+        Process::Child {
+            wall_us: 900,
+            end: crate::sidecar::ChildEnd::Wall(900),
+        }
+    );
     selected.check_call(None, "c").unwrap();
     assert!(selected.check_call(None, "d").is_err());
 }

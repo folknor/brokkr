@@ -69,10 +69,11 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Child;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub(crate) mod namespace;
 
+use crate::boot_clock::{BootElapsed, BootInstant, ChildUs, RunStart};
 use crate::error::DevError;
 use crate::output::child::{self, ChildLimit, Ending};
 use crate::output::console;
@@ -481,6 +482,26 @@ pub(crate) struct TimelineSegment {
     pub end_us: Option<i64>,
 }
 
+/// Where a script-bench child's interval ends on its own clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChildEnd {
+    /// Its boot-clock interval, the clock its stamps count on.
+    Boot(BootElapsed),
+    /// No boot interval: a child stored before it was kept, or whose end
+    /// read failed. Its monotonic wall, the same end unless the run spanned
+    /// a suspend, which is the best bound left.
+    Wall(i64),
+}
+
+impl ChildEnd {
+    fn as_us(self) -> i64 {
+        match self {
+            Self::Boot(interval) => interval.as_us(),
+            Self::Wall(wall_us) => wall_us,
+        }
+    }
+}
+
 /// A single interpretation surface for one marker stream of one run.
 ///
 /// The FIFO protocol remains a sequence of point markers. This model exposes
@@ -520,14 +541,15 @@ impl<'a> Timeline<'a> {
         }
     }
 
-    /// The process stream of a script-bench child, whose wall is known: its
-    /// process ran from 0 to `wall_us` on the samples' clock, so the final
-    /// segment ends there and a markerless child is one `(all)` segment over
-    /// the whole interval. A marker stamped past the wall (off the contract
-    /// clock, or written by a descendant after the exit) moves the boundary
-    /// to it, the guard [`Self::new`] applies, so no interval is reversed;
-    /// the wall itself is never taken from this boundary.
-    pub(crate) fn walled(markers: &'a [Marker], wall_us: i64) -> Self {
+    /// The process stream of a script-bench child, whose interval is known:
+    /// its process ran from 0 to `end` on its own clock, so the final segment
+    /// ends there and a markerless child is one `(all)` segment over the
+    /// whole interval. A marker stamped past the end (off the contract clock,
+    /// or written by a descendant after the exit) moves the boundary to it,
+    /// the guard [`Self::new`] applies, so no interval is reversed; the wall
+    /// itself is never taken from this boundary.
+    pub(crate) fn walled(markers: &'a [Marker], end: ChildEnd) -> Self {
+        let wall_us = end.as_us();
         let markers = chronological(markers);
         let final_us = markers
             .last()
@@ -861,10 +883,12 @@ impl Record {
 }
 
 /// Check every retained record, markers, counters and sink ends alike,
-/// against the run interval `[0, elapsed + CLOCK_TOLERANCE]`.
-pub(crate) fn clock_outliers(records: &[Record], elapsed: Duration) -> ClockOutliers {
-    let bound =
-        i64::try_from(elapsed.saturating_add(CLOCK_TOLERANCE).as_micros()).unwrap_or(i64::MAX);
+/// against the run interval `[0, interval + CLOCK_TOLERANCE]`. The interval
+/// is on the boot clock the stamps count on, so a suspend during the run
+/// moves the bound with them.
+pub(crate) fn clock_outliers(records: &[Record], interval: BootElapsed) -> ClockOutliers {
+    let bound = i64::try_from(interval.as_duration().saturating_add(CLOCK_TOLERANCE).as_micros())
+        .unwrap_or(i64::MAX);
     let mut found = ClockOutliers::default();
     for ts in records.iter().map(Record::timestamp_us) {
         if ts < 0 || ts > bound {
@@ -983,7 +1007,19 @@ pub struct SidecarRunResult {
     pub stderr_truncated: bool,
     pub output_cut: bool,
     pub elapsed: Duration,
+    /// The child's capture interval on its own (boot) clock.
+    pub boot: ChildBoot,
     pub data: SidecarData,
+}
+
+/// A child's capture interval on the boot clock: its zero, read just before
+/// the spawn, and the span to the end observation its wall also stamps,
+/// `None` when the boot clock could not be read there. The launch stands
+/// either way: it was read before the child existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChildBoot {
+    pub(crate) launch: BootInstant,
+    pub(crate) interval: Option<BootElapsed>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1171,19 +1207,21 @@ fn read_proc_metrics(pid: u32, sample_idx: i32, timestamp_us: i64) -> Option<Sam
 /// implementation reads procfs; tests can supply parsed fixtures and a
 /// deterministic clock without depending on their own process row.
 pub(crate) trait SidecarSampler {
-    fn elapsed_since(&mut self, start: Instant) -> Duration;
-    fn sample(&mut self, pid: u32, sample_idx: i32, timestamp_us: i64) -> Option<Sample>;
+    /// The sample's stamp on the child's clock, whose zero is `origin`;
+    /// `None` skips the sample.
+    fn stamp(&mut self, origin: BootInstant) -> Option<ChildUs>;
+    fn sample(&mut self, pid: u32, sample_idx: i32, at: ChildUs) -> Option<Sample>;
 }
 
 pub(crate) struct ProcSidecarSampler;
 
 impl SidecarSampler for ProcSidecarSampler {
-    fn elapsed_since(&mut self, start: Instant) -> Duration {
-        start.elapsed()
+    fn stamp(&mut self, origin: BootInstant) -> Option<ChildUs> {
+        BootInstant::now().ok().map(|now| now.on_child_clock(origin))
     }
 
-    fn sample(&mut self, pid: u32, sample_idx: i32, timestamp_us: i64) -> Option<Sample> {
-        read_proc_metrics(pid, sample_idx, timestamp_us)
+    fn sample(&mut self, pid: u32, sample_idx: i32, at: ChildUs) -> Option<Sample> {
+        read_proc_metrics(pid, sample_idx, at.as_us())
     }
 }
 
@@ -1709,6 +1747,30 @@ fn warn_if_truncated(loss: &CaptureLoss) {
     }
 }
 
+/// How much more the boot clock may advance than the wall over one capture
+/// before brokkr says so. Its own budget, not [`CLOCK_TOLERANCE`] (a
+/// writer's origin error): this one says how big a gap makes a wall worth a
+/// caveat.
+const SUSPEND_NOTICE: Duration = Duration::from_secs(1);
+
+/// Say once when the boot clock ran ahead of the wall over the capture
+/// interval, spawn to observed end. Suspend is the usual cause, which the
+/// wall excludes and the child's stamps include; the two clocks are read one
+/// after the other, so brokkr descheduled between the reads also widens the
+/// gap. The child may have exited before the suspend and been observed
+/// after it.
+fn warn_if_suspended(label: &str, wall: Duration, interval: BootElapsed) {
+    let gap = interval.as_duration().saturating_sub(wall);
+    if gap > SUSPEND_NOTICE {
+        console::warn(&format!(
+            "{label}: the boot clock ran {} ahead of its wall of {} over the capture interval, \
+             most likely a system suspend, which the wall excludes",
+            crate::output::format_duration(gap),
+            crate::output::format_duration(wall),
+        ));
+    }
+}
+
 /// Run one sidecar-observed child, killing its process group once it has run
 /// longer than `deadline` (measured from the caller's `start`) when one is
 /// given. Process polling, stop/deadline killing,
@@ -1719,7 +1781,7 @@ pub(crate) fn run_sidecar_with_deadline(
     child_process: Child,
     fifo: &mut SidecarFifo,
     run_idx: usize,
-    start: Instant,
+    start: RunStart,
     stop_marker: Option<&str>,
     deadline: Option<Duration>,
     tunables: &MeasurementTunables,
@@ -1749,6 +1811,8 @@ pub(crate) fn run_sidecar_with_deadline(
 /// [`finish`](Self::finish) closes the capture.
 pub(crate) struct OpenCapture {
     run: child::SupervisedChild,
+    /// The child clock's zero, read just before the spawn.
+    boot_origin: BootInstant,
     samples: Vec<Sample>,
     capture: FifoCapture,
     fired_stop_marker: Option<String>,
@@ -1785,8 +1849,27 @@ impl OpenCapture {
         capture.loss.output_truncated = stdout_truncated || stderr_truncated || run.output_cut;
         warn_if_truncated(&capture.loss);
         let (marker_total, counter_total) = capture.kept_counts();
-        let clock = clock_outliers(&capture.records, run.elapsed);
-        if let Some(message) = clock.message(&format!("sidecar run {}", run_idx + 1)) {
+        let label = format!("sidecar run {}", run_idx + 1);
+        let boot = ChildBoot {
+            launch: self.boot_origin,
+            interval: run.ended_boot.map(|end| end.since(self.boot_origin)),
+        };
+        let clock = match boot.interval {
+            Some(interval) => {
+                warn_if_suspended(&label, run.elapsed, interval);
+                clock_outliers(&capture.records, interval)
+            }
+            None => {
+                // No bound on the stamps' clock: judging them against the
+                // wall would invent one.
+                console::warn(&format!(
+                    "{label}: the boot clock could not be read at the child's end; its clock \
+                     check was skipped"
+                ));
+                ClockOutliers::default()
+            }
+        };
+        if let Some(message) = clock.message(&label) {
             console::warn(&message);
         }
         announce_ending(&run.ending);
@@ -1805,6 +1888,7 @@ impl OpenCapture {
             stderr_truncated,
             output_cut: run.output_cut,
             elapsed: run.elapsed,
+            boot,
             data: SidecarData {
                 samples,
                 records: capture.records,
@@ -1829,7 +1913,7 @@ pub(crate) fn supervise_sidecar(
     child_process: Child,
     fifo: &mut SidecarFifo,
     run_idx: usize,
-    start: Instant,
+    start: RunStart,
     stop_marker: Option<StopRequest>,
     stop_grace: Option<Duration>,
     deadline: Option<Duration>,
@@ -1869,18 +1953,18 @@ pub(crate) fn supervise_sidecar(
     let run = child::supervise_child(
         child_process,
         &label,
-        start,
+        start.at,
         limit,
         crate::shutdown::ChildIsolation::ProcessGroup(&shutdown_guard),
         options,
         |wake| {
             // A sample on the exit wake would read a zombie off cadence and
-            // postdate the wall; that wake only looks for a stop marker.
+            // postdate the wall; that wake only looks for a stop marker. A
+            // sample is stamped on the child's boot clock, the markers' own.
             let sample = (wake == child::Wake::Tick)
                 .then(|| {
-                    let elapsed_us =
-                        i64::try_from(sampler.elapsed_since(start).as_micros()).unwrap_or(i64::MAX);
-                    sampler.sample(pid, sample_idx, elapsed_us)
+                    let at = sampler.stamp(start.boot)?;
+                    sampler.sample(pid, sample_idx, at)
                 })
                 .flatten();
             if let Some(sample) = sample {
@@ -1908,6 +1992,7 @@ pub(crate) fn supervise_sidecar(
     drop(shutdown_guard);
     OpenCapture {
         run,
+        boot_origin: start.boot,
         samples,
         capture,
         fired_stop_marker,
@@ -2440,6 +2525,7 @@ mod tests {
             end: SinkEnd::Sealed,
             drops: 0,
         });
+        let wall = BootElapsed::decoded_us(wall.as_micros() as i64);
         let found = clock_outliers(&[inside.clone(), epoch, negative, late], wall);
         assert_eq!(found.count, 3);
         assert_eq!(found.min_us, Some(-1));

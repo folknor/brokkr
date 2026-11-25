@@ -226,8 +226,13 @@ and projects. The trace holds:
   single block device, as on btrfs
 - `previous`: the cell cursor as the iteration found it (The cell cursor,
   below), and whether the iteration's own in-progress cursor was written
-- `block_start_us`: when `bench()` was called, the zero that child origins
-  count from; absent when it never was
+- `block_start_us`: when `bench()` was called, read on the boot clock as it
+  was; absent when it never was, or when that read failed. A child's
+  `origin_offset_us` counts from the same moment on the monotonic clock, so
+  the sum places a child on the trace only while the host stays awake; a
+  child's boot launch reading (Children, Boot interval) places it exactly.
+- a boundary or periodic reading whose boot clock read failed is absent,
+  never stamped zero
 - the `start` reading before `bench()`, and the `end` reading after it
   returned
 - the `released` reading after the iteration directory's release, with
@@ -274,7 +279,8 @@ The **cell cursor** is a per-user file beside the global lock
 lock writes it. An iteration reads it and replaces it with `in_progress`
 naming itself (`{run, project, bench, iteration, boot_id}`). After its
 release, the iteration replaces it with `ended`, carrying its device and
-`released` reading.
+`released` reading. When that reading's boot clock read failed, there is
+no stamp to end on, so the `in_progress` entry stays and brokkr warns.
 
 So `previous` names the last cell to start or end on the host, whatever its
 project, destination or publication. `in_progress` means that cell never
@@ -287,8 +293,9 @@ cell read the older entry across this one unseen. Replacement is a rename,
 so the guarantee covers process death, not power loss.
 
 A reader shows the gap: elapsed time and device deltas from the
-predecessor's `released` reading to this `start`. It's derived, never
-stored, under three rules:
+predecessor's `released` reading to this `start`. With no `start` reading,
+it still names the predecessor and calls the gap unknown. It's derived,
+never stored, under three rules:
 
 - elapsed time only within one boot
 - device deltas only when both sides name one device with one `diskseq`
@@ -299,7 +306,8 @@ stored, under three rules:
 A child holds:
 
 - its program, argv and environment additions, and pid
-- its origin, offset from the start of its iteration's block, and its wall
+- its origin, offset from the start of its iteration's block on the
+  monotonic clock, and its wall
 - its ending: exited, signal, stop marker, deadline (a whole `Duration` in
   seconds and nanoseconds), interrupted, or wait failed. The ending is
   evidence only, since the script decides what an exit means.
@@ -414,6 +422,28 @@ fails its iteration and stores no child. Schema step 8 keeps the account as
 `child_cache`, `child_cache_file` and `child_cache_path`. It isn't part of
 the pairing key; `brokkr results --compare` names it when the sides'
 sequences of preparations differ.
+
+### Boot interval
+
+A child also holds its **boot** interval, on `CLOCK_BOOTTIME` in
+microseconds, the clock its stamps count on (`docs/commands/measure.md`, The
+clock):
+
+- `launch_us`: the reading brokkr took just before the spawn, the child
+  clock's zero, absolute like the host trace's readings
+- `interval_us`: the span from it to the end observation the wall also
+  stamps, absent when the boot clock could not be read there
+
+The interval differs from the wall by any suspend, and by the skew of
+reading two clocks in turn. A reader places the child on the host trace at
+`launch_us`, and closes its timeline at `interval_us`, or at the wall when
+that is absent. A child stored before the field existed has neither, and a
+reader falls back to the wall and to the block start plus the origin offset,
+which a suspend misplaces.
+
+Publication refuses a negative reading or span. Schema step 14 keeps them as
+the `children` columns `boot_launch_us` and `boot_interval_us`; the reader
+refuses a span without a launch. Neither is part of the pairing key.
 
 ### Format and strictness
 
