@@ -207,6 +207,9 @@ section; the rest are local to the rule:
   one line, with comments stripped, so `use tracing::.*warn` catches a
   multi-line `use` block. brokkr reports the violation at the `use` line, and
   `allow_marker` matches on any physical line of the statement. Rust-only.
+- **`multiline`**: when `true`, brokkr matches `pattern` against the whole
+  file instead of each line, so a pattern can span a rustfmt-wrapped call.
+  The multiline section below has the rules.
 - **`except`**: regexes; a line matching any of them is exempt. Use it to
   allow one specific form of an otherwise forbidden pattern.
 - **`in_toml_section`**: only consider lines while the last-seen `[section]`
@@ -263,8 +266,71 @@ files are all binary, refused by `only_if_file_matches`, or emptied by
 `test_code` still passes; `must_scan` is the guard for files that must
 actually be scanned.
 
-Textlint does no arbitrary multiline matching; `join_wrapped_use` is the one
-exception, bounded to `use` statements.
+A rule matches one physical line at a time unless it sets
+`join_wrapped_use`, which matches reconstructed `use` statements, or
+`multiline`. Either way a CRLF file reads like an LF one: the line pass
+drops a line's trailing `\r`, and a lone `\r` is text, not a line break.
+
+### multiline
+
+A `multiline = true` rule matches `pattern` against the whole file, so `\s`
+and a negated class such as `[^)]` cross line breaks:
+
+```toml
+[[textlint]]
+name = "no-io-error-restringing"
+pattern = '\bio::Error::new\(\s*\w+\.kind\(\)\s*,\s*(?:\w+\.to_string\(\)|format!)'
+paths = ["crates/**/*.rs"]
+region = "code"
+multiline = true
+message = "wrap the io::Error instead of rebuilding it from its kind and text"
+```
+
+The file reads with every CRLF folded to LF, and an explicit `\n` matches in
+either kind of file. A lone `\r` stays text, as it is for the line pass.
+By default `^` and `$` mean line start and end and `.` doesn't cross a
+line. These are regex flag defaults, so a pattern can override them inline:
+`(?s:.)` crosses lines, `(?-m:^)` means the file's start, and `(?R:...)`
+treats a lone `\r` as a line break inside the group.
+
+brokkr reports each match at the line of its first non-whitespace
+character, so a leading `\s*` that starts on a blank line above still
+points at the code. A match holding only whitespace, or nothing (`^$`), is
+dropped. Matches are the regex's own leftmost-first, non-overlapping ones:
+a dropped match still consumed its text, so one alternative that matches
+blank text can hide another.
+
+The match's **span** runs from the line of its first non-whitespace
+character to the line of its last. Its gates read the span:
+
+- `allow_marker` suppresses it when the marker is on any span line, or in
+  the `allow_marker_above` window above the first.
+- `except` suppresses it when any span line matches.
+- Above windows count from the first span line, below windows from the last.
+- `only_if_file_matches_above` is judged at the first span line.
+
+So a marker on a closing `);` counts only when the pattern reaches that
+line.
+
+`region` and `test_code` scope a multiline rule differently:
+
+- `region` blanks out-of-region text to spaces, as the line pass does, so
+  `\s` crosses a comment between tokens. Two literals a `string` rule sees
+  can be joined across the code between them the same way.
+- `test_code` and `skip_after` bound what a match may consume: no match
+  crosses hidden test code or runs past the `skip_after` cut (the boundary
+  line itself stays in scope). Assertions such as `^`, `\b` and `\z` still
+  read the text beside the bound, so a match after a hidden item starts on
+  its true line. That text is region-projected: under `region`, a blanked
+  neighbour reads as a space.
+
+`multiline` can't be combined with `join_wrapped_use`, `table_row_only` or
+`in_toml_section`, which judge one line or statement; brokkr refuses that
+at load. `must_scan` admits a file per line, as for any rule.
+
+One regex search is linear in the text it searches. Iterating a rule's
+matches can rescan, so its worst case is quadratic in that text: one line
+for a line rule, run once per line, and the whole file for a multiline rule.
 
 brokkr decodes a matched file that isn't valid UTF-8 lossily and scans it.
 ASCII, which patterns are written against, survives verbatim, and an invalid
@@ -303,12 +369,13 @@ test_code = "only"
 message = "resolve datasets through tests/common, not a data/ literal"
 ```
 
-`test_code = "skip"` blanks every byte that brokkr's test-code classifier
+`test_code = "skip"` hides every byte that brokkr's test-code classifier
 proves absent from every non-test build, before matching `pattern`.
 `test_code = "only"` is its complement, for code that exists for tests. It
-blanks every other byte, and also what is proven absent from test builds as
-well, as described below. `allow_marker`, `except` and the context windows
-still read the raw physical line.
+hides every other byte, and also what is proven absent from test builds as
+well, as described below. The line pass blanks hidden bytes; a `multiline`
+rule can't consume them instead (the multiline section). `allow_marker`,
+`except` and the context windows still read the raw physical line.
 
 The classifier needs a Cargo workspace. Its roots are every workspace target
 from `cargo metadata --no-deps`, with integration-test targets as test roots

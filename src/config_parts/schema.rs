@@ -828,6 +828,16 @@ pub struct TextlintRule {
     /// Rust-only. Off by default.
     #[serde(default)]
     pub join_wrapped_use: bool,
+    /// Match `pattern` against the whole file instead of each physical line,
+    /// so `\s` and negated classes cross line breaks (a rustfmt-wrapped call).
+    /// `^` and `$` still mean line start and end, CRLF reads as LF, and a
+    /// violation is reported at the line of the match's first non-whitespace
+    /// character. `test_code` and `skip_after` bound what a match may
+    /// consume; `region` blanks out-of-region text as the line pass does.
+    /// Refused beside `join_wrapped_use`, `table_row_only` and
+    /// `in_toml_section`. Off by default.
+    #[serde(default)]
+    pub multiline: bool,
     /// Context gate: suppress the match iff `pattern` is found within `lines`
     /// physical lines *above* it (excluding the match line, clamped at the file
     /// top). All four gates have the same behavior: the match is suppressed iff

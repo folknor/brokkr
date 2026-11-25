@@ -3,7 +3,9 @@
 //! The generic engine behind most of nautilus_trader's grep-style convention
 //! hooks: by default, each rule checks a regex `pattern` on lines of files
 //! matching `paths`; `join_wrapped_use` instead checks reconstructed Rust
-//! `use` statements. Bounded selectors and gates cover rules that need more
+//! `use` statements, and `multiline` the whole file through a projected
+//! [`View`] (CRLF folded, `region` blanked, `test_code` and `skip_after`
+//! bounding what a match consumes). Bounded selectors and gates cover rules that need more
 //! than a bare grep:
 //!
 //! - **file globs** (`paths`, `exclude`) select the files to scan;
@@ -17,8 +19,11 @@
 //! - **regex exceptions** (`except`) and bounded context windows further
 //!   suppress or require nearby text.
 //!
-//! Patterns are compiled with the linear-time `regex` crate (no backtracking),
-//! so an author-supplied pattern cannot hang the phase.
+//! Patterns are compiled with the `regex` engine, which never backtracks:
+//! one search is linear in its haystack. Iterating matches can rescan, so the
+//! worst case is quadratic in the haystack, one line for a line rule and the
+//! whole file for a `multiline` rule. Gates reuse per-file precomputation
+//! (`first_precondition`) so they add no per-match rescan of the file.
 //!
 //! `test_code` scoping goes through `lex::mask_line_by` per rule, composing
 //! with `region`: `skip` blanks test-only bytes, `only` blanks everything
@@ -108,6 +113,9 @@ pub(crate) struct Compiled {
     only_if_file_matches_above: bool,
     region: Option<lex::Region>,
     join_wrapped_use: bool,
+    /// `multiline = true`: `pattern` compiled for the whole-file search, in
+    /// multi-line mode, CRLF off (the view folds CRLF to LF).
+    multiline: Option<regex_automata::meta::Regex>,
     except_above: Option<Window>,
     except_below: Option<Window>,
     require_above: Option<Window>,
@@ -186,6 +194,32 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
                 rule.name,
             )));
         }
+        // A whole-file match has no one line for a line predicate to judge,
+        // and a join rule reads reconstructed statements: neither combines.
+        if rule.multiline
+            && let Some(field) = multiline_incompatible(rule)
+        {
+            return Err(DevError::Config(format!(
+                "[[textlint]] {:?}: {field} cannot combine with multiline, which matches the \
+                 whole file rather than one line or statement; drop one of them.",
+                rule.name,
+            )));
+        }
+        let multiline = if rule.multiline {
+            Some(
+                regex_automata::meta::Regex::builder()
+                    .syntax(regex_automata::util::syntax::Config::new().multi_line(true))
+                    .build(&rule.pattern)
+                    .map_err(|e| {
+                        DevError::Config(format!(
+                            "[[textlint]] {:?}: invalid pattern: {e}",
+                            rule.name
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
         let paths_field = format!("[[textlint]] {:?} paths", rule.name);
         let paths = globs::build_set(&rule.paths, &paths_field)?;
         let exclude_field = format!("[[textlint]] {:?} exclude", rule.name);
@@ -253,6 +287,7 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
             only_if_file_matches_above: rule.only_if_file_matches_above,
             region,
             join_wrapped_use: rule.join_wrapped_use,
+            multiline,
             except_above,
             except_below,
             require_above,
@@ -312,6 +347,19 @@ fn join_incompatible_predicate(rule: &TextlintRule) -> Option<&'static str> {
         // The join pass reconstructs imports lexically, so `use` text inside
         // macro input would be read as an import; no rule needs both.
         Some("test_code")
+    } else if rule.table_row_only {
+        Some("table_row_only")
+    } else if rule.in_toml_section.is_some() {
+        Some("in_toml_section")
+    } else {
+        None
+    }
+}
+
+/// The field that cannot combine with `multiline`, or `None`.
+fn multiline_incompatible(rule: &TextlintRule) -> Option<&'static str> {
+    if rule.join_wrapped_use {
+        Some("join_wrapped_use")
     } else if rule.table_row_only {
         Some("table_row_only")
     } else if rule.in_toml_section.is_some() {
@@ -876,6 +924,7 @@ fn line_in_scope(rule: &Compiled, trimmed: &str, section: Option<&str>) -> bool 
 
 /// Scan one file against its applicable rules; returns the indices (into
 /// `rules`) of the rules that admitted the file to matching, for `must_scan`.
+#[allow(clippy::too_many_lines)] // one file's three passes: lines, joined `use`, multiline
 fn scan_file(
     rel: &Path,
     content: &str,
@@ -947,6 +996,11 @@ fn scan_file(
             {
                 eligible[ri] = true;
             }
+            // A multiline rule is admitted per line here and matched over
+            // the whole file below.
+            if rule.multiline.is_some() {
+                continue;
+            }
             // Scope the pattern to a lexical region and to the rule's
             // `test_code` when asked; markers, `except`, and the reported
             // line all stay the physical line.
@@ -993,6 +1047,18 @@ fn scan_file(
             }
         }
         scan_use_statements(rel, &stmts, &lines, rules, &file_ok, &skip_after, out);
+    }
+    let file = WholeFile {
+        rel,
+        content,
+        lines: &lines,
+        regions: regions.as_deref(),
+    };
+    for (ri, rule) in rules.iter().enumerate().filter(|(ri, _)| file_ok[*ri]) {
+        if let Some(re) = &rule.multiline {
+            let (hidden, cut) = (views.hidden(rule), &skip_after[ri]);
+            scan_multiline(&file, rule, re, hidden, cut, first_precondition[ri], out);
+        }
     }
     (0..rules.len())
         .filter(|ri| file_ok[*ri] && eligible[*ri])
@@ -1070,6 +1136,187 @@ fn holds_content(
         }),
         Hidden::Nothing | Hidden::Bytes(_) => !raw.trim().is_empty(),
     }
+}
+
+/// One file as the multiline pass reads it: BOM-stripped text, its physical
+/// lines, and its lexical regions when some rule asked for them.
+struct WholeFile<'a> {
+    rel: &'a Path,
+    content: &'a str,
+    lines: &'a [&'a str],
+    regions: Option<&'a [lex::Region]>,
+}
+
+/// The text a multiline rule searches: the file with every CRLF folded to LF
+/// and, under `region`, each out-of-region character blanked to one space (a
+/// line break is always kept), as the line pass projects a line. Test code a
+/// `test_code` scope hides stays visible here, so assertions such as `\b` and
+/// `^` read the real neighbour; it is only ineligible.
+struct View {
+    text: String,
+    /// Per byte of `text`: whether a match may consume it. False under the
+    /// rule's `test_code` hiding and past its `skip_after` cut.
+    eligible: Vec<bool>,
+    /// Byte offset in `text` of each line's first byte.
+    line_starts: Vec<usize>,
+}
+
+impl View {
+    fn of(file: &WholeFile<'_>, rule: &Compiled, hidden: Hidden<'_>, cut: &[bool]) -> Self {
+        let bytes = file.content.as_bytes();
+        let mut text = String::with_capacity(file.content.len());
+        let mut eligible = Vec::with_capacity(file.content.len());
+        let mut line_starts = vec![0];
+        let mut line = 0usize;
+        let keep = |b: usize, line: usize| !hidden.hides(b) && !cut.get(line).copied().unwrap_or(false);
+        let mut chars = file.content.char_indices().peekable();
+        while let Some((b, ch)) = chars.next() {
+            if ch == '\r' && bytes.get(b + 1) == Some(&b'\n') {
+                // The pair reads as one LF, eligible only if both bytes are.
+                chars.next();
+                text.push('\n');
+                eligible.push(keep(b, line) && keep(b + 1, line));
+                line += 1;
+                line_starts.push(text.len());
+                continue;
+            }
+            if ch == '\n' {
+                text.push('\n');
+                eligible.push(keep(b, line));
+                line += 1;
+                line_starts.push(text.len());
+                continue;
+            }
+            let in_region = rule
+                .region
+                .is_none_or(|target| file.regions.and_then(|r| r.get(b)).copied() == Some(target));
+            let shown = if in_region { ch } else { ' ' };
+            text.push(shown);
+            let ok = keep(b, line);
+            eligible.extend(std::iter::repeat_n(ok, shown.len_utf8()));
+        }
+        Self {
+            text,
+            eligible,
+            line_starts,
+        }
+    }
+
+    /// The 0-based line holding byte `at` of `text`.
+    fn line_of(&self, at: usize) -> usize {
+        self.line_starts.partition_point(|&start| start <= at).saturating_sub(1)
+    }
+
+    /// The maximal runs of eligible bytes, each a range a match may consume.
+    fn ranges(&self) -> Vec<std::ops::Range<usize>> {
+        let mut out = Vec::new();
+        let mut start = None;
+        for (i, ok) in self.eligible.iter().copied().enumerate() {
+            match (ok, start) {
+                (true, None) => start = Some(i),
+                (false, Some(s)) => {
+                    out.push(s..i);
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(s) = start {
+            out.push(s..self.eligible.len());
+        }
+        out
+    }
+}
+
+/// The multiline pass of `scan_file` for one rule: search the whole-file
+/// view, each eligible range bounding what a match consumes, and report every
+/// surviving leftmost-first match that holds visible text, at the lines of
+/// its first and last non-whitespace character.
+fn scan_multiline(
+    file: &WholeFile<'_>,
+    rule: &Compiled,
+    re: &regex_automata::meta::Regex,
+    hidden: Hidden<'_>,
+    cut: &[bool],
+    first_precondition: Option<usize>,
+    out: &mut Vec<TextlintViolation>,
+) {
+    if matches!(hidden, Hidden::All) {
+        return;
+    }
+    let view = View::of(file, rule, hidden, cut);
+    for range in view.ranges() {
+        // Bounded, not sliced: a match consumes only the range, while `^`,
+        // `$`, `\b` and `\z` read the whole view around it.
+        let input = regex_automata::Input::new(&view.text).span(range);
+        for m in re.find_iter(input) {
+            report_multiline(file, rule, &view, m.range(), first_precondition, out);
+        }
+    }
+}
+
+/// Judge one multiline match against the rule's gates and record it.
+fn report_multiline(
+    file: &WholeFile<'_>,
+    rule: &Compiled,
+    view: &View,
+    matched: std::ops::Range<usize>,
+    first_precondition: Option<usize>,
+    out: &mut Vec<TextlintViolation>,
+) {
+    let text = &view.text[matched.clone()];
+    let (Some(first), Some(last)) = (
+        text.find(|c: char| !c.is_whitespace()),
+        text.rfind(|c: char| !c.is_whitespace()),
+    ) else {
+        // Empty or all blank: nothing visible to point at.
+        return;
+    };
+    let start = view.line_of(matched.start + first);
+    let end = view.line_of(matched.start + last);
+    let lines = file.lines;
+    // The positional precondition's first line, computed once per file, so a
+    // match never rescans the prefix above it.
+    if first_precondition.is_some_and(|first| start < first)
+        || marker_suppresses(rule, lines, start, end)
+    {
+        return;
+    }
+    let span = lines.get(start..=end).unwrap_or_default();
+    if span.iter().any(|l| rule.except.iter().any(|r| r.is_match(l))) {
+        return;
+    }
+    if context_suppresses(rule, lines, start, end) {
+        return;
+    }
+    out.push(TextlintViolation {
+        file: file.rel.to_path_buf(),
+        line: start + 1,
+        rule: rule.name.clone(),
+        message: rule.message.clone(),
+        content: span_excerpt(span),
+    });
+}
+
+/// A span's lines, trimmed and joined by single spaces, built only as far as
+/// [`cap`] shows, so many matches on one long line copy no more than that.
+fn span_excerpt(span: &[&str]) -> String {
+    let mut joined = String::new();
+    let mut chars = 0usize;
+    for line in span {
+        if chars >= DISPLAY_CAP {
+            break;
+        }
+        if !joined.is_empty() {
+            joined.push(' ');
+            chars += 1;
+        }
+        for ch in line.trim().chars().take(DISPLAY_CAP.saturating_sub(chars)) {
+            joined.push(ch);
+            chars += 1;
+        }
+    }
+    cap(&joined)
 }
 
 /// The whole-`use`-statement pass of `scan_file`: reconstruct each wrapped
@@ -1739,6 +1986,7 @@ mod tests {
             only_if_file_matches_above: false,
             region: None,
             join_wrapped_use: false,
+            multiline: false,
             except_above: None,
             except_below: None,
             require_above: None,
@@ -1748,6 +1996,205 @@ mod tests {
             require_live_paths: false,
             compiled: None,
         }
+    }
+
+    fn multiline(pattern: &str) -> TextlintRule {
+        TextlintRule {
+            multiline: true,
+            ..rule(pattern)
+        }
+    }
+
+    fn lines_hit(rule: TextlintRule, rel: &str, src: &str) -> Vec<usize> {
+        run_classed(rule, rel, src, FileClass::default()).0
+    }
+
+    const RESTRING: &str =
+        r"\bio::Error::new\(\s*\w+\.kind\(\)\s*,\s*(?:\w+\.to_string\(\)|format!)";
+
+    #[test]
+    fn multiline_matches_a_rustfmt_wrapped_call_at_its_first_line() {
+        let src = "fn f() {\n    let e = io::Error::new(\n        e.kind(),\n        format!(\"x\"),\n    );\n}\n";
+        assert_eq!(lines_hit(multiline(RESTRING), "a.rs", src), vec![2]);
+        // The per-line rule is blind to it, which is the ticket.
+        assert!(lines_hit(rule(RESTRING), "a.rs", src).is_empty());
+    }
+
+    #[test]
+    fn multiline_reads_crlf_as_lf() {
+        let lf = "a\nio::Error::new(\n e.kind(),\n format!(\"x\"))\n";
+        let crlf = lf.replace('\n', "\r\n");
+        assert_eq!(lines_hit(multiline(RESTRING), "a.rs", lf), vec![2]);
+        assert_eq!(lines_hit(multiline(RESTRING), "a.rs", &crlf), vec![2]);
+        // An explicit \n and a $ anchor read the same in both.
+        assert_eq!(lines_hit(multiline(r"one$\ntwo"), "a.txt", "one\r\ntwo\r\n"), vec![1]);
+        assert_eq!(lines_hit(multiline(r"one$\ntwo"), "a.txt", "one\ntwo\n"), vec![1]);
+    }
+
+    #[test]
+    fn multiline_treats_a_lone_cr_as_text_like_the_line_pass() {
+        // `str::lines` does not split on a lone CR, so neither does the view.
+        assert!(lines_hit(multiline("^bad$"), "a.txt", "ok\rbad\n").is_empty());
+        assert!(lines_hit(rule("^bad$"), "a.txt", "ok\rbad\n").is_empty());
+    }
+
+    #[test]
+    fn multiline_reports_the_first_visible_line_and_drops_blank_matches() {
+        // A leading \s* may start the match on a blank line above.
+        assert_eq!(lines_hit(multiline(r"^\s*bad\(\)"), "a.txt", "\n\n    bad()\n"), vec![3]);
+        // An anchor-only or all-whitespace match has nothing to point at.
+        assert!(lines_hit(multiline("^$"), "a.txt", "a\n\nb\n").is_empty());
+        assert!(lines_hit(multiline(r"\n\s*\n"), "a.txt", "a\n\n\nb\n").is_empty());
+    }
+
+    #[test]
+    fn multiline_reports_every_match_once() {
+        let src = "bad(\n)\nok\nbad(\n)\n";
+        assert_eq!(lines_hit(multiline(r"bad\(\s*\)"), "a.txt", src), vec![1, 4]);
+    }
+
+    #[test]
+    fn multiline_region_blanks_a_comment_that_whitespace_then_crosses() {
+        let src = "io::Error::new( // why\n    e.kind(), /* note */ format!(\"x\"))\n";
+        let r = TextlintRule {
+            region: Some("code".into()),
+            ..multiline(RESTRING)
+        };
+        assert_eq!(lines_hit(r, "a.rs", src), vec![1]);
+        // A match quoted in a comment is out of the code region.
+        let quoted = "// io::Error::new(\n//   e.kind(), format!(\"x\"))\n";
+        let r = TextlintRule {
+            region: Some("code".into()),
+            ..multiline(RESTRING)
+        };
+        assert!(lines_hit(r, "a.rs", quoted).is_empty());
+    }
+
+    #[test]
+    fn multiline_skip_after_bounds_what_a_match_consumes() {
+        let r = TextlintRule {
+            skip_after: Some("^STOP".into()),
+            ..multiline(r"first\s+second")
+        };
+        // The boundary line stays in scope, the lines after it do not.
+        assert!(lines_hit(r.clone(), "a.txt", "STOP first\nsecond\n").is_empty());
+        assert_eq!(lines_hit(r.clone(), "a.txt", "first\nsecond\nSTOP\n"), vec![1]);
+        assert!(lines_hit(r, "a.txt", "STOP\nfirst\nsecond\n").is_empty());
+    }
+
+    #[test]
+    fn multiline_cannot_consume_test_code_but_its_assertions_see_it() {
+        let src = "first();\n#[cfg(test)]\nfn t() {}\nlast();\n";
+        let hidden_start = src.find("#[cfg").unwrap();
+        let hidden_end = src.find("last").unwrap();
+        let hidden: Vec<std::ops::Range<usize>> = std::iter::once(hidden_start..hidden_end).collect();
+        let mask = crate::test_code::FileMask::Production(hidden);
+        let skip = |pattern: &str| TextlintRule {
+            test_code: TestCode::Skip,
+            ..multiline(pattern)
+        };
+        // A match may not bridge the hidden test item.
+        assert!(run_masked(skip(r"first\(\);[\s\S]*last\(\);"), src, &mask).0.is_empty());
+        // Production text on either side still matches.
+        assert_eq!(run_masked(skip(r"last\(\);"), src, &mask).0, vec![4]);
+        // `^` after the hidden span sees the real line start.
+        assert_eq!(run_masked(skip(r"^last"), src, &mask).0, vec![4]);
+    }
+
+    #[test]
+    fn multiline_bounds_are_not_synthetic_line_or_file_edges() {
+        // A hidden statement mid-line: a sliced search would see `bad` at a
+        // line start; the bounded one reads the real text before it.
+        let src = "fn f() { helper(); bad(); }\n";
+        let start = src.find("helper").unwrap();
+        let end = src.find("bad").unwrap();
+        let hidden: Vec<std::ops::Range<usize>> = std::iter::once(start..end).collect();
+        let mask = crate::test_code::FileMask::Production(hidden);
+        let skip = |pattern: &str| TextlintRule {
+            test_code: TestCode::Skip,
+            ..multiline(pattern)
+        };
+        assert!(run_masked(skip(r"^\s*bad"), src, &mask).0.is_empty());
+        assert_eq!(run_masked(skip(r"\bbad"), src, &mask).0, vec![1]);
+        // The skip_after cut is not the end of the file.
+        let cut = TextlintRule {
+            skip_after: Some("^STOP".into()),
+            ..multiline(r"STOP\n\z")
+        };
+        assert!(lines_hit(cut.clone(), "a.txt", "STOP\nmore\n").is_empty());
+        assert_eq!(lines_hit(cut, "a.txt", "x\nSTOP\n"), vec![2]);
+    }
+
+    #[test]
+    fn multiline_positional_precondition_uses_the_first_visible_line() {
+        let r = TextlintRule {
+            only_if_file_matches: Some("^use x".into()),
+            only_if_file_matches_above: true,
+            ..multiline(r"bad\(\s*\)")
+        };
+        assert_eq!(lines_hit(r.clone(), "a.txt", "bad(\n)\nuse x\nbad(\n)\n"), vec![4]);
+        assert!(lines_hit(r, "a.txt", "bad(\n)\n").is_empty());
+    }
+
+    #[test]
+    fn multiline_gates_anchor_to_the_span() {
+        let src = "x(\n  y) // ok-here\n";
+        let marked = TextlintRule {
+            allow_marker: Some("ok-here".into()),
+            ..multiline(r"x\(\s*y\)")
+        };
+        assert!(lines_hit(marked, "a.txt", src).is_empty());
+        let excepted = TextlintRule {
+            except: vec!["ok-here".into()],
+            ..multiline(r"x\(\s*y\)")
+        };
+        assert!(lines_hit(excepted, "a.txt", src).is_empty());
+        // A marker below the span's last visible line does not count.
+        let below = TextlintRule {
+            allow_marker: Some("ok-here".into()),
+            ..multiline(r"a\s*b")
+        };
+        assert_eq!(lines_hit(below, "a.txt", "a\nb\n// ok-here\n"), vec![1]);
+    }
+
+    #[test]
+    fn multiline_refuses_line_predicates_and_join() {
+        for (r, field) in [
+            (
+                TextlintRule {
+                    join_wrapped_use: true,
+                    ..multiline("use")
+                },
+                "join_wrapped_use",
+            ),
+            (
+                TextlintRule {
+                    table_row_only: true,
+                    ..multiline("x")
+                },
+                "table_row_only",
+            ),
+            (
+                TextlintRule {
+                    in_toml_section: Some("deps".into()),
+                    ..multiline("x")
+                },
+                "in_toml_section",
+            ),
+        ] {
+            let error = compile(&[r]).unwrap_err().to_string();
+            assert!(error.contains(field) && error.contains("multiline"), "{error}");
+        }
+    }
+
+    #[test]
+    fn multiline_keeps_line_numbers_across_multibyte_text_and_a_bom() {
+        let src = "\u{FEFF}// ééé\nbad(\n)\n";
+        let r = TextlintRule {
+            region: Some("code".into()),
+            ..multiline(r"bad\(\s*\)")
+        };
+        assert_eq!(lines_hit(r, "a.rs", src), vec![2]);
     }
 
     #[test]

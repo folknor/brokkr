@@ -597,7 +597,7 @@ const TEXTLINT_LIST_FIELDS: [&str; 3] = ["paths", "exclude", "except"];
 /// Fields a `[textlint_preset.<name>]` block may carry: everything a
 /// `[[textlint]]` rule accepts except the three that identify one rule
 /// (`name`, `pattern`, `message`), which are never shareable.
-const TEXTLINT_PRESET_FIELDS: [&str; 20] = [
+const TEXTLINT_PRESET_FIELDS: [&str; 21] = [
     "paths",
     "exclude",
     "except",
@@ -610,6 +610,7 @@ const TEXTLINT_PRESET_FIELDS: [&str; 20] = [
     "only_if_file_matches_above",
     "region",
     "join_wrapped_use",
+    "multiline",
     "except_above",
     "except_below",
     "require_above",
