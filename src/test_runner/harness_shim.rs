@@ -58,11 +58,26 @@ use crate::process::{Pid, ProcStat, VerifiedProcess};
 
 pub(super) struct Harness {
     pidfd: OwnedFd,
+    /// The verified peer's pid and start time, bound to `pidfd` at admission.
+    /// A timeout report names its threads only where a reading's process
+    /// start matches. The peer may not have reached its exec of the test
+    /// binary yet.
+    pid: u32,
+    start: u64,
     tracker: Arc<Mutex<TestTracker>>,
     eof: Arc<AtomicBool>,
     /// This harness's stream on the caller's sink, when one was given: where a
     /// kill the watchdog charges to this harness is reported.
     tap: Option<StreamTap>,
+}
+
+impl Harness {
+    fn root(&self) -> super::evidence::Root {
+        super::evidence::Root {
+            pid: self.pid,
+            start: Some(self.start),
+        }
+    }
 }
 
 fn live_harness(harness: &Harness) -> bool {
@@ -306,7 +321,7 @@ impl Session {
     pub(super) fn watchdog(
         &self,
         state_root: PathBuf,
-        cargo_pid: u32,
+        leader: Arc<super::LeaderHandle>,
         cargo_tracker: Arc<Mutex<TestTracker>>,
         hung: Arc<Mutex<Option<HungTest>>>,
         ceilings: &Ceilings,
@@ -317,27 +332,37 @@ impl Session {
         let context = self.state.context.clone();
         let ceilings = ceilings.clone();
         let timeout = ceilings.per_test;
+        super::evidence::ensure_dispatcher();
         thread::spawn(move || {
             let mut idle_since = started;
+            let mut presampler = super::evidence::Presampler::default();
             loop {
                 if state.watchdog_done.is_rung() {
                     return;
                 }
                 let mut wait = WATCHDOG_POLL;
+                // The real nearest deadline, apart from the poll-capped sleep:
+                // what the baseline is timed against.
+                let mut nearest: Option<Duration> = None;
                 let mut readings = Vec::new();
                 let mut taps = Vec::new();
                 let mut executing = false;
+                let mut live = 0usize;
                 if let Ok(harnesses) = state.harnesses.lock() {
                     for h in harnesses.iter() {
                         if !live_harness(h) {
                             continue;
                         }
+                        live += 1;
                         if let Ok(t) = h.tracker.lock() {
                             executing |= t.executing;
                             if let Some(d) = t.next_deadline(timeout) {
                                 wait = wait.min(d);
+                                nearest = Some(nearest.map_or(d, |n| n.min(d)));
                             }
-                            readings.push(super::DeadlineReading::from_tracker(&t, timeout));
+                            readings.push(
+                                super::DeadlineReading::from_tracker(&t, timeout).of(Some(h.root())),
+                            );
                             taps.push(h.tap.clone());
                         }
                     }
@@ -350,7 +375,9 @@ impl Session {
                     executing = true;
                     if let Some(d) = t.next_deadline(timeout) {
                         wait = wait.min(d);
+                        nearest = Some(nearest.map_or(d, |n| n.min(d)));
                     }
+                    // Cargo's shared stream maps to no one verified process.
                     readings.push(super::DeadlineReading::from_tracker(&t, timeout));
                     taps.push(primary.clone());
                 }
@@ -359,6 +386,7 @@ impl Session {
                 }
                 let idle = (!executing).then(|| idle_since.elapsed());
                 if let Some(verdict) = ceilings.verdict(&readings, idle, started.elapsed()) {
+                    let verdict_at = Instant::now();
                     if state.watchdog_done.is_rung() {
                         return;
                     }
@@ -367,23 +395,36 @@ impl Session {
                         .and_then(|index| taps.get(index))
                         .and_then(Option::as_ref)
                         .or(primary.as_ref());
+                    let candidates = super::candidates(&verdict, &readings);
                     super::enforce_deadline(
-                        &state_root,
-                        cargo_pid,
-                        super::Leader::Cargo,
                         verdict,
-                        &hung,
-                        charged,
-                        &context,
+                        super::Enforcement {
+                            verdict_at,
+                            state_root: &state_root,
+                            leader: &leader,
+                            kind: super::Leader::Cargo,
+                            candidates,
+                            live_harnesses: Some(live),
+                            presampler,
+                            hung: &hung,
+                            tap: charged,
+                            context: &context,
+                        },
                     );
                     return;
                 }
                 if let Some(wall) = ceilings.wall {
-                    wait = wait.min(wall.saturating_sub(started.elapsed()));
+                    let left = wall.saturating_sub(started.elapsed());
+                    wait = wait.min(left);
+                    nearest = Some(nearest.map_or(left, |n| n.min(left)));
                 }
                 if let Some(idle) = idle {
-                    wait = wait.min(super::IDLE_TIMEOUT.saturating_sub(idle));
+                    let left = super::IDLE_TIMEOUT.saturating_sub(idle);
+                    wait = wait.min(left);
+                    nearest = Some(nearest.map_or(left, |n| n.min(left)));
                 }
+                // No tracker or harness lock is held here.
+                presampler.tick(leader.dir(), nearest);
                 if state.watchdog_done.sleep(wait) {
                     return;
                 }
@@ -678,6 +719,8 @@ fn accept_one(stream: &UnixStream, s: &Arc<SessionState>) -> Result<(), Refusal>
     let tap = s.sink.as_ref().map(|sink| StreamTap::new(sink, source));
     harnesses.push(Harness {
         pidfd,
+        pid,
+        start: stat.start().get(),
         tracker: Arc::clone(&tracker),
         eof: Arc::clone(&eof),
         tap: tap.clone(),
@@ -837,6 +880,7 @@ fn proc_parent(pid: u32) -> io::Result<u32> {
 
 /// An unverified pidfd for a process the caller itself owns: its own child,
 /// not yet reaped, so the pid cannot have been recycled.
+#[cfg(test)]
 pub(super) fn open_pidfd(pid: u32) -> io::Result<OwnedFd> {
     crate::process::pidfd::open_own(pid)
 }
@@ -1619,6 +1663,8 @@ mod tests {
         healthy.observe_start("healthy".into());
         let healthy = Harness {
             pidfd: open_pidfd(std::process::id()).expect("pidfd"),
+            pid: std::process::id(),
+            start: 0,
             tracker: Arc::new(Mutex::new(healthy)),
             eof: Arc::new(AtomicBool::new(false)),
             tap: None,
@@ -1654,6 +1700,8 @@ mod tests {
         tracker.last_progress = Instant::now() - TEST_TIMEOUT;
         let harness = Harness {
             pidfd,
+            pid: 0,
+            start: 0,
             tracker: Arc::new(Mutex::new(tracker)),
             eof: Arc::new(AtomicBool::new(false)),
             tap: None,

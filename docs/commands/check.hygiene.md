@@ -168,10 +168,26 @@ A timeout report names only what varies per occurrence:
 - the clock that fired
 - the time it measured against its limit: one number when the kill was on
   time, both when they differ
-- the killed process group and test children
-- whichever of `/proc/PID/wchan` and `/proc/PID/stack` could be read (the
-  stack is normally unreadable without root, so its line is absent)
-- the snapshot directory, under `.brokkr/test-hung/`
+- whether SIGKILL was sent to the process group, and the child processes
+  a reading saw in it. A sent signal is not an observed exit.
+- each candidate thread: a thread of the test binary whose name matches a
+  test it had in flight. Its line gives the state, wait channel and
+  syscall read before the stop, and its state after the stop. It gives
+  CPU time and time spent waiting for a CPU between a reading taken a
+  few seconds before the deadline and the live one, and over the
+  thread's life. It also lists the CPUs the thread may run on. The lines
+  are observations, not a verdict. Cargo's shared stream names no thread.
+- brokkr's own concurrency at the deadline: test group leaders not yet
+  reaped, and live harnesses in the session. Then the load average from
+  the reading, and pressure growth where the kernel reports PSI.
+- when the stop and the kill were sent, and how complete each reading was
+- the snapshot directory, under `.brokkr/test-hung/`. Its `evidence.txt`
+  holds the lines above and every thread of every reading.
+
+brokkr waits at most half a second after the deadline for the readings,
+then attempts the kill whether or not they finished. On a kernel before
+Linux 6.9, a group whose leader brokkr has already reaped is not
+signalled, since its number may belong to another group by then.
 
 A snapshot outlives the run, a later interrupt included. Only `brokkr clean`
 and the retention bound (the newest 16) remove it.

@@ -1646,9 +1646,8 @@ include_ignored = false
             snapshot_dir: PathBuf::new(),
             leader_pid: 0,
             test_pids: Vec::new(),
-            snapshot_pid: None,
-            wchan: None,
-            stack: None,
+            killed: true,
+            evidence: Vec::new(),
             snapshot_error: None,
         };
         // The runner attributes both the resolved test's tracker expiry and

@@ -243,15 +243,76 @@ Three details decide whether "20 seconds" means 20 seconds:
   doorbell (a condvar) that the end of the run rings, so joining it doesn't
   wait out its sleep either. With flat sleeps, a suite of sub-millisecond
   tests would cost up to two polls per run.
-- **The run is frozen before it is diagnosed.** brokkr SIGSTOPs the offending
-  group first, then snapshots it, then SIGKILLs it. Snapshotting first would
-  let the test keep running while `/proc` collection took. Killing first
-  would fix the cap but destroy the diagnostic, since a dead process has no
-  `wchan` and no stack. SIGSTOP stops execution immediately and leaves
-  `/proc` readable.
+- **Diagnosis never sits on the kill path.** At a verdict the owner asks
+  for a live pass, sends SIGSTOP when it closes, asks for a
+  post-stop-request pass, and sends SIGKILL when that closes. The live pass
+  closes 250 ms after the verdict and the second pass at 500 ms. A pass
+  closes early once its collector reports the whole tree read. Both
+  signals are attempted while the group has a safe target, whether or not
+  any collector starts, finishes or publishes. So 500 ms is the ceiling on
+  deliberate diagnostic waiting, and the snapshot is written after the
+  kill. The owner never reads `/proc` itself. `stat` and `syscall` can
+  sleep on a target's exec lock, and `syscall` waits for the target to go
+  inactive. So every read is a collector thread's, and each sends its rows
+  over its own channel. The owner drains that channel against an absolute
+  cutoff. Closing a pass drops its receiver, and late rows go with it.
+  Collector threads come from one process-wide dispatcher, started with
+  the first watchdog. It drops a request whose cutoff has passed, and it
+  caps collectors alive at 8, so one stuck in a kernel read costs a
+  permit, never a timeout.
+- **The wait channel is read before the stop.** A stopped task's `wchan`
+  is `do_signal_stop`, so a snapshot taken after SIGSTOP records the stop,
+  never what the test waited on. Every pass makes the same capped,
+  best-effort walk of the leader's tree. For each thread it reads the
+  wait channel, state, syscall, `schedstat`, context switches and allowed
+  CPUs. Only the live pass's wait channels say what a thread waited on.
+  The post-stop pass counts how many tasks it read were in `T`. Each
+  file is read at its own moment, so a state and a syscall in one row
+  need not describe the same instant. A syscall is shown as its number,
+  plus the name that number has in the host's native table. The file
+  does not say which table the task entered through. A collector reads a baseline when
+  the nearest deadline comes within 5 s. It gives each thread's CPU and
+  runqueue growth between that read and the live one. A baseline is used
+  only if its walk finished, by the stamp on its terminal record, before
+  the live pass was requested.
+- **Rows cannot mix processes.** Each process is read through a handle
+  on its `/proc/<pid>` directory, and each thread through a handle on
+  its task directory. Reads through a handle reach that process or fail.
+  They never reach a later one reusing the number. The leader's handle
+  is opened at spawn, while it is an unreaped child. Opening a directory
+  takes no lock of the target's, so this cannot stall the spawn the way
+  a `stat` read could. Only the process being walked holds a handle.
+  Pids named by a `children` file wait as numbers, bounded by the task
+  cap, and each child's handle is opened when its turn comes. A child's
+  main thread is read first, whether or not the listing names it, and
+  the child is kept only if that thread's `stat` names its parent. No
+  other thread of it is read until then. A child whose main thread cannot
+  be read is skipped whole. A read that fails for any reason other than
+  the target being gone is counted, and a pass with any counted gap reads
+  as partial, never complete.
+- **The report names threads only of processes brokkr verified.** A
+  direct test binary is the harness itself. A shim peer is the harness
+  behind the charged verdict, by the pid and start time bound to its
+  admission pidfd. Cargo's shared stream maps to no one process, so it
+  names no thread. A thread is named when its `comm` bytes equal the
+  first 15 bytes of a test name that process's own stream had in flight.
+  A shim peer's process must also show its admitted start time in the
+  live pass. The leader's rows come through its own handle.
+  That makes it a candidate, not an identification. The lines are
+  observations. No counter can say why a test hung: a thread parked in a
+  futex may wait on a starved worker.
+- **The watchdog's group signals cannot reach a reused number.** The
+  leader's pidfd is opened at spawn, before any reap. Both signals go
+  through `pidfd_send_signal` with `PIDFD_SIGNAL_PROCESS_GROUP` (Linux 6.9
+  and later), which signals the group of that pid object. On an older
+  kernel the fallback is a numeric group signal, sent under a lock that
+  every reap also takes, and only while the leader is unreaped. After the
+  reap the signal is skipped and the report says so. The shutdown
+  reaper's numeric group kill is outside this: its signal handler takes
+  no lock, and its registration outlives the leader's reap by a moment.
 
 The shared-stream, shim and parallel libtest watchdogs use one deadline
-verdict and one freeze, snapshot and kill sequence. The verdict prefers
+verdict and one collect, stop, collect, kill sequence. The verdict prefers
 per-test expiry, then idle expiry, then wall expiry. The shim measures idle
 time across the whole session, including gaps between harnesses. Parallel
 wall expiry has the same snapshot and in-flight context as serial wall

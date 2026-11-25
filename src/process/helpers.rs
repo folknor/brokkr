@@ -1,19 +1,18 @@
-//! Shared best-effort signalling and process snapshots.
+//! Shared best-effort signalling.
 //!
-//! These helpers are for brokkr-owned children and diagnostics. Callers that
-//! target recorded identities use the verified pidfd APIs in `reap`.
+//! These helpers are for brokkr-owned children. Callers that target recorded
+//! identities use the verified pidfd APIs in `reap`.
 //!
 //! - [`signal_pid`] - send a signal to a known PID.
 //! - [`signal_process_group`] - send a signal to a known PGID.
-//! - [`snapshot_proc`] - copy `/proc/<pid>/{status,wchan,syscall,stack}`
-//!   into the artefact dir. Distinguishes "blocked on futex" from
-//!   "blocked on closed pipe" without re-running.
 
 use std::fs;
+#[cfg(test)]
 use std::path::Path;
 #[cfg(test)]
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 use crate::error::DevError;
 
 /// Signal a PID that the caller already owns or has independently verified.
@@ -144,47 +143,6 @@ fn wait_for_sentinel(path: &Path, backstop: Duration) -> Result<SentinelOutcome,
     }
 }
 
-/// `/proc/<pid>` files copied by [`snapshot_proc`].
-///
-/// `stack` is included in the list but reading it requires
-/// `CAP_SYS_PTRACE` on most modern kernels (`/proc/sys/kernel/yama/
-/// ptrace_scope >= 1` blocks it for unprivileged callers); the snapshot
-/// continues past read failures rather than aborting, with the failure
-/// reason recorded in `proc-stack.txt`.
-const PROC_FILES: &[&str] = &["status", "wchan", "syscall", "stack"];
-
-/// Capture `/proc/<pid>/{status,wchan,syscall,stack}` into `out_dir`.
-///
-/// One file per probe, named `proc-<probe>.txt`. Failures (process
-/// already gone, permission denied) are recorded in the file body
-/// rather than propagated, because:
-///
-/// - This helper runs at *failure-declaration* time, when the harness
-///   is already on a sad path. Aborting the artefact dump because one
-///   `/proc` file is missing would lose the others.
-/// - The user reading the artefact dir later wants to see "stack:
-///   permission denied" recorded next to "wchan: ep_poll" so they
-///   know the missing data is a kernel-policy issue, not a bug in the
-///   harness.
-///
-/// The only error this function returns is from [`fs::write`] failing
-/// to create the output file (e.g. `out_dir` not writable) - that is a
-/// harness configuration bug worth surfacing.
-pub fn snapshot_proc(pid: u32, out_dir: &Path) -> Result<(), DevError> {
-    for probe in PROC_FILES {
-        let src = Path::new("/proc").join(pid.to_string()).join(probe);
-        let body = match fs::read(&src) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                format!("[brokkr] could not read {}: {}\n", src.display(), err).into_bytes()
-            }
-        };
-        let dst = out_dir.join(format!("proc-{probe}.txt"));
-        fs::write(&dst, body)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -295,30 +253,5 @@ mod tests {
         assert!(elapsed >= Duration::from_millis(150));
         // Generous upper bound to avoid flakes on a busy CI box.
         assert!(elapsed < Duration::from_secs(2), "elapsed = {elapsed:?}");
-    }
-
-    #[test]
-    fn snapshot_proc_writes_files_for_self() {
-        let dir = tmpdir("snapshot_self");
-        let pid = std::process::id();
-        snapshot_proc(pid, &dir).unwrap();
-        for probe in PROC_FILES {
-            let path = dir.join(format!("proc-{probe}.txt"));
-            assert!(path.exists(), "{path:?} should have been created");
-            let body = fs::read(&path).unwrap();
-            assert!(!body.is_empty(), "{path:?} should not be empty");
-        }
-    }
-
-    #[test]
-    fn snapshot_proc_records_missing_pid_inline() {
-        let dir = tmpdir("snapshot_missing");
-        let pid = 2_147_483_646u32;
-        snapshot_proc(pid, &dir).unwrap();
-        let body = fs::read_to_string(dir.join("proc-status.txt")).unwrap();
-        assert!(
-            body.contains("could not read"),
-            "expected error stub in {body:?}"
-        );
     }
 }

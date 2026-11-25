@@ -1,13 +1,16 @@
 //! The deadline model shared by direct, cargo, parallel, and shim lanes:
 //! the typed `Expiry`, the timeout cause and its attribution, and the one
-//! freeze, snapshot and kill verdict every watchdog uses.
+//! collect, stop, collect, kill sequence every watchdog enforces a verdict by.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use super::{KillCause, Leader, ObsEvent, RunContext, StreamTap, capture_hung_test};
+use super::evidence::{self, LIVE_ALLOWANCE, Pass, Presampler, Root, STOP_ALLOWANCE};
+use super::hung::{Candidate, Filed, Gathered, record_hung_test};
+use super::leader::LeaderHandle;
+use super::{KillCause, Leader, ObsEvent, RunContext, StreamTap};
 
 /// Why the shared deadline machinery declared a run over budget. This carries
 /// the clock that fired; test naming and confidence live in `Attribution`.
@@ -143,6 +146,11 @@ pub(super) struct DeadlineReading {
     pub(super) expiry: Option<Expiry>,
     pub(super) stale: bool,
     pub(super) in_flight: Vec<String>,
+    /// The verified process this tracker's stream belongs to, by pid and
+    /// start time, when brokkr knows it: a direct test binary, or a shim peer
+    /// admitted by identity. `None` for cargo's shared stream, which maps to
+    /// no one process.
+    pub(super) harness: Option<Root>,
 }
 
 impl DeadlineReading {
@@ -151,7 +159,13 @@ impl DeadlineReading {
             expiry: t.timed_out(timeout),
             stale: !t.ever_observed,
             in_flight: t.current.keys().cloned().collect(),
+            harness: None,
         }
+    }
+
+    pub(super) fn of(mut self, harness: Option<Root>) -> Self {
+        self.harness = harness;
+        self
     }
 }
 
@@ -245,46 +259,106 @@ impl Ceilings {
     }
 }
 
-pub(super) fn enforce_deadline(
-    state_root: &Path,
-    leader_pid: u32,
-    leader: Leader,
-    verdict: DeadlineVerdict,
-    hung: &Mutex<Option<HungTest>>,
-    tap: Option<&StreamTap>,
-    context: &RunContext,
-) {
-    // Freeze before diagnosis: collection must not extend the execution budget.
-    crate::process::signal_process_group(leader_pid, libc::SIGSTOP).ok();
-    if matches!(
-        &verdict.attribution,
-        Attribution::Suspect { stale: true, .. }
-    ) {
-        context.warn(
-            "no libtest lifecycle event was ever observed, so the test named below is \
-             brokkr's best guess at which one burned the budget - the budget itself \
-             was still exceeded.",
-        );
+/// The processes whose threads the report may name for a verdict: the
+/// harness behind a charged expiry, else every reading's verified harness,
+/// each with its own in-flight names and the attributed name.
+pub(super) fn candidates(verdict: &DeadlineVerdict, readings: &[DeadlineReading]) -> Vec<Candidate> {
+    let attributed = verdict.attribution.test_name();
+    let of = |reading: &DeadlineReading| {
+        let root = reading.harness?;
+        let mut names = reading.in_flight.clone();
+        if let Some(name) = attributed
+            && !names.iter().any(|n| n == name)
+        {
+            names.push(name.to_owned());
+        }
+        names.sort();
+        Some(Candidate { root, names })
+    };
+    match verdict.charged {
+        Some(index) => readings.get(index).and_then(of).into_iter().collect(),
+        None => readings.iter().filter_map(of).collect(),
     }
-    if let Some(tap) = tap {
+}
+
+/// What a watchdog hands the deadline owner beside the verdict.
+pub(super) struct Enforcement<'a> {
+    /// When the watchdog reached the verdict: both allowances count from here.
+    pub(super) verdict_at: Instant,
+    pub(super) state_root: &'a Path,
+    pub(super) leader: &'a LeaderHandle,
+    pub(super) kind: Leader,
+    pub(super) candidates: Vec<Candidate>,
+    pub(super) live_harnesses: Option<usize>,
+    pub(super) presampler: Presampler,
+    pub(super) hung: &'a Mutex<Option<HungTest>>,
+    pub(super) tap: Option<&'a StreamTap>,
+    pub(super) context: &'a RunContext,
+}
+
+/// Collect, stop, collect, kill, then record. Once the verdict fires both
+/// signals are attempted while the group has a safe target, whether or not
+/// any collector starts, finishes or publishes: the owner only drains
+/// channels against absolute cutoffs, so its deliberate waiting ends
+/// [`STOP_ALLOWANCE`] after the verdict. Every `/proc` read is a
+/// collector's; the observation event and the snapshot come after the kill.
+/// The runner joins this watchdog before it reports the exit, so the kill
+/// event still precedes it.
+pub(super) fn enforce_deadline(verdict: DeadlineVerdict, e: Enforcement<'_>) {
+    let verdict_at = e.verdict_at;
+    let unreaped_leaders = super::leader::unreaped_leaders();
+    let dir = e.leader.dir();
+    let live = evidence::run_pass(dir, Pass::Live, verdict_at + LIVE_ALLOWANCE);
+    let stop = e.leader.signal_group(libc::SIGSTOP);
+    let stop_at = verdict_at.elapsed();
+    let post = evidence::run_pass(dir, Pass::PostStop, verdict_at + STOP_ALLOWANCE);
+    let kill = e.leader.signal_group(libc::SIGKILL);
+    let kill_at = verdict_at.elapsed();
+
+    if let Some(tap) = e.tap {
         tap.emit(ObsEvent::Killed {
             cause: kill_of(&verdict.reason),
             test: verdict.attribution.test_name().map(str::to_owned),
         });
     }
-    let report = capture_hung_test(
-        state_root,
-        leader_pid,
-        leader,
-        verdict.reason,
-        verdict.attribution,
-        verdict.elapsed,
-        verdict.ceiling,
+    if matches!(
+        &verdict.attribution,
+        Attribution::Suspect { stale: true, .. }
+    ) {
+        e.context.warn(
+            "no libtest lifecycle event was ever observed, so the test named below is \
+             brokkr's best guess at which one burned the budget - the budget itself \
+             was still exceeded.",
+        );
+    }
+    let gathered = Gathered {
+        verdict_at,
+        baseline: e.presampler.baseline(live.requested),
+        live,
+        stop,
+        stop_at,
+        post,
+        kill,
+        kill_at,
+        unreaped_leaders,
+        live_harnesses: e.live_harnesses,
+        candidates: e.candidates,
+    };
+    let report = record_hung_test(
+        e.state_root,
+        Filed {
+            leader: e.kind,
+            leader_pid: e.leader.pgid(),
+            reason: verdict.reason,
+            attribution: verdict.attribution,
+            elapsed: verdict.elapsed,
+            ceiling: verdict.ceiling,
+        },
+        &gathered,
     );
-    if let Ok(mut slot) = hung.lock() {
+    if let Ok(mut slot) = e.hung.lock() {
         *slot = Some(report);
     }
-    crate::process::signal_process_group(leader_pid, libc::SIGKILL).ok();
 }
 
 #[derive(Clone, Debug)]
@@ -297,9 +371,10 @@ pub(crate) struct HungTest {
     pub(crate) snapshot_dir: PathBuf,
     pub(crate) leader_pid: u32,
     pub(crate) test_pids: Vec<u32>,
-    pub(crate) snapshot_pid: Option<u32>,
-    pub(crate) wchan: Option<String>,
-    pub(crate) stack: Option<String>,
+    /// Whether the kernel accepted the group SIGKILL.
+    pub(crate) killed: bool,
+    /// The report's observation lines: candidate threads, host, signals.
+    pub(crate) evidence: Vec<String>,
     pub(crate) snapshot_error: Option<String>,
 }
 
@@ -550,8 +625,8 @@ impl Doorbell {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn watchdog_loop(
     state_root: PathBuf,
-    leader_pid: u32,
-    leader: Leader,
+    leader: Arc<LeaderHandle>,
+    kind: Leader,
     tracker: Arc<Mutex<TestTracker>>,
     done: Arc<Doorbell>,
     hung: Arc<Mutex<Option<HungTest>>>,
@@ -562,8 +637,8 @@ pub(super) fn watchdog_loop(
 ) {
     watchdog_loop_with_timing(
         state_root,
-        leader_pid,
         leader,
+        kind,
         tracker,
         done,
         hung,
@@ -579,8 +654,8 @@ pub(super) fn watchdog_loop(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn watchdog_loop_with_timing(
     state_root: PathBuf,
-    leader_pid: u32,
-    leader: Leader,
+    leader: Arc<LeaderHandle>,
+    kind: Leader,
     tracker: Arc<Mutex<TestTracker>>,
     done: Arc<Doorbell>,
     hung: Arc<Mutex<Option<HungTest>>>,
@@ -597,6 +672,10 @@ pub(super) fn watchdog_loop_with_timing(
     context: &RunContext,
 ) {
     let timeout = ceilings.per_test;
+    evidence::ensure_dispatcher();
+    let mut presampler = Presampler::default();
+    // A direct test binary is the harness itself, so its stream maps to it.
+    let harness = (kind == Leader::TestBinary).then_some(leader.root());
     loop {
         if done.is_rung() {
             return;
@@ -607,13 +686,21 @@ pub(super) fn watchdog_loop_with_timing(
         // which is not what a hard cap means. Capped by `poll` so a test that
         // starts mid-sleep has its deadline read promptly; the end of the run
         // rings `done` and wakes the sleep at once.
-        let until_deadline = tracker
-            .lock()
-            .ok()
-            .and_then(|t| t.next_deadline(timeout))
+        let (tracked, idle_left) = tracker.lock().ok().map_or((None, None), |t| {
+            (
+                t.next_deadline(timeout),
+                t.current
+                    .is_empty()
+                    .then(|| IDLE_TIMEOUT.saturating_sub(t.idle_since.elapsed())),
+            )
+        });
+        let until_deadline = tracked
             .into_iter()
             .chain(ceilings.wall.map(|w| w.saturating_sub(started.elapsed())))
             .min();
+        // The baseline looks at the idle clock too, which the sleep leaves to
+        // the poll cap.
+        presampler.tick(leader.dir(), until_deadline.into_iter().chain(idle_left).min());
         if done.sleep(until_deadline.map_or(poll, |d| d.min(poll))) {
             return;
         }
@@ -622,7 +709,7 @@ pub(super) fn watchdog_loop_with_timing(
             || (Vec::new(), None),
             |t| {
                 (
-                    vec![DeadlineReading::from_tracker(&t, timeout)],
+                    vec![DeadlineReading::from_tracker(&t, timeout).of(harness)],
                     t.current.is_empty().then(|| t.idle_since.elapsed()),
                 )
             },
@@ -630,17 +717,25 @@ pub(super) fn watchdog_loop_with_timing(
         let Some(verdict) = ceilings.verdict(&readings, idle, started.elapsed()) else {
             continue;
         };
+        let verdict_at = Instant::now();
         if done.is_rung() {
             return;
         }
+        let candidates = candidates(&verdict, &readings);
         enforce_deadline(
-            &state_root,
-            leader_pid,
-            leader,
             verdict,
-            &hung,
-            tap,
-            context,
+            Enforcement {
+                verdict_at,
+                state_root: &state_root,
+                leader: &leader,
+                kind,
+                candidates,
+                live_harnesses: None,
+                presampler,
+                hung: &hung,
+                tap,
+                context,
+            },
         );
         return;
     }

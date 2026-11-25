@@ -2,8 +2,9 @@
 //!
 //! Public paths stay here as a facade; implementation lives by concern in
 //! `context`, `events`, `outcome`, `plan`, `deadline`, `libtest_json`,
-//! `procgroup`, `run`, `hung`, and `output` (the display-only libtest text
-//! parser and compact failure rendering). `harness_shim` isolates each
+//! `procgroup`, `run`, `leader` (group signals and reaps), `evidence` (the
+//! off-kill-path `/proc` collectors), `hung`, and `output` (the display-only
+//! libtest text parser and compact failure rendering). `harness_shim` isolates each
 //! cargo-launched harness and rustdoc stream; startup checks for its entry
 //! point first (`maybe_run_harness_shim`).
 //!
@@ -14,8 +15,10 @@ pub(crate) mod ceilings;
 mod context;
 mod deadline;
 mod events;
+mod evidence;
 mod hung;
 mod invocation;
+mod leader;
 mod libtest_json;
 mod outcome;
 mod output;
@@ -59,18 +62,21 @@ pub(crate) use run::{
 
 // Internal paths shared only among runner modules and the harness shim.
 use deadline::{
-    DeadlineReading, Doorbell, TestTracker, WATCHDOG_POLL, enforce_deadline, watchdog_loop,
+    DeadlineReading, Doorbell, Enforcement, TestTracker, WATCHDOG_POLL, candidates,
+    enforce_deadline, watchdog_loop,
 };
 #[cfg(test)]
 use deadline::{Expiry, watchdog_loop_with_timing};
-use hung::capture_hung_test;
 #[cfg(test)]
 use hung::sanitize_path_component;
+use leader::LeaderHandle;
 use libtest_json::drain_libtest_json;
 #[cfg(test)]
 use procgroup::DRAIN_GRACE;
+#[cfg(test)]
+use procgroup::direct_child_pids;
 use procgroup::{
-    clone_buffer, clone_hung, direct_child_pids, drain_stderr, drain_to_buffer, join_drains,
+    clone_buffer, clone_hung, drain_stderr, drain_to_buffer, join_drains,
     spawn_cargo_process_group, spawn_process_group,
 };
 

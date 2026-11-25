@@ -23,15 +23,14 @@ fn hung(reason: TimeoutReason, attribution: Attribution, elapsed: u64, ceiling: 
         snapshot_dir: PathBuf::from("/snap"),
         leader_pid: 7,
         test_pids: vec![9],
-        snapshot_pid: Some(9),
-        wchan: None,
-        stack: None,
+        killed: true,
+        evidence: Vec::new(),
         snapshot_error: None,
     }
 }
 
-/// The report states each number once, omits /proc lines that were not
-/// read, and carries no constant explanation.
+/// The report states each number once, prints the evidence lines it was
+/// given and nothing else, and carries no constant explanation.
 #[test]
 fn the_hung_test_report_is_terse() {
     let cwd = Path::new("/");
@@ -50,10 +49,7 @@ fn the_hung_test_report_is_terse() {
         on_time.starts_with("test t::x exceeded the 20s per-test timeout\n"),
         "{on_time}"
     );
-    assert!(
-        !on_time.contains("wchan") && !on_time.contains("stack"),
-        "{on_time}"
-    );
+    assert!(!on_time.contains("candidate"), "{on_time}");
     assert!(!on_time.contains("build time excluded"), "{on_time}");
 
     let late = format_hung_test(
@@ -72,15 +68,17 @@ fn the_hung_test_report_is_terse() {
         "{late}"
     );
 
-    let mut with_wchan = hung(TimeoutReason::Idle, Attribution::None, 300, 300);
-    with_wchan.wchan = Some("futex_wait".into());
-    let idle = format_hung_test(&with_wchan, cwd);
+    let mut with_evidence = hung(TimeoutReason::Idle, Attribution::None, 300, 300);
+    with_evidence.evidence = vec!["candidate thread t (tid 9, pid 9): live S".into()];
+    let idle = format_hung_test(&with_evidence, cwd);
     assert!(
         idle.starts_with("no test in flight for 300s (the idle ceiling) - "),
         "{idle}"
     );
-    assert!(idle.contains("/proc/9/wchan: futex_wait"), "{idle}");
-    assert!(!idle.contains("/stack"), "{idle}");
+    assert!(
+        idle.contains("\n  candidate thread t (tid 9, pid 9): live S\n"),
+        "{idle}"
+    );
 
     let wall = format_hung_test(
         &hung(
@@ -350,13 +348,21 @@ fn ringing_the_doorbell_wakes_a_sleeping_watchdog() {
     let root = test_root("watchdog_doorbell");
     let done = Arc::new(Doorbell::default());
     let hung = Arc::new(Mutex::new(None::<HungTest>));
+    let mut child = Command::new("sleep")
+        .arg("60")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sleep");
+    let leader = Arc::new(LeaderHandle::new(&child));
     let watchdog = {
         let done = Arc::clone(&done);
         let hung = Arc::clone(&hung);
         thread::spawn(move || {
             watchdog_loop_with_timing(
                 root,
-                0,
+                leader,
                 Leader::Cargo,
                 Arc::new(Mutex::new(TestTracker::default())),
                 done,
@@ -377,6 +383,8 @@ fn ringing_the_doorbell_wakes_a_sleeping_watchdog() {
     let rung = Instant::now();
     done.ring();
     watchdog.join().expect("watchdog thread");
+    child.kill().ok();
+    child.wait().ok();
     assert!(
         rung.elapsed() < Duration::from_secs(5),
         "the ring woke the sleep"
@@ -443,7 +451,7 @@ fn the_wall_deadline_fires_with_no_events_at_all() {
 
     watchdog_loop_with_timing(
         root.clone(),
-        cargo_pid,
+        Arc::new(LeaderHandle::new(&child)),
         Leader::Cargo,
         Arc::clone(&tracker),
         Arc::clone(&done),
@@ -619,7 +627,7 @@ fn an_expired_per_test_cap_kills_even_with_the_wall_far_away() {
     // run: the per-test cap alone has to fire.
     watchdog_loop_with_timing(
         root.clone(),
-        cargo_pid,
+        Arc::new(LeaderHandle::new(&child)),
         Leader::Cargo,
         Arc::clone(&tracker),
         Arc::clone(&done),
@@ -700,7 +708,7 @@ fn watchdog_kills_process_group_and_writes_snapshot() {
 
     watchdog_loop_with_timing(
         root.clone(),
-        cargo_pid,
+        Arc::new(LeaderHandle::new(&child)),
         Leader::Cargo,
         Arc::clone(&tracker),
         Arc::clone(&done),
@@ -724,24 +732,28 @@ fn watchdog_kills_process_group_and_writes_snapshot() {
             name: "watchdog::hangs".to_owned(),
         }
     );
-    assert!(hung.snapshot_dir.exists());
-    assert!(hung.snapshot_dir.join("proc-status.txt").exists());
-    assert!(hung.snapshot_pid.is_some());
+    assert!(hung.snapshot_dir.join("evidence.txt").exists());
+    assert!(
+        hung.evidence
+            .iter()
+            .any(|line| line.starts_with("stop sent at +") && line.contains(", kill sent at +")),
+        "{:?}",
+        hung.evidence
+    );
+    assert_eq!(hung.test_pids, child_pids);
     assert!(
         wait_for_process_group_exit(cargo_pid),
         "process group {cargo_pid} survived watchdog kill"
     );
 }
 
-// A directly executed test binary is the hung harness itself; its children
-// are whatever the tests spawned. The snapshot must examine the leader,
-// where under cargo it examines cargo's first child.
+/// Run a one-test watchdog over `sh -c 'sleep 60 & wait'` whose test is
+/// named `sh`, the shell's own thread name, and return its report.
 #[cfg(target_os = "linux")]
-#[test]
-fn a_direct_launch_snapshots_the_leader_not_its_child() {
+fn hung_shell(name: &str, kind: Leader) -> (u32, HungTest) {
     use std::os::unix::process::CommandExt;
 
-    let root = test_root("direct_leader_snapshot");
+    let root = test_root(name);
     let mut child = Command::new("sh")
         .arg("-c")
         .arg("sleep 60 & wait")
@@ -753,37 +765,51 @@ fn a_direct_launch_snapshots_the_leader_not_its_child() {
         .spawn()
         .expect("spawn shell");
     let leader = child.id();
-    let children = wait_for_direct_children(leader);
-    assert!(!children.is_empty(), "shell did not spawn sleep child");
-
-    let reason = TimeoutReason::Watched;
-    let attribution = Attribution::Exact {
-        name: "direct::hangs".to_owned(),
-    };
-    let tick = Duration::from_millis(1);
-    let direct = capture_hung_test(
-        &root,
-        leader,
-        Leader::TestBinary,
-        reason.clone(),
-        attribution.clone(),
-        tick,
-        tick,
+    assert!(
+        !wait_for_direct_children(leader).is_empty(),
+        "shell did not spawn sleep child"
     );
-    let cargo = capture_hung_test(
-        &root,
-        leader,
-        Leader::Cargo,
-        reason,
-        attribution,
-        tick,
-        tick,
+    let hung = Arc::new(Mutex::new(None::<HungTest>));
+    watchdog_loop_with_timing(
+        root,
+        Arc::new(LeaderHandle::new(&child)),
+        kind,
+        Arc::new(Mutex::new(TestTracker::default())),
+        Arc::new(Doorbell::default()),
+        Arc::clone(&hung),
+        Ceilings::one_test(Duration::from_millis(20), "sh"),
+        Duration::from_millis(5),
+        Instant::now(),
+        None,
+        &test_context(),
     );
-    crate::process::signal_process_group(leader, libc::SIGKILL).ok();
     child.wait().ok();
+    let report = hung.lock().unwrap().clone().expect("hung result");
+    (leader, report)
+}
 
-    assert_eq!(direct.snapshot_pid, Some(leader));
-    assert_eq!(cargo.snapshot_pid, children.first().copied());
+// A directly executed test binary is the hung harness itself, so its threads
+// are candidates, read before the stop: the wait channel is the shell's own
+// wait, not the stop. Cargo's shared stream maps to no one process, so it
+// names no candidate.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_direct_launch_names_the_leader_threads_and_cargo_names_none() {
+    let (leader, direct) = hung_shell("direct_leader_evidence", Leader::TestBinary);
+    let line = direct
+        .evidence
+        .iter()
+        .find(|l| l.starts_with(&format!("candidate thread sh (tid {leader}, pid {leader})")))
+        .unwrap_or_else(|| panic!("{:?}", direct.evidence));
+    assert!(!line.contains("do_signal_stop"), "{line}");
+    assert!(line.contains("after the stop request"), "{line}");
+
+    let (_, cargo) = hung_shell("cargo_leader_evidence", Leader::Cargo);
+    assert!(
+        !cargo.evidence.iter().any(|l| l.contains("candidate")),
+        "{:?}",
+        cargo.evidence
+    );
 }
 
 /// Drive a JSON event stream through the reconstructor, returning the

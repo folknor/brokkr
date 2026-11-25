@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use super::harness_shim;
 use super::{
-    BuildGate, Ceilings, Doorbell, ExecutionOutcome, HungTest, KillCause, ObsEvent, Observation,
+    BuildGate, Ceilings, Doorbell, ExecutionOutcome, HungTest, KillCause, LeaderHandle, ObsEvent,
+    Observation,
     ObservationSink, RunContext, StreamSource, StreamTap, StrictPlan, TestTracker, WATCHDOG_POLL,
     clone_buffer, clone_hung, drain_libtest_json, drain_stderr, drain_to_buffer, join_drains,
     spawn_cargo_process_group, spawn_process_group, watchdog_loop,
@@ -225,17 +226,31 @@ where
         ),
     };
     let leader_pid = child.id();
+    // Before any reap, so its pidfd names this leader.
+    let handle = Arc::new(LeaderHandle::new(&child));
     if let Some(session) = &session {
         session.set_cargo_pid(leader_pid);
     }
-    let acceptor = session
+    // A setup failure from here on kills and reaps the spawned group
+    // through its handle before returning, so nothing is left running.
+    let abandon = |child: &mut std::process::Child| {
+        handle.signal_group(libc::SIGKILL);
+        handle.reap(child).ok();
+    };
+    let acceptor = match session
         .as_ref()
         .map(harness_shim::Session::run_acceptor)
-        .transpose()?;
+        .transpose()
+    {
+        Ok(acceptor) => acceptor,
+        Err(error) => {
+            abandon(&mut child);
+            return Err(error);
+        }
+    };
     let reaper = crate::shutdown::GroupReaper::register(leader_pid);
     let (Some(stdout_pipe), Some(stderr_pipe)) = (child.stdout.take(), child.stderr.take()) else {
-        crate::process::signal_process_group(leader_pid, libc::SIGKILL).ok();
-        child.wait().ok();
+        abandon(&mut child);
         return Err(DevError::Build(format!("{program} output was not piped")));
     };
 
@@ -278,7 +293,7 @@ where
     let watchdog_thread = if let Some(session) = &session {
         session.watchdog(
             state_root.to_path_buf(),
-            leader_pid,
+            Arc::clone(&handle),
             Arc::clone(&tracker),
             Arc::clone(&hung),
             &ceilings,
@@ -292,14 +307,15 @@ where
         let tracker = Arc::clone(&tracker);
         let done = Arc::clone(&done);
         let hung = Arc::clone(&hung);
+        let handle = Arc::clone(&handle);
         thread::spawn(move || {
             watchdog_loop(
-                state_root, leader_pid, leader, tracker, done, hung, ceilings, start, tap, context,
+                state_root, handle, leader, tracker, done, hung, ceilings, start, tap, context,
             );
         })
     };
 
-    let waited = wait_child(&mut child, program, abort, &context);
+    let waited = wait_child(&mut child, &handle, program, abort, &context);
     if let Some(session) = &session {
         session.stop_watchdog();
     }
@@ -385,38 +401,35 @@ where
     })
 }
 
+/// Every reap and every runner-side group signal of this leader goes through
+/// `handle`, so a watchdog on the numeric fallback never signals a reaped
+/// leader's number.
 fn wait_child(
     child: &mut std::process::Child,
+    handle: &LeaderHandle,
     program: &str,
     abort: Option<&AtomicBool>,
     context: &RunContext,
 ) -> Result<(std::process::ExitStatus, bool, bool), DevError> {
-    let pgid = child.id();
     let spawn_err = |error| DevError::Spawn {
         program: program.into(),
         error,
     };
-    // Exit wakes the wait through the child's pidfd; the poll interval only
+    // Exit wakes the wait through the leader's pidfd; the poll interval only
     // bounds how late a stop or a sibling's abort is noticed. Without a pidfd
     // (an old kernel) the wait falls back to sleeping the interval.
-    let pidfd = harness_shim::open_pidfd(pgid).ok();
     loop {
-        match child.try_wait() {
+        match handle.try_reap(child) {
             Ok(Some(status)) => return Ok((status, context.stop.is_requested(), false)),
             Ok(None) => {
                 let stopped = context.stop.is_requested();
                 let cancelled = abort.is_some_and(|flag| flag.load(Ordering::SeqCst));
                 if stopped || cancelled {
-                    crate::process::signal_process_group(pgid, libc::SIGKILL).ok();
-                    let status = child.wait().map_err(spawn_err)?;
+                    handle.signal_group(libc::SIGKILL);
+                    let status = handle.reap(child).map_err(spawn_err)?;
                     return Ok((status, stopped, cancelled && !stopped));
                 }
-                match &pidfd {
-                    Some(fd) => {
-                        harness_shim::pidfd_wait(fd, WATCHDOG_POLL);
-                    }
-                    None => thread::sleep(WATCHDOG_POLL),
-                }
+                handle.wait_exit(WATCHDOG_POLL);
             }
             Err(error) => return Err(spawn_err(error)),
         }

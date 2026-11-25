@@ -1,5 +1,6 @@
 //! Process-group setup, output drains, and low-level pipe/process mechanics.
 
+#[cfg(test)]
 use std::fs;
 use std::io::Read;
 use std::path::Path;
@@ -251,6 +252,8 @@ fn is_cargo_finished_line(line: &str) -> bool {
     line.trim_start().starts_with("Finished ")
 }
 
+/// A process's direct children, for tests that wait on a spawned tree.
+#[cfg(test)]
 pub(super) fn direct_child_pids(parent: u32) -> Vec<u32> {
     let task_children = Path::new("/proc")
         .join(parent.to_string())
@@ -269,15 +272,16 @@ pub(super) fn direct_child_pids(parent: u32) -> Vec<u32> {
     out
 }
 
+#[cfg(test)]
 fn parse_pid_list(text: &str) -> Vec<u32> {
     text.split_whitespace()
         .filter_map(|s| s.parse::<u32>().ok())
         .collect()
 }
 
+#[cfg(test)]
 fn scan_proc_children(parent: u32) -> Vec<u32> {
-    // Some kernels/configurations do not expose task/<tid>/children. Walking
-    // /proc is slower but only happens on the hang path.
+    // Some kernels/configurations do not expose task/<tid>/children.
     let Ok(entries) = fs::read_dir("/proc") else {
         return Vec::new();
     };
@@ -292,6 +296,7 @@ fn scan_proc_children(parent: u32) -> Vec<u32> {
         .collect()
 }
 
+#[cfg(test)]
 fn status_ppid(status: &str) -> Option<u32> {
     status.lines().find_map(|line| {
         let rest = line.strip_prefix("PPid:")?;

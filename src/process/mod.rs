@@ -9,7 +9,7 @@ pub(crate) mod spawn;
 mod table;
 
 pub(crate) use self::helpers::{environ_value, signal_process_group_raw};
-pub use self::helpers::{signal_pid, signal_process_group, snapshot_proc};
+pub use self::helpers::{signal_pid, signal_process_group};
 pub use self::identity::{BootId, HostScope, NsInode, Pid, ProcIdentity, StartTicks};
 pub use self::reap::{
     Delivery, Generation, PidfdRefusal, ReaperExemptions, VerifiedProcess, generation,
