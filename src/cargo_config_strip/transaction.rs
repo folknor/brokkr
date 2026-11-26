@@ -335,8 +335,6 @@ pub fn recover(dir: &Path) -> Result<(), DevError> {
             first.get_or_insert(error);
         }
     }
-    // A recovered file changes what the host provenance would read.
-    crate::build_provenance::forget_host_cache();
     first.map_or(Ok(()), Err)
 }
 
@@ -382,9 +380,8 @@ impl Drop for Installed {
         let Some(_guard) = txn() else {
             return;
         };
-        match recover_name(&self.cargo_dir, &self.base) {
-            Ok(()) => crate::build_provenance::forget_host_cache(),
-            Err(error) => output::warn(&error.to_string()),
+        if let Err(error) = recover_name(&self.cargo_dir, &self.base) {
+            output::warn(&error.to_string());
         }
     }
 }
@@ -494,7 +491,6 @@ pub fn install(
             crate::output::path(cargo_dir)
         ));
     }
-    crate::build_provenance::forget_host_cache();
     Ok(Some(Installed {
         cargo_dir: cargo_dir.to_owned(),
         base: base.to_owned(),

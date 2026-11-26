@@ -5,6 +5,9 @@ use super::table::{
     compute_rewrite_pct, find_output_bytes, format_blob_counts, format_input, format_wall,
 };
 
+/// The metadata key (`meta.exit_code`) historical answer rows carry.
+const EXIT_CODE_KEY: &str = "exit_code";
+
 /// Format side-by-side comparison of two commits, uncapped - the tests'
 /// shorthand for [`format_compare_with_limit`].
 #[cfg(test)]
@@ -285,7 +288,7 @@ struct RowData {
 fn recorded_exit(kv: &[KvPair]) -> Option<String> {
     kv.iter()
         .find(|p| {
-            p.class() == KvClass::Metadata && p.key.name() == crate::measure::capture::EXIT_CODE_KEY
+            p.class() == KvClass::Metadata && p.key.name() == EXIT_CODE_KEY
         })
         .map(|p| p.value.to_string())
 }

@@ -150,7 +150,7 @@ brokkr run bench -- --preset mtf --repeat 3
 ```
 
 `--commit REF` builds the target in a persistent worktree of `REF`, the one
-`crit` and the measured commands use. `worktree_keep` sets how many brokkr
+`crit` and `brokkr bench` use. `worktree_keep` sets how many brokkr
 retains, least recently used first out, and `brokkr clean --worktrees`
 removes them. brokkr then runs the binary from the directory you invoked
 `brokkr run` in.
@@ -305,7 +305,6 @@ everything after the `--` too. A `--` reached before any `NAME` leaves
 Only the first `--` is brokkr's and any later one is the program's, so
 `brokkr run -- -- --help` forwards `-- --help`. Flags before the `--`, with
 their values, parse as usual (`brokkr run --features a,b -- --help`).
-`brokkr mogwai -- ARGS` takes the same shape.
 
 ## Stopping a run
 

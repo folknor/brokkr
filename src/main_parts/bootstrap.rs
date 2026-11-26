@@ -2,77 +2,15 @@
 
 use super::dispatch::run;
 use crate::cli::{Cli, Command};
-use crate::command_args::{parse_env_overrides, resolve_features, resolve_mode};
+use crate::command_args::parse_env_overrides;
 use crate::error::DevError;
 use crate::fmt_cmd::cmd_fmt;
 use crate::passthrough_cmd::duration_ms;
 use crate::project::Project;
 use crate::{
-    check_cmd, cli, config, context, deps, history_cmd, man, measure, output, project, runnables, shutdown, test_runner, wc,
+    check_cmd, cli, config, context, deps, history_cmd, man, output, project, runnables, shutdown, test_runner, wc,
 };
 use std::time::Instant;
-
-// Measurement entry point: threads the resolved config and project context
-// through to the closure.
-pub(super) fn run_measured<F>(
-    mode: &cli::ModeArgs,
-    detection: &project::Detection,
-    invocation: &crate::db::RunInvocation,
-    f: F,
-) -> Result<(), DevError>
-where
-    F: FnOnce(&measure::MeasureRequest) -> Result<(), DevError>,
-{
-    let dev_config = &detection.config;
-    let project = detection.project.clone();
-    let project_root = detection.project_root.as_path();
-    let requested_mode = resolve_mode(mode);
-    let mm = if requested_mode == measure::MeasureMode::Run {
-        cli::invocation()?.spec().default_mode
-    } else {
-        requested_mode
-    };
-    let features = resolve_features(dev_config, &mode.features);
-    output::set_quiet(!mode.verbose);
-    // The narration a measured run keeps off the console (per-run sidecar
-    // attach and counts, the hotpath header, worktree and toolchain lines)
-    // goes here; without a log it would be discarded.
-    let _log = check_cmd::RunLog::begin(project_root, check_cmd::run_log_kind::MEASURE);
-    // Detection carries the code tree (cwd) separately from the config/state
-    // root, so worktree setup does not have to derive it again.
-    context::with_worktree(
-        Some(&project),
-        &detection.project_root,
-        &detection.build_root,
-        mode.commit.as_deref(),
-        mode.dry_run,
-        &crate::tree_policy::TreePolicy::of(dev_config),
-        context::worktree_keep(dev_config)?,
-        |build_root| {
-            // The whole measured command: the build, tool materialization,
-            // prepare steps and every child between measured samples. The
-            // per-sample sidecar and passthrough guards nest inside; without
-            // this one, a stop landing between them (or during the build or a
-            // tool download) took the default action and killed brokkr before
-            // it could unwind and discard the attempt's scratch output.
-            let _interrupts = shutdown::SigtermGuard::install();
-            let req = measure::MeasureRequest {
-                dev_config,
-                project_config: &detection.project_config,
-                project: project.clone(),
-                project_root: &detection.project_root,
-                build_root,
-                features: &features,
-                force: mode.force,
-                mode: mm,
-                invocation,
-                dry_run: mode.dry_run,
-                stop_marker: mode.stop.as_deref(),
-            };
-            f(&req)
-        },
-    )
-}
 
 /// Parse argv, with subcommands that don't apply to the detected project
 /// hidden from `--help`.

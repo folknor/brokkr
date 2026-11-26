@@ -366,6 +366,7 @@ impl LockGuard {
     /// Record current bench-run progress (1-based run index out of total).
     /// Skips the update when `total <= 1` - a lone "run 1/1" line in
     /// `brokkr lock` is noise.
+    #[cfg(test)]
     pub fn set_progress(&self, run: u32, total: u32) {
         if total <= 1 {
             return;

@@ -26,23 +26,9 @@ brokkr visual --all                                 # visual reference tests
 
 ## Commands
 
-### Measurement modes
+### Measurement
 
-Every measurable command supports these flags:
-
-| Flag | Behavior |
-|------|----------|
-| *(none)* | Build, run once, print timing. No DB storage. |
-| `--bench` | Full benchmark: lockfile, repeated samples, best result stored in DB (per-iteration walls are stored too, in execution order) |
-| `--bench N` | Same with N samples |
-| `--hotpath` | Function-level timing via the hotpath feature |
-| `--hotpath N` | Same, with N runs |
-| `--alloc` | Per-function allocation tracking |
-| `--stop <marker>` | Kill the child when this FIFO marker is emitted (bench any phase in isolation) |
-
-All measured modes automatically attach a sidecar that samples `/proc` metrics at 100ms (see [Sidecar profiler](#sidecar-profiler) below).
-
-Commands accept the options relevant to their workflow, including dataset selection, feature selection, worktree commits, force, and verbose output.
+Every project measures through script benches: `brokkr bench NAME` runs a bench the project declares, with `--hotpath` and `--alloc` for profiled runs and `--commit` for older commits (`brokkr man bench`). Every measured child gets a sidecar that samples `/proc` metrics at 100ms (see [Sidecar profiler](#sidecar-profiler) below). The typed measured commands are retired; the history they stored in `.brokkr/results.db` and `.brokkr/sidecar.db` stays readable.
 
 ### Shared (all projects)
 
@@ -132,29 +118,19 @@ brokkr visual creatine_products
 
 `prepare` and `html-extract` shell out to a Node.js script (requires Node + pnpm; auto-installs dependencies on first use). Node is already required for Puppeteer-based Chrome capture.
 
-## Benchmark harness
-
-All benchmarks run through `BenchHarness`, which provides:
-
-- **Exclusive lock** - prevents parallel bench/hotpath runs via lockfile
-- **SQLite storage** - results stored in `.brokkr/results.db` per project with git commit, hostname, and full environment snapshot
-- **Multiple timing modes** - in-process (N runs, best-of-N) and subprocess (external binary)
-- **Retroactive benchmarking** - `--commit <hash>` builds and benchmarks old commits via a persistent git worktree (sibling `.brokkr-worktree-<project>-<short>/`). Reused on subsequent runs at the same commit so cargo `target/` survives. Run `brokkr clean --worktrees` to garbage collect.
-- **OOM protection** - memory availability checks before large-scale runs
-
 ## Sidecar profiler
 
-Every measured run (bench, hotpath, alloc) automatically samples `/proc/{pid}/stat`, `/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals. Data is stored in `.brokkr/sidecar.db` (gitignored - local to the machine that ran it). The main results in `.brokkr/results.db` stay small, and are gitignored too.
+Every child a script bench measures (timing, hotpath, alloc) is sampled from `/proc/{pid}/stat`, `/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals, and the data is stored with the run in the bench store. The typed runs' trajectories stay in `.brokkr/sidecar.db` (gitignored - local to the machine that ran it).
 
 The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe for application phase markers and counters. Markers are lines of the form `<timestamp_us> <name>`, counters are `<timestamp_us> @<name>=<value>`, every timestamp in microseconds since the spawned process started, which lines up approximately with the sample clock (not UNIX epoch; "The clock" in `brokkr man measure`); a harness running several calls in one process tags either with its call, `<timestamp_us> %<call_id> ...`, and `brokkr sidecar <uuid> --call <call_id>` reads one call's stream (see "Marker & counter rules" in `brokkr man measure`; a tagged body starting `@@` or `!` is reserved for a call sink's sealing and terminal records). Markers are point-in-time bookmarks - the protocol has no notion of spans or pairs. `--durations` and `--phase` read pair spans from a `FOO_START` / `FOO_END` convention if the emitter happens to follow it; nothing else assumes that structure.
 
-`--stop <marker>` kills the child process as soon as the named untagged marker is emitted, allowing benchmarks of individual phases without waiting for the full run to complete. The SIGKILL exit is treated as success.
+A stop marker kills the child process as soon as the named untagged marker is emitted, allowing benchmarks of individual phases without waiting for the full run to complete; a script bench asks for one per call. The SIGKILL exit is treated as success.
 
 Sidecar data is stored even when the child is OOM-killed - the `/proc` trajectory up to the kill is the most valuable use case.
 
 ### Querying sidecar data
 
-A UUID prefix is required (except for `--compare`) - use `brokkr results` to find one. The `dirty` pseudo-UUID resolves to the most recent failed/dirty-tree run; each earlier one keeps its own id, which its run's `[sidecar]` line names.
+A UUID prefix is required (except for `--compare`) - use `brokkr results` to find one. The `dirty` pseudo-UUID resolves to the most recent typed run that filed no results row; each earlier one keeps its own id.
 
 ```
 brokkr sidecar <uuid>                              # per-phase summary (default view)
@@ -184,7 +160,7 @@ Filter flags (`--phase`, `--range`, `--where`) compose with `--samples` and `--s
 
 The FIFO protocol is convention-free - brokkr doesn't mandate any naming scheme on markers or counters. Two optional conventions unlock richer views when emitters adopt them:
 
-- **`FOO_START` / `FOO_END` marker pairs.** Used by `--durations` to derive per-span timing. Brokkr pairs a `FOO_START` with the next `FOO_END` of the same base name; unpaired starts render as standalone markers. In `--human`, span names seen more than once collapse into a single aggregate row (`NAME xN  total …  min/avg/max`) so a high-frequency span can't bury the phase rows; the JSONL form stays one object per span. The split is on observed cardinality, not on the name. `--stop FOO_END` kills the child on the end marker verbatim; `--stop -FOO` and `--stop FOO` are shorthand aliases that resolve to `FOO_END` (the fallback form prints a one-line notice so the resolved name is visible). **Markers are for the small set of true phase boundaries only** - a high-frequency span emitted as marker pairs drowns every phase-oriented view at once (each marker is treated as a boundary), so per-event blocking spans belong in counters, not markers (see below).
+- **`FOO_START` / `FOO_END` marker pairs.** Used by `--durations` to derive per-span timing. Brokkr pairs a `FOO_START` with the next `FOO_END` of the same base name; unpaired starts render as standalone markers. In `--human`, span names seen more than once collapse into a single aggregate row (`NAME xN  total …  min/avg/max`) so a high-frequency span can't bury the phase rows; the JSONL form stays one object per span. The split is on observed cardinality, not on the name. A stop at `FOO_END` kills the child on the end marker verbatim. **Markers are for the small set of true phase boundaries only** - a high-frequency span emitted as marker pairs drowns every phase-oriented view at once (each marker is treated as a boundary), so per-event blocking spans belong in counters, not markers (see below).
 
 - **`<category>_wait_ns` stall counters.** Accumulated blocking time is a *counter* concept, not a marker one. Emit a strictly-monotonic counter named `<category>_wait_ns` - one atomic add of the blocked nanoseconds per blocking event (channel sends, mutex waits, I/O backpressure, one-shot joins). `brokkr sidecar <uuid> --stalls` takes the max value per name (monotonic, so max is the cumulative total), strips `_wait_ns` for the category, and reports each as ms + `% of wall`. The `%` can exceed 100 for a counter accumulated across concurrent threads - it's the average number of threads parked in that category at any instant (e.g. 430% ~= 4.3 threads in decode-send); single-threaded waits read as clean sub-100% fractions. The view spans projects: it rolls up pbfhogg's `pipeline_decoded_send_wait_ns`, `pipeline_raw_send_wait_ns`, ... alongside elivagar's `sort_chunk_write_wait_ns`, `assemble_partition_batch_wait_ns`, `pmtiles_write_wait_ns`, ... in one table. Runs with no `*_wait_ns` counters produce a clear "no *_wait_ns counters" message rather than silent empty output.
 
@@ -249,20 +225,7 @@ Sidecar-only UUIDs (dirty-tree or failed runs with no results DB row) are picked
 
 ## Quick runtime timing
 
-By default, every measurable command builds and runs once with timing output - no DB, no harness overhead:
-
-```
-brokkr mogwai -- gen --type summary --seed 1
-```
-
-Add `--bench` to enable the full harness with DB storage:
-
-```
-brokkr mogwai --bench -- gen --type summary --seed 1     # benchmark and store per-iteration results
-brokkr mogwai --bench 10 -- gen --type summary --seed 1  # 10 runs
-```
-
-For ad-hoc passthrough with raw args: `brokkr passthrough -- <args>`.
+For a one-off run with no storage, use `brokkr run NAME -- <args>`.
 
 ## Configuration
 

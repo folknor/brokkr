@@ -25,7 +25,11 @@ reads the ones that apply to it:
   `brokkr man datasets`
 - **`[litehtml]`**: `docs/projects/litehtml.md`
 - **`[sluggrs]`**: `docs/projects/sluggrs.md`
-- **`[mogwai]` and `[mogwai.targets.*]`**: `docs/projects/mogwai.md`- **`[piners]`**: retired with `brokkr corpus` and `brokkr corpus-results`.
+- **`[mogwai]`**: retired with the `brokkr mogwai` command. It still loads
+  in a mogwai project, whatever it holds, unvalidated and with a warning,
+  and stays in the composed config a script's `config()` sees. mogwai
+  benchmarks through script benches (`brokkr man bench`).
+- **`[piners]`**: retired with `brokkr corpus` and `brokkr corpus-results`.
   It still loads in a piners project, whatever it holds, unvalidated and with
   a warning, and stays in the composed config a script's `config()` sees.
   piners runs its parity corpus through its own in-tree tool.
@@ -239,8 +243,8 @@ unrecognized non-table value is rejected.
 
 `[litehtml]`, `[sluggrs]`, `[ratatoskr]`, `[piners]`, `[dellingr]` and
 `[mogwai]` belong only to projects with the matching `project` value; a
-section for a different project is a load error. `litehtml-rs`, `sluggrs`
-and `mogwai` require their matching section. The project docs
+section for a different project is a load error. `litehtml-rs` and
+`sluggrs` require their matching section. The project docs
 listed at the top of this page hold the details.
 
 These reserved top-level keys are parsed as config sections or consumed by

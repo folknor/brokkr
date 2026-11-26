@@ -74,7 +74,6 @@ impl HeldTree {
         };
         if policy.disable_toolchain {
             held.toolchain = Some(DisabledToolchain::activate(dir)?);
-            crate::build_provenance::forget_host_cache();
         }
         held.cargo = cargo_config_strip::activate(dir, &policy.strip_rustflags)?;
         Ok(held)
@@ -88,9 +87,7 @@ impl HeldTree {
 impl Drop for HeldTree {
     fn drop(&mut self) {
         drop(self.cargo.take());
-        if self.toolchain.take().is_some() {
-            crate::build_provenance::forget_host_cache();
-        }
+        drop(self.toolchain.take());
     }
 }
 

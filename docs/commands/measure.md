@@ -1,282 +1,66 @@
-# Measurement modes
+# Measurement and the sidecar
 
-This page covers how brokkr measures a command: the `--bench`, `--hotpath`,
-`--alloc` and `--stop` flags, what a measured run stores and prints, and the
-sidecar profiler. "Modes" and "Harness" explain the model. "Run output"
-through "Hotpath JSON" are the reference for stored data, `brokkr sidecar`
-queries and the marker FIFO, and "Refusals" lists what they refuse.
+This page covers the sidecar profiler brokkr attaches to a measured child,
+`brokkr sidecar` queries, the marker FIFO, and how the typed measurement
+history in `results.db` and `sidecar.db` still reads. "Stored history"
+explains what is left of the typed commands. "Sidecar" through "Hotpath
+JSON" are the reference for captured data and `brokkr sidecar` queries, and
+"Refusals" lists what they refuse.
 
-## Modes
+## Stored history
 
-Every measurable command is a top-level brokkr subcommand, and the
-measurement mode is a flag after the command name:
+Every project measures through script benches (`brokkr bench NAME`, see
+`brokkr man bench`), which keep their runs in the bench store. No brokkr
+command takes the typed `--bench`, `--hotpath`, `--alloc` or `--stop` mode
+flags any more, and nothing writes `.brokkr/results.db` or
+`.brokkr/sidecar.db`. What earlier typed runs stored there keeps reading:
+`brokkr results` lists and compares those rows, `brokkr sidecar` queries
+their trajectories, and `brokkr invalidate` deletes them.
 
-```sh
-brokkr COMMAND [--bench [N] | --hotpath [N] | --alloc [N]] [OPTIONS]
-```
+A typed row is one best-of-N measurement. Its `mode` column is `bench`,
+`hotpath` or `alloc`, and its `elapsed_ms` is the wall rounded to the
+nearest millisecond, with the exact `elapsed_us` beside it where the run
+knew it. A row's trajectory in sidecar.db shares its id. A run that filed no
+row (a dirty tree, a failed insert, an interrupt) kept its trajectory under
+a random id, and the `dirty` alias resolves to the most recent such one.
 
-The modes are:
+### Iteration walls
 
-- **No flag**: build, run once, print timing. It takes the lockfile and
-  stores nothing in the DB.
-- **`--bench`**: full benchmark. It takes the lockfile, runs 3 times (or N),
-  and stores best-of-N in the DB. All N per-iteration walls are stored too,
-  in execution order (see "Iteration walls").
-- **`--hotpath`**: function-level timing through the hotpath feature, 1 run
-  (or N).
-- **`--alloc`**: per-function allocation tracking through the hotpath-alloc
-  feature, 1 run (or N).
-- **`--stop MARKER`**: kill the child when this FIFO marker is emitted, to
-  benchmark one phase in isolation. The SIGKILL exit counts as success.
-
-`--bench`, `--hotpath` and `--alloc` refuse while a `brokkr serve` server is
-live, since a serving process perturbs the measurement. The refusal comes
-when the measured session starts, under its hold, after any build, and
-`--dry-run` is exempt. See `brokkr man serve`.
-
-Sidecar-enabled subprocess modes sample `/proc` metrics every 100 ms and
-provide `BROKKR_MARKER_FIFO` for phase markers. brokkr stores the sidecar
-data in `.brokkr/sidecar.db` (gitignored), including partial data when a
-measured child is OOM-killed. Results go to `.brokkr/results.db` per project,
-also gitignored.
-
-## Measurable commands
-
-The typed measurable command is mogwai's `mogwai`.
-Every other project measures through script benches (`brokkr bench NAME`),
-which any project can declare.
-
-## Harness
-
-The benchmark harness gives every measured command the same lock, storage and
-measurement loop:
-
-- **Exclusive lock.** Separate brokkr processes exclude each other through
-  the flock: a second process queues until the holder releases, so no two
-  measure, verify or profile at once. Within one brokkr process the lock is
-  re-entrant: a command that
-  invokes another locked command shares its hold.
-- **SQLite result storage** with git commit, hostname and env snapshot.
-- **brokkr's own wall**: every iteration is timed by brokkr, never by a
-  line the child prints. Ties keep the first run.
-- **Evidence kept on failure.** A failed measurement, postprocessing step or
-  row insert keeps what was captured under the `dirty` alias.
-- **Hotpath profiles** come from the iteration the wall ranks best. Missing
-  or invalid profile JSON fails that iteration.
-- **Instrumented builds.** No command accepts `--hotpath` or `--alloc` and
-  runs a plain child: the build adds the mode's instrumentation feature.
-No harness records a distribution (min, p50, p95, max); the retired nidhogg
-`api` bench was its only producer. Its stored rows keep reading (`brokkr man
-results`), from `run_distribution`'s `*_us` columns where they exist and its
-`*_ms` columns otherwise.
-
-The harness sets the mode a row records (`bench`, `hotpath` or `alloc`) once,
-from the request. The same value prints as `mode=` on the `[result]` line and
-goes into the sidecar provenance, so `brokkr sidecar` shows it.
-
-Where brokkr times the child itself (external timing and hotpath capture), it
-keeps the exact wall as `elapsed_us` and picks best-of-N on it. `elapsed_ms`
-is that value rounded to the nearest millisecond, never floored: flooring
-reads every run as up to a millisecond faster than it was. The `[result]`
-line prints `elapsed_ms=` with three decimals whenever the microsecond
-reading exists (`elapsed_ms=6.847`), and as an integer otherwise.
-
-### Dirty trees
-
-A stored mode refuses a dirty measured tree unless you pass `--force`, and
-then warns that results won't be stored. The tree is the build root. So a
-`--commit` worktree is always clean and stores whether or not you passed
-`--force`: `--force` permits a dirty tree, it never decides storage.
-
-On a clean tree, `--force` warns that it has no effect, in every measured
-command. So in an A/B whose baseline is
-`--commit` and whose other arm is a dirty working tree, the output shows which
-arm filed a row.
-
-### A/B with commits
-
-To A/B an uncommitted variant and keep every cell, commit it locally first
-and drop the commit afterwards. Make both arms `--commit`: the baseline
-`--commit PARENT`, the variant `--commit HEAD`. Then every cell stores a row
-with its argv, captured env and provenance, and its sidecar profile under the
-row's id. `brokkr results` lists them, and `brokkr results --compare` pairs
-the arms. The rows keep the hash after the commit is gone.
-
-Both arms as `--commit` is the matched shape. The two builds share these,
-which a live-tree arm doesn't (`brokkr man run`, `--commit`):
-
-- the checkout layout
-- the target-dir isolation policy, each commit its own isolated dir
-- the config ancestry above the build root
-
-A root `Cargo.lock` the commits don't track is seeded into each worktree from
-the live tree's, as read at that arm's admission. Cargo may amend each copy
-to fit its manifests. A variant built in the live tree still stores, but its
-build differs from the baseline's in more than the commit.
-
-For a script bench, `brokkr bench --rounds N --commit PARENT --commit HEAD
-NAME` makes that A/B in one invocation, with the cells interleaved and their
-schedule stored (`brokkr man bench`, Rounds).
-
-A dirty-tree cell that `--force` permits keeps its sidecar profile but has no
-results row. Its id is named only on that run's `[sidecar]` line (see "Run
-output"), and the `dirty` alias reaches only the latest such session.
-
-If the `results.db` insert fails, the `[result]` line still prints,
-unconditionally, since the row can't be looked up later. The sidecar
-trajectory is stored under `dirty` before the error is returned. So a DB
-failure costs the row, not the measurement.
-
-## Run output
-
-Each fact a measured run reports is printed in one place. A run with a clean
-tree prints, in order:
-
-1. With `--alloc`, `[hotpath] NOTE: alloc profiling - wall-clock times are
-   not meaningful` before the iterations, even without `--verbose`.
-2. `[bench] run i/n` before each iteration, only when n > 1, since a single
-   run has nothing to count. Quiet-gated.
-3. The `[result]` line, the one place the wall time appears. It's
-   quiet-gated, except when the row couldn't be stored. A `--hotpath` or
-   `--alloc` run whose row couldn't be stored (a dirty tree, a failed insert)
-   follows it with the per-function report `brokkr results UUID` would have
-   shown (default `--top`), since there's no uuid to ask with. A stored run
-   doesn't print the report.
-4. `[run] results.db a1b2c3d4`, the stored row's short id. It's the one line
-   naming the row, and quiet mode doesn't hide it, since it's how you find
-   the run again (`brokkr results a1b2c3d4`, `brokkr sidecar a1b2c3d4`).
-5. One `[sidecar]` summary line on stderr once the profile is stored,
-   described under "Sidecar summary line".
-
-### Sidecar summary line
-
-The `[sidecar]` line gives the best run's sample, marker and counter counts,
-with `best run k/n:` when there were several (`(sidecar.db)`). The profile
-shares the results row's id, so the line doesn't repeat it, and it's
-quiet-gated.
-
-A trajectory with no results row is filed under the `dirty` alias. Only then
-does the line name its own id (`sidecar.db a1b2c3d4, filed as dirty`). That
-line is then the one place the id appears, so like the `results.db` line,
-quiet mode doesn't hide it; measured runs are quiet unless `--verbose`.
-
-Moving the alias removes nothing: every earlier such session keeps its rows
-under its own id until `brokkr invalidate`. If the alias can't be written, a
-warning says so and the line reads `sidecar.db a1b2c3d4, no results row`. The
-run's outcome is what it would have been: the alias is bookkeeping, not part
-of the measurement. A harness measurement writes its session in one
-transaction after the last iteration. So a storage failure leaves no session
-behind under an id no line named.
-
-### Run log
-
-Some lines go to the run-log channel instead of the console:
-
-- the per-run sidecar attach (`sidecar attached to pid P, run k`,
-  one-indexed like `run i/n`)
-- per-run counts with the child's wall time
-- the `--hotpath` or `--alloc` header naming the target and instrument,
-  since the command line already says both
-
-Every measured run opens a run log for this:
-`.brokkr/check-logs/measure-MS.log` under the config dir. brokkr keeps the
-newest ten, apart from `check`'s and `test`'s logs (see the run log in
-`brokkr man check`).
-
-With `--commit REF`, the worktree's commit is named once (`[run] commit
-abc1234 (subject)`, quiet-gated) by the shared worktree lifecycle, whichever
-command asked for it. Whether the worktree was reused or cut, and the
-isolated target dir the build is pinned to, use the same run-log channel.
-Under a command that keeps no run log (`run` or `verify` with `--commit`),
-they print as quiet-gated `[run]` lines instead, rather than
-vanish. A stale replacement or an eviction is printed.
-
-### Warnings
-
-A non-fatal problem is a `[warn]`, which quiet mode never hides. It isn't an
-`[error]`, and it isn't a `[sidecar]` or `[lock]` narration line. Examples:
-
-- a failed sidecar backup
-- a stale rustc guard
-- a lock-metadata write that degraded
-- a history write that failed
-- a snapshot file that couldn't be removed after a download
-
-History and lock-metadata warnings use stderr without the console render
-lock, so late bookkeeping leaves stdout trailers intact. An unrecognised
-`cargo_profile` in the results DB warns once per distinct value, not once per
-row.
-
-## Iteration walls
-
-`--bench N` reports best-of-N, but stores every iteration's wall in the
-`run_iterations` table (`run_id`, `run_idx`, `elapsed_ms`, `elapsed_us`).
+A `--bench N` row kept every iteration's wall in the `run_iterations` table
+(`run_id`, `run_idx`, `elapsed_ms`, `elapsed_us`), in execution order.
 `brokkr results UUID` renders them like this:
 
 ```text
 elapsed  592200.412 ms (best of 3: 592200.412 / 611400.090 / 634100.733 ms)
 ```
 
-`elapsed_us` is NULL unless the loop measured every iteration in
-microseconds. That happens on the external paths and on hotpath runs when each iteration's result had an `elapsed_us`. The
-walls are kept until the row and sidecar are written together. A list with a
-gap isn't stored at all rather than stored in part, since a partial list
-can't stay aligned with the execution order. Rows without microseconds render
-the integer milliseconds.
+The walls are never sorted, because the order is the signal: iteration 1
+fastest and 3 slowest is drift under the run, iteration 1 slowest is a cold
+page cache on the first pass. `elapsed_us` is NULL unless every iteration
+had a microsecond reading, and rows without microseconds render the integer
+milliseconds. Rows recorded before schema v16 have no iteration data, and
+rows before schema v19 no per-iteration microseconds.
 
-The walls are listed in execution order and never sorted, because the order
-is the signal:
+### prev fields
 
-- iteration 1 fastest, 3 slowest: drift under the run, such as SLC-cache
-  exhaustion on a scratch-heavy cell
-- iteration 1 slowest, 2 and 3 faster: cold page cache on the first pass
-
-Those are opposite diagnoses. So the walls don't live in a min, p50, p95,
-max summary like the stored `run_distribution` rows: sorting the samples
-discards the ordering, and a p50 can't tell the two apart.
-
-Every harness loop collects the walls and attaches them to the best-of-N
-result before recording. One-iteration measurements keep that one wall too.
-Rows recorded before schema v16 have no iteration data: those walls were
-discarded at measure time and can't be reconstructed from `elapsed_ms`. Rows
-recorded before schema v19 have no per-iteration microseconds, for the same
-reason.
-
-## prev fields
-
-Every stored row also records its predecessor as `prev.*` kv pairs:
-`prev.command`, `prev.uuid`, `prev.input_file` and `prev.gap_seconds`. They
-come from the most recent row in the same project's results DB. Dirty runs
-and runs recorded by other projects are outside that store.
-
-`prev.gap_seconds` runs from the previous run's timestamp to the moment this
-run started, not the moment it was recorded. Rows are timestamped when
-inserted, which is when that run finished, and the row is written after the
-last iteration. So reading the clock at record time would count this run's
-own duration as idle time. A 10-minute cell launched straight after its
-predecessor would report a gap of about 10 minutes and look cache-cold. The
-harness stamps the start of its measurement loop to avoid that.
-
-This is the cheapest available proxy for page-cache state. A cell that reads
-the same file its predecessor just read starts warm and reports a wall the
-code didn't earn. `prev.gap_seconds` and `prev.input_file` together usually
-distinguish "this baseline was warm" from "this baseline was fast".
-
-If there's no prior row, no `prev.*` fields are added. A database lookup
-error is surfaced instead of recording a row without its predecessor
-provenance.
+A typed row also recorded its predecessor as `prev.*` kv pairs:
+`prev.command`, `prev.uuid`, `prev.input_file` and `prev.gap_seconds`, from
+the most recent row in the same project's results DB. `prev.gap_seconds`
+runs from the previous run's timestamp to the moment this run started, so
+it's a proxy for page-cache state: together with `prev.input_file` it tells
+"this baseline was warm" from "this baseline was fast".
 
 ## Sidecar
 
 The sidecar profiler samples a measured child's `/proc/PID/stat`,
 `/proc/PID/io` and `/proc/PID/status` every 100 ms and reads phase markers
-from a FIFO. It buffers its data in memory during the run and bulk-inserts it
-into `.brokkr/sidecar.db` (gitignored) after the child exits. The results DB
-(`.brokkr/results.db`) stays small and gitignored.
+from a FIFO. It buffers its data in memory during the run and hands it to
+the script-bench runner after the child exits, which stores it with the run
+in the bench store.
 
 The child gets a `BROKKR_MARKER_FIFO` env var pointing to a named pipe,
 `.brokkr/.sidecar-TOKEN.fifo`, with a fresh 128-bit random token per
-measurement run. `brokkr man clean` says what `brokkr clean` removes.
+measured child. `brokkr man clean` says what `brokkr clean` removes.
 
 Only a child brokkr attaches a FIFO to gets the variable. brokkr drops
 `BROKKR_MARKER_FIFO` and `BROKKR_HARNESS_ARTEFACT_DIR` from its own
@@ -286,7 +70,7 @@ So a brokkr started under another brokkr's sidecar passes that FIFO to none
 of its children, measured or not. Configured environment can still set the
 name explicitly.
 
-Sidecar data is stored even when the child fails: OOM, signal, deadline, or
+Sidecar data is kept even when the child fails: OOM, signal, deadline, or
 non-zero exit (see "Crash preservation").
 
 ## Sidecar queries
@@ -312,11 +96,11 @@ Filter flags `--phase`, `--range` and `--where` compose with `--samples` and
 `--samples`.
 
 A UUID is required except for `--compare`. The `dirty` pseudo-UUID resolves
-to the most recent failed or dirty-tree run (see "Run lifecycle" for how it's
-set), and each earlier one by the id its `[sidecar]` line named. `--bench N`
-stores all N runs in sidecar.db but marks `best_run_idx`, the run whose wall
-clock matched the reported `elapsed_ms`. The default view and `--stat` and
-`--phase` read that best run unless another `run_idx` is selected.
+to the most recent typed run that filed no row (see "Stored history"), and
+each earlier one by its own id. A typed `--bench N` session holds all N runs
+in sidecar.db but marks `best_run_idx`, the run whose wall clock matched the
+reported `elapsed_ms`. The default view and `--stat` and `--phase` read that
+best run unless another `run_idx` is selected.
 
 The UUID argument is a prefix, matched literally (`_` and `%` aren't
 wildcards), and it must name one session. A prefix shared by several sessions
@@ -840,23 +624,20 @@ next tick.
 
 Rows recorded before pidfd exit detection have the tick-quantized wall. It's
 up to one sample interval (100 ms by default) late, always upward, and most
-visible at `--bench 1` on short runs.
+visible on short single-iteration runs.
 
 ### Stop markers
 
-`--stop MARKER` SIGKILLs the whole child process group, so descendants are
+A stop marker SIGKILLs the whole child process group, so descendants are
 reaped too, the moment the marker arrives. That SIGKILL isn't a failure: the
 run is flagged as stopped by marker and records normally, so you can bench
-one phase in isolation.
+one phase in isolation. A script bench asks for one per call (`brokkr man
+bench`).
 
-The results row keeps two facts apart:
-
-- `stop_marker` is the marker that actually fired, shown as `killed at
-  "..."`.
-- `stop_marker_requested` is the `--stop` spelling as given.
-
-A requested stop whose marker never appeared leaves `stop_marker` empty: the
-child ran to its natural end. Rows recorded before schema v20 only ever
+A typed results row kept two facts apart: `stop_marker`, the marker that
+actually fired, shown as `killed at "..."`, and `stop_marker_requested`,
+the `--stop` spelling as given. A requested stop whose marker never
+appeared left `stop_marker` empty. Rows recorded before schema v20 only ever
 stored the request. Their `stop_marker` was moved to `stop_marker_requested`
 and cleared, so whether those stops fired is unknown.
 
@@ -913,8 +694,6 @@ window:
 - each sidecar run
 - a passthrough child
 - every cargo build
-- a measured command's whole run: build, tool materialization, prepare steps
-  and every sample
 - the whole of `check`, `test`, `clippy` and `deps`
 - the other commands that run captured children with no sidecar: `visual`
   and `prepare`
@@ -923,17 +702,17 @@ A loop over such children stops at the first `Interrupted` rather than
 recording it as that step's failure.
 
 Guards nest. The outermost installs and restores the handlers, so an inner
-guard (the sidecar's, inside a measured command's) can neither clear a request
+guard (the sidecar's, inside a script bench's) can neither clear a request
 that already arrived nor uncover the outer window when it drops. A second
 signal while a request is still pending takes the default action, so a wait
 that never polls the flag can't swallow the interrupt. Outside every guard,
 SIGTERM terminates brokkr by default, except that registered test process
 groups are SIGKILLed first.
 
-On a catch in the sidecar window, brokkr kills the child and flushes the
-partial sidecar data under a fresh UUID and the `dirty` alias. The run
-returns `Interrupted`, the runner discards the attempt's own scratch output,
-and brokkr exits 130 (`brokkr man clean after-an-interrupt`).
+On a catch in the sidecar window, brokkr kills the child and keeps the
+partial sidecar data with the run. The run returns `Interrupted`, the runner
+discards the attempt's own scratch output, and brokkr exits 130 (`brokkr man
+clean after-an-interrupt`).
 
 ### Hard kill
 
@@ -956,16 +735,9 @@ parent-death signal, and the orphan reap at the next locked command (see
 
 ### Crash preservation
 
-Sidecar data is stored even when the child is OOM-killed, segfaults, or exits
+Sidecar data is kept even when the child is OOM-killed, segfaults, or exits
 non-zero: the `/proc` trajectory up to the kill is the whole point. This
-holds on every sidecar-enabled harness loop, `--hotpath` and `--alloc`
-included.
-
-Failed and dirty runs get a random UUID and update the `dirty` latest
-pointer. So `brokkr sidecar dirty` and `brokkr results dirty` resolve the
-most recent unstored run, unless that pointer write failed, which is warned
-about. The pointer is all that moves, and an earlier run stays readable by
-its own id.
+holds on every sidecar-observed child, profiled ones included.
 
 The child is also marked as the kernel OOM killer's preferred target, so a
 memory blow-up takes the benchmarked process, not the host.
@@ -974,7 +746,7 @@ memory blow-up takes the benchmarked process, not the host.
 
 Samples, markers, counters and FIFO records have explicit limits. The sample,
 marker and counter budgets apply across all iterations in one measurement, so
-a large `--bench N` request can't multiply the retained trajectory without
+a large iteration count can't multiply the retained trajectory without
 bound. Overlong FIFO records are discarded through their newline without
 growing the temporary line buffer.
 
@@ -996,7 +768,7 @@ When anything is omitted, the run warns naming each cause:
 - the sample limit
 - cut child output
 
-It also stores a truncation flag beside that iteration's sidecar rows, and
+It also stores a truncation flag with that iteration's sidecar data, and
 querying an affected run with `brokkr sidecar` warns that the stored
 trajectory is incomplete.
 
@@ -1014,54 +786,6 @@ child can't block on a full pipe. A captured command that exceeds its limit
 fails with a capture error rather than returning partial bytes to a result
 parser. A sidecar measurement keeps the bounded bytes, marks its trajectory
 incomplete, and fails that iteration when a child stream exceeds its limit.
-
-## Sidecar backups
-
-After each stored run, while the bench lock is still held, brokkr snapshots
-sidecar.db to `$XDG_DATA_HOME/brokkr/sidecar-backups/ROOT_KEY/`, falling back
-to `~/.local/share/...`, with rotation. The default keeps 3 copies:
-`sidecar.db` (newest), `sidecar.db.1` and `sidecar.db.2`.
-
-The rotation is per project root, the directory whose `.brokkr/sidecar.db` is
-copied. So two checkouts of one project (`~/Programs/pbfhogg` and a copy
-under `PRs/`) never evict each other's copies. The root key is the canonical
-root's directory name, cut to 64 bytes, then `-` and a 16-hex-digit hash of
-the canonical path.
-
-Beside the copies, `origin` holds that canonical path and asserts ownership.
-A backup refuses in these cases:
-
-- its root doesn't match `origin`
-- the directory holds copies but no `origin`; restore the file or move the
-  directory aside
-- a slot or `origin` isn't a regular file (a symlink, say)
-
-A refusal is a backup failure: warned, the copies untouched. A moved or
-renamed checkout starts a new rotation and the old one stays, named by its
-`origin`. Nothing prunes these; `brokkr env` reports their size.
-
-A per-kind layout (`KIND-sidecar.db`, `.1`, `.2` directly under
-`sidecar-backups/`, shared by every checkout of the kind) is left alone,
-since one copy may be the only copy of a checkout that's gone. Each backup of
-that kind removes only its unfinished staging file,
-`.KIND-sidecar.db.partial`.
-
-### Crash safety
-
-No crash leaves a partial primary. The backup runs these steps:
-
-1. SQLite's online backup API writes a self-contained DELETE-journal copy to
-   a temp file, and runs `quick_check`.
-2. Older copies shift (`.1` to `.2`), and the current primary is hard-linked
-   to `.1`.
-3. The temp file is fsynced, atomically renamed into the primary slot, and
-   the directory fsynced.
-
-A failure before the final rename leaves the existing primary intact. The
-rotation isn't one transaction: a crash mid-rotation can lose a retention
-slot. The directory fsync is best effort. A failure of it is warned about
-(one the filesystem refuses outright isn't), and the backup still counts as
-made. A backup failure is logged but **non-fatal** to the run.
 
 ## Hotpath JSON
 
@@ -1087,16 +811,14 @@ brokkr sets these env vars on hotpath child processes:
 
 ## Refusals
 
-The table lists what a measured run and `brokkr sidecar` refuse, with the
-text brokkr prints after `[error]`. Words in capitals stand for values brokkr
-fills in. The lock's own refusals, a brokkr started beneath the lock holder
-included, are under "Refusals" in `brokkr man hygiene`.
+The table lists what `brokkr sidecar` refuses, with the text brokkr prints
+after `[error]`. Words in capitals stand for values brokkr fills in. What a
+script bench refuses is in `brokkr man bench`, and the lock's own refusals,
+a brokkr started beneath the lock holder included, are under "Refusals" in
+`brokkr man hygiene`.
 
 | Message | Cause | Fix |
 |---|---|---|
-| `a --MODE run refuses while 1 serve is outstanding - a serving process perturbs measurements:` | A `brokkr serve` server is live; the line lists each one (see "Modes"). A script bench and a criterion run refuse the same way. | Stop each listed serve with `brokkr serve --stop NAME`, then rerun. |
-| `a --MODE run refuses inside a served program (this process carries BROKKR_SERVE)` | The measurement was started from inside a program `brokkr serve` runs. | Run the measurement from outside the served program. |
-| `preflight failed:` then `dirty tree - commit or stash changes before benchmarking` | A stored mode found uncommitted changes in the build root (see "Dirty trees"). | Commit or stash, measure a `--commit REF`, or pass `--force` to run without storing. |
 | `config: uuid prefix 'PREFIX' is ambiguous - it matches N runs:` | The prefix names several sessions, typed or script bench (see "Sidecar queries"). | Pass a longer prefix from the listed candidates. |
 | `config: empty uuid prefix would match every row - give at least one character` | The UUID argument was empty or blank. | Pass at least one character of the run id. |
 | `script-bench run ID belongs to project NAME` | The prefix names only another project's bench run. | Run `brokkr sidecar` from that project. |

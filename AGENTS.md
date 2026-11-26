@@ -26,17 +26,17 @@ The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bar
 - `docs/commands/test.md`, `clippy.md`, `deps.md`, `crit.md`, `run.md` (also `build`, `install`), `serve.md`, `clean.md`, `results.md` - those commands.
 - `docs/commands/fstrim.md` - `brokkr fstrim`: sync and trim under the lock, and the root-owned `brokkr-fstrim` helper it runs. Read before changing `src/fstrim.rs` or `src/bin/fstrim_helper.rs`.
 - `docs/commands/bench.md` - `brokkr bench NAME`: running a script bench, its builtins, what a run stores.
-- `docs/commands/measure.md` - `--bench`/`--hotpath`/`--alloc`/`--stop`, the sidecar profiler, `brokkr sidecar`.
+- `docs/commands/measure.md` - the sidecar profiler, the marker FIFO, `brokkr sidecar`, and the read-only typed history.
 - `docs/commands/output-channels.md` - where a run's output goes.
 - `reference/bench-store.md` - the store of script-bench runs and the results server wire contract. Read before changing `src/bench/store/`.
 - `reference/results-server.md` - how `brokkr-results-server` is built. Read before changing `src/bin/results_server/`. Running it: `docs/results-server.md`.
-- `reference/measure-harness.md` - how the typed measurement harness is built: `BenchHarness`, the measurement loop, recording, the child supervisor and sidecar internals. Read before changing `src/measure/`, `src/harness.rs` or `src/sidecar.rs`.
+- `reference/measure-harness.md` - the child supervisor, sidecar internals and the test-only writers of the typed history. Read before changing `src/sidecar.rs` or the writers in `src/db/`.
 - `reference/bench-resources.md` - what a script-bench iteration owns: leases, admission, handles, placement. Read before changing `src/reservations/iteration.rs` or `src/bench/resources.rs`.
 - `reference/clean.md` - clean's ownership rule, disk gate, store maintenance and worktree purge. Read before changing `src/clean.rs` or `src/clean/`.
 - `reference/crit.md` - crit's design decisions and the failure each prevents. Read before changing `src/crit_cmd/`.
 - `reference/deps.md` - deps internals: phase model, metadata graph, ccu shell-out, publish-cycle walk. Read before changing `src/deps/`.
 - `docs/commands/visual.md` - project-specific commands.
-- `reference/visual-projects.md`, `reference/mogwai.md` - internals of those projects' commands. Read before changing `src/visual/`, `src/litehtml/`, `src/sluggrs/` or `src/mogwai/`.
+- `reference/visual-projects.md` - internals of the visual projects' commands. Read before changing `src/visual/`, `src/litehtml/` or `src/sluggrs/`.
 - `docs/projects/*.md` - per-project commands and internals; pbfhogg uses script benches and generic commands.
 
 ## Architecture
@@ -48,9 +48,9 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `src/config.rs`, `src/config_parts/` - config schema, composition, project sections.
 - `src/output/` - console and child-process runners; every spawn goes through `process/spawn.rs`'s `ChildPolicy`.
 - `src/lock/`, `src/hold.rs`, `src/guard.rs`, `src/stray.rs`, `src/test_orphans.rs` - the global lock, compile capability, rustc guard and reapers.
-- `src/measure/`, `src/harness.rs`, `src/db/`, `src/sidecar.rs` - measurement and result stores; `src/bench/store/` is the per-user store of script-bench runs, served over HTTP by `src/bin/results_server/` and reached by `src/bench/remote.rs`.
+- `src/db/`, `src/sidecar.rs` - the sidecar profiler and the read-only typed result stores; `src/bench/store/` is the per-user store of script-bench runs, served over HTTP by `src/bin/results_server/` and reached by `src/bench/remote.rs`.
 - `src/bench/` - script benches: `runner/` runs `brokkr bench NAME`, `lua.rs` is the only seam to the dellingr VM.
-- `src/<project>/` - project-specific commands (pbfhogg, elivagar, nidhogg and ratatoskr have no typed command module).
+- `src/<project>/` - project-specific commands (only the visual projects have one).
 
 ## Shared commands quick reference
 
@@ -64,7 +64,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `fstrim [PATH...]` - sync and trim filesystems under the lock, through the installed helper.
 - `sidecar <uuid>` - sidecar profiler data.
 - `fmt` - locked `cargo fmt` wrapper.
-- Project-specific: `mogwai` - see the project docs.
+- Project-specific: the visual commands - see `docs/commands/visual.md`.
 
 ## Conventions
 

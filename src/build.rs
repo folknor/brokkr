@@ -187,7 +187,7 @@ impl Default for BuildKind {
 
 impl BuildKind {
     /// The human-facing label: a custom profile renders as its bare name.
-    /// Never written to a store - see [`Self::to_stored`].
+    /// Never written to a store - see `Self::to_stored`.
     pub fn as_label(&self) -> &str {
         match self {
             Self::Cargo(profile) => profile.label(),
@@ -198,6 +198,7 @@ impl BuildKind {
 
     /// The value written to a store's profile column. Built-ins keep their
     /// legacy spelling; a custom profile is `cargo:<name>`.
+    #[cfg(test)]
     pub fn to_stored(&self) -> String {
         match self {
             Self::Cargo(RustProfile::Named(name)) => {
@@ -246,14 +247,8 @@ pub struct BuiltArtifact {
     pub features: Vec<String>,
     /// Cargo target name reported with the executable artifact.
     pub target: String,
-    /// The directory cargo ran in: what decides the config chain the build
-    /// read, and so its host-side provenance (`crate::build_provenance`).
-    pub build_root: PathBuf,
-    /// Cargo's resolved profile for this executable, from its
-    /// compiler-artifact record ([`crate::build_provenance::unit_pairs`]).
-    pub unit_profile: Vec<(String, String)>,
-    /// The features cargo resolved for the executable's unit, from the same
-    /// record, in cargo's order.
+    /// The features cargo resolved for the executable's unit, from its
+    /// compiler-artifact record, in cargo's order.
     pub unit_features: Vec<String>,
 }
 
@@ -644,8 +639,6 @@ fn cargo_build_inner(
         profile,
         features: config.features.clone(),
         target: executable.target,
-        build_root: project_root.to_path_buf(),
-        unit_profile: executable.unit_profile,
         unit_features: executable.features,
     };
 

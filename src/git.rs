@@ -211,8 +211,6 @@ pub fn commit_subject(repo: &Path, commit: &Commit) -> Result<String, DevError> 
 pub struct GitInfo {
     /// `HEAD`'s fixed-width abbreviation.
     pub commit: ShortCommit,
-    /// First line of the commit message.
-    pub subject: String,
     /// True when the tree is clean under the measurement policy.
     pub is_clean: bool,
 }
@@ -226,14 +224,12 @@ pub(crate) fn collect_with_config_paths(
     included_config_files: &[std::path::PathBuf],
 ) -> Result<GitInfo, DevError> {
     let commit = read_commit_hash(workspace_root)?.short();
-    let subject = read_commit_subject(workspace_root)?;
     // Git failures keep the old conservative behavior: unknown is not clean.
     let is_clean = TreeState::read_for_measurement(workspace_root, included_config_files)
         .is_some_and(|state| !state.for_measurement());
 
     Ok(GitInfo {
         commit,
-        subject,
         is_clean,
     })
 }
@@ -263,26 +259,4 @@ fn read_commit_hash(workspace_root: &Path) -> Result<Commit, DevError> {
         .map_err(|error: String| {
             DevError::Config(format!("git returned an invalid HEAD commit id: {error}"))
         })
-}
-
-fn read_commit_subject(workspace_root: &Path) -> Result<String, DevError> {
-    let output = crate::output::child::command_output(
-        crate::process::spawn::ChildPolicy::plain_command("git")
-            .args(["log", "-1", "--format=%s"])
-            .current_dir(workspace_root),
-    )
-    .map_err(|error| DevError::Spawn {
-        program: "git".to_owned(),
-        error,
-    })?;
-
-    if !output.status.success() {
-        return Err(DevError::Subprocess {
-            program: "git".to_owned(),
-            ending: crate::error::ProcessEnding::from_status(&output.status),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        });
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }

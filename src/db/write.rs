@@ -2,10 +2,13 @@
 
 use super::ResultsDb;
 use super::run_store::RunId;
+#[cfg(test)]
 use super::schema::INSERT_SQL;
+#[cfg(test)]
 use super::types::{
     HotpathData, KvClass, KvKey, KvPair, KvValue, Quantity, RunRow, canonical_cargo_features,
 };
+#[cfg(test)]
 use super::{generate_uuid, short_uuid};
 use crate::error::DevError;
 
@@ -45,6 +48,7 @@ impl ResultsDb {
     }
 
     /// Insert a benchmark result row. Returns `(full_uuid, short_uuid)`.
+    #[cfg(test)]
     pub fn insert(&self, row: &RunRow) -> Result<(String, String), DevError> {
         let uuid = generate_uuid()?;
         let tx = self.conn.unchecked_transaction()?;
@@ -59,6 +63,7 @@ impl ResultsDb {
 // Helpers
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result<String, DevError> {
     // Store one stable spelling regardless of whether the feature list came
     // from a host config, a request, or a per-row variant.
@@ -149,6 +154,7 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
 
 /// The `run_iterations` child rows. No row carries a `run_distribution`
 /// summary any more; the stored ones keep reading and deleting.
+#[cfg(test)]
 fn insert_iterations(
     conn: &rusqlite::Connection,
     run_id: i64,
@@ -172,6 +178,7 @@ fn insert_iterations(
 
 /// The hotpath child rows, plus the thread summary into `run_kv`.
 #[allow(clippy::too_many_lines)]
+#[cfg(test)]
 fn insert_hotpath(
     conn: &rusqlite::Connection,
     run_id: i64,
@@ -293,6 +300,7 @@ fn insert_hotpath(
     Ok(())
 }
 
+#[cfg(test)]
 fn insert_typed_hotpath_metric(
     conn: &rusqlite::Connection,
     table: &str,
@@ -317,6 +325,7 @@ fn insert_typed_hotpath_metric(
 
 /// What a pair does when its `(run_id, key)` is already in `run_kv`.
 #[derive(Clone, Copy)]
+#[cfg(test)]
 enum OnConflict {
     /// Overwrite: the later pair wins.
     Replace,
@@ -324,6 +333,7 @@ enum OnConflict {
     Ignore,
 }
 
+#[cfg(test)]
 fn insert_kv_row(
     conn: &rusqlite::Connection,
     run_id: i64,
@@ -348,6 +358,7 @@ fn insert_kv_row(
     insert_kv_value(conn, run_id, kv, on_conflict)
 }
 
+#[cfg(test)]
 fn insert_kv_value(
     conn: &rusqlite::Connection,
     run_id: i64,

@@ -25,14 +25,13 @@
 //!    one is live a [`GroupReaper`] handler SIGKILLs it and re-raises, so
 //!    brokkr still dies by the signal.
 //! 3. The sidecar loop polls [`is_shutdown_requested`] on every sample tick
-//!    (alongside `try_wait` and the `--stop` marker check). When set, it
+//!    (alongside `try_wait` and the stop marker check). When set, it
 //!    `SIGKILL`s the child and breaks out of the loop with
 //!    `stopped_by_signal = true`.
-//! 4. `run_external` propagates that up as [`crate::error::DevError::Interrupted`]
-//!    after saving the partial sidecar data under the `dirty` alias. The
-//!    measured runner (`crate::measure`) discards the interrupted
-//!    attempt's own scratch output as it unwinds, still under the command's
-//!    hold, and `main` exits 130.
+//! 4. The script-bench runner propagates that up as
+//!    [`crate::error::DevError::Interrupted`], keeping the partial sidecar
+//!    data, discards the interrupted attempt's own scratch output as it
+//!    unwinds, still under the command's hold, and `main` exits 130.
 //!
 //! A committed stop also closes the launch gate ([`launch_gate`]), memory
 //! shared with every forked child, which `crate::process::spawn` checks in the

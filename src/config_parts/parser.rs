@@ -2702,21 +2702,6 @@ fn validate_polygon_name(name: &str) -> Result<(), String> {
 // Host features
 // ---------------------------------------------------------------------------
 
-/// Walk brokkr's own environment and return an `env.<NAME> = <value>`
-/// [`crate::db::KvPair`] for every variable that matches one of the
-/// `capture_env` patterns in `config`. Each pattern is either an exact
-/// name (`MALLOC_CONF`) or a `PREFIX*` glob; the trailing `*` is the
-/// only supported wildcard. Patterns are validated at
-/// `parse_capture_env` time, so a pattern reaching this point is
-/// known-good. Returns an empty vec when `capture_env` is empty.
-///
-/// The capture runs on brokkr's inherited env, so a user invocation like
-/// `PBFHOGG_USE_NEW_PATH=1 brokkr apply-changes --bench` records that
-/// var without any per-command plumbing.
-pub fn captured_env_pairs(config: &DevConfig) -> Vec<crate::db::KvPair> {
-    captured_env_pairs_from(config, std::env::vars())
-}
-
 /// The variables `capture_env` selects from brokkr's own environment, by
 /// name, unredacted: a script-bench run's captured environment, which the
 /// caller redacts before storing it.
@@ -2724,29 +2709,6 @@ pub fn captured_env_map(config: &DevConfig) -> std::collections::BTreeMap<String
     std::env::vars()
         .filter(|(name, _)| matches_capture(name, &config.capture_env))
         .collect()
-}
-
-/// Build the captured environment snapshot from an explicit iterator. The
-/// public wrapper above uses the inherited process environment, while keeping
-/// the selection and sorting logic independently injectable.
-fn captured_env_pairs_from(
-    config: &DevConfig,
-    vars: impl IntoIterator<Item = (String, String)>,
-) -> Vec<crate::db::KvPair> {
-    if config.capture_env.is_empty() {
-        return Vec::new();
-    }
-    let mut out: Vec<crate::db::KvPair> = Vec::new();
-    for (name, value) in vars {
-        if matches_capture(&name, &config.capture_env) {
-            out.push(crate::db::KvPair::text(
-                crate::db::KvKey::environment(name),
-                value,
-            ));
-        }
-    }
-    out.sort_by(|a, b| a.key.cmp(&b.key));
-    out
 }
 
 fn matches_capture(name: &str, patterns: &[String]) -> bool {

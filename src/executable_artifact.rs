@@ -34,8 +34,6 @@ pub(crate) struct CargoExecutableArtifact {
     pub(crate) path: PathBuf,
     /// The record's `target.name`.
     pub(crate) target: String,
-    /// The record's `profile` object, as [`crate::build_provenance::unit_pairs`].
-    pub(crate) unit_profile: Vec<(String, String)>,
     /// The record's `features`: what cargo resolved for this unit.
     pub(crate) features: Vec<String>,
 }
@@ -228,9 +226,6 @@ fn parse(stdout: &[u8]) -> Result<Vec<Record>, DevError> {
             artifact: CargoExecutableArtifact {
                 path: PathBuf::from(exe),
                 target: name.to_owned(),
-                unit_profile: profile
-                    .map(crate::build_provenance::unit_pairs)
-                    .unwrap_or_default(),
                 features,
             },
         });

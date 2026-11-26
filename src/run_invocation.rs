@@ -24,7 +24,7 @@
 //!   are the same program to the user.
 //!
 //! Only brokkr's own options leave. The tokens clap assigned to the command's
-//! trailing positional (`brokkr mogwai TARGET ARGS...`, the argv brokkr
+//! trailing positional (`brokkr run NAME ARGS...`, the argv brokkr
 //! forwards to the child) are values, never brokkr options, so they stay
 //! verbatim whatever they spell: a child's `-v`, `--commit X` or `--bench 3`
 //! asks for different work. That tail is a suffix of the argv (`trailing_var_arg`

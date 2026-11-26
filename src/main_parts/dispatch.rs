@@ -2,7 +2,7 @@
 
 use super::bootstrap::{
     ServeRequest, WithTarget, require_detection, run_build, run_check, run_clippy, run_deps,
-    run_fmt, run_install, run_man, run_measured, run_program, run_serve, run_wc,
+    run_fmt, run_install, run_man, run_program, run_serve, run_wc,
 };
 use crate::clean::CleanOpts;
 use crate::clean::{cargo_clean_package, cmd_clean};
@@ -17,8 +17,7 @@ use crate::project::Project;
 use crate::request::{ResultsQuery, SidecarQuery};
 use crate::visual_approve_cmd::cmd_approve;
 use crate::{
-    check_cmd, cli, context, crit_cmd, history_cmd, invalidate_cmd, litehtml, lockfile, mogwai,
-    output, project, results_cmd, runnables, sidecar_cmd, sluggrs, test_cmd,
+    check_cmd, cli, context, crit_cmd, history_cmd, invalidate_cmd, litehtml, lockfile, output, project, results_cmd, runnables, sidecar_cmd, sluggrs, test_cmd,
 };
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
@@ -399,7 +398,7 @@ pub(super) fn run(
             lib,
             detection,
         ),
-        _ => run_project(cli.command, require_detection(detection)?, invocation),
+        _ => run_project(cli.command, require_detection(detection)?),
     }
 }
 
@@ -430,7 +429,6 @@ fn with_target(program: &cli::ProgramArgs) -> Option<WithTarget<'_>> {
 fn run_project(
     command: Command,
     detection: &project::Detection,
-    invocation: &crate::db::RunInvocation,
 ) -> Result<(), DevError> {
     let project = &detection.project;
     let dev_config = &detection.config;
@@ -474,16 +472,6 @@ fn run_project(
             &detection.build_root,
             &detection.config_sources,
         ),
-        // ----- mogwai commands -----
-        // brokkr does not know what a mogwai surface reads. An input the argv
-        // names is captured verbatim with it; one the surface defaults
-        // internally is named nowhere in the row.
-        Command::Mogwai(cli::MogwaiCmd { mode, target, args }) => {
-            run_measured(&mode, detection, invocation, |req| {
-                mogwai::cmd::run(req, target.as_deref(), &args)
-            })
-        }
-
         Command::Passthrough(cli::PassthroughCmd {
             features,
             time,

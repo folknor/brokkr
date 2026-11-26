@@ -121,12 +121,12 @@ mod visibility_tests {
         ));
     }
 
-    /// `Other("mogwai")` is a foreign repo that happens to call itself
-    /// mogwai in its own brokkr.toml - it is NOT `Project::Mogwai` and
-    /// must not be handed mogwai's project-specific commands.
+    /// `Other("litehtml")` is a foreign repo that happens to call itself
+    /// litehtml in its own brokkr.toml - it is NOT `Project::Litehtml` and
+    /// must not be handed litehtml's project-specific commands.
     #[test]
     fn other_does_not_impersonate_a_builtin() {
-        assert!(visible_in("mogwai", &Project::Mogwai));
-        assert!(!visible_in("mogwai", &Project::Other("mogwai".into())));
+        assert!(visible_in("prepare", &Project::Litehtml));
+        assert!(!visible_in("prepare", &Project::Other("litehtml".into())));
     }
 }

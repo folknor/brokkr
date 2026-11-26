@@ -288,6 +288,7 @@ fn drop_summary_payload(conn: &rusqlite::Connection) -> Result<(), DevError> {
 
 /// The stored spelling of a run's ending: `exited:N`, `signal:N`,
 /// `deadline:MS`, `stop_marker:NAME`, `interrupted`, `wait_failed:WHY`.
+#[cfg(test)]
 fn encode_ending(ending: &Ending) -> String {
     match ending {
         Ending::Exited(code) => format!("exited:{code}"),
@@ -319,6 +320,7 @@ fn decode_ending(text: &str) -> Option<Ending> {
 
 /// The legacy integer column, still written so older brokkr versions reading
 /// this database see what they always saw: the exit code, or `128 + signal`.
+#[cfg(test)]
 fn legacy_exit_code(ending: &Ending) -> Option<i32> {
     match ending {
         Ending::Exited(code) => Some(*code),
@@ -408,6 +410,7 @@ impl SidecarDb {
     /// nothing announced. Sidecar rows share the durable lifetime of
     /// results; only an explicit `invalidate` removes them, so the store has
     /// no age-based pruning.
+    #[cfg(test)]
     pub(crate) fn store_session(
         &self,
         result_uuid: &str,
@@ -425,6 +428,7 @@ impl SidecarDb {
 }
 
 /// A session's metadata as [`SidecarDb::store_session`] writes it.
+#[cfg(test)]
 pub(crate) struct SessionMeta<'a> {
     pub(crate) best_run_idx: usize,
     pub(crate) total_runs: usize,
@@ -432,6 +436,7 @@ pub(crate) struct SessionMeta<'a> {
     pub(crate) sidecar_only: bool,
 }
 
+#[cfg(test)]
 fn write_meta(
     conn: &rusqlite::Connection,
     result_uuid: &str,
@@ -480,6 +485,7 @@ fn write_meta(
 
 /// One run's samples and records, inside the caller's transaction.
 #[allow(clippy::cast_possible_wrap, clippy::too_many_lines)]
+#[cfg(test)]
 fn insert_run(
     tx: &rusqlite::Connection,
     result_uuid: &str,
@@ -612,7 +618,7 @@ fn insert_run(
         rusqlite::params![
             result_uuid,
             run_idx as i64,
-            if data.stored_incomplete() {
+            if data.summary.loss.any() {
                 1_i64
             } else {
                 0_i64
@@ -744,6 +750,7 @@ impl SidecarDb {
     /// dirty/failed run, even though each run gets a unique UUID. It moves
     /// only the pointer: every earlier session keeps its rows and its own
     /// id, so nothing is lost when the alias moves on.
+    #[cfg(test)]
     pub fn set_latest(&self, key: &str, uuid: &str) -> Result<(), DevError> {
         self.conn.execute(
             "INSERT OR REPLACE INTO sidecar_latest (key, uuid) VALUES (?1, ?2)",
@@ -1048,6 +1055,7 @@ impl SidecarDb {
 ///
 /// The destination is opened in DELETE journal mode (no WAL side files),
 /// so the backup is a single restorable file. Returns `Ok(())` on success.
+#[cfg(test)]
 pub fn backup_to_path(src: &Path, dst: &Path) -> Result<(), DevError> {
     let src_conn =
         rusqlite::Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -1348,7 +1356,6 @@ mod tests {
                 stream_drops: u64::MAX,
                 run_idx: 0,
             }],
-            fired_stop_marker: None,
             ending: Ending::Exited(0),
             summary: crate::sidecar::SidecarSummary {
                 loss: crate::sidecar::CaptureLoss::default(),

@@ -1,13 +1,13 @@
 //! `ProjectConfig`: the one project-owned section a config may hold.
 //!
 //! Load rejects a known project section when `project` names another
-//! project, and the litehtml-rs, sluggrs and mogwai parsers require their
-//! section. `[dellingr]`, `[piners]` and `[ratatoskr]` are retired with their
+//! project, and the litehtml-rs and sluggrs parsers require their section.
+//! `[dellingr]`, `[mogwai]`, `[piners]` and `[ratatoskr]` are retired with their
 //! commands: a matching project gets a warning, and the table loads
 //! unvalidated and stays in the composed config a script sees. `[pbfhogg]` is
-//! an ordinary host-name section, not a project section. `Detection` and
-//! `MeasureRequest` hold the parsed variant, so handlers match on it instead
-//! of re-checking presence.
+//! an ordinary host-name section, not a project section. `Detection` holds
+//! the parsed variant, so handlers match on it instead of re-checking
+//! presence.
 
 pub mod dellingr;
 pub mod litehtml;
@@ -23,7 +23,6 @@ use crate::project::Project;
 pub enum ProjectConfig {
     Litehtml(litehtml::LitehtmlConfig),
     Sluggrs(sluggrs::SluggrsConfig),
-    Mogwai(mogwai::MogwaiConfig),
     Generic,
 }
 
@@ -47,7 +46,10 @@ impl ProjectConfig {
                 self::dellingr::note_retired(table);
                 Ok(Self::Generic)
             }
-            Project::Mogwai => Ok(Self::Mogwai(mogwai::parse(table)?)),
+            Project::Mogwai => {
+                self::mogwai::note_retired(table);
+                Ok(Self::Generic)
+            }
             _ => Ok(Self::Generic),
         }
     }

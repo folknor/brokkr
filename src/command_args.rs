@@ -1,5 +1,5 @@
 //! Shared command argument resolution.
-use crate::{cli, config, error::DevError, measure};
+use crate::{config, error::DevError};
 
 pub(crate) fn profile_override(debug: bool, release: bool) -> Option<bool> {
     if debug {
@@ -51,16 +51,4 @@ pub(crate) fn resolve_features(
         }
     }
     merged
-}
-
-pub(crate) fn resolve_mode(mode: &cli::ModeArgs) -> measure::MeasureMode {
-    if let Some(runs) = mode.bench {
-        measure::MeasureMode::Bench { runs }
-    } else if let Some(runs) = mode.hotpath {
-        measure::MeasureMode::Hotpath { runs }
-    } else if let Some(runs) = mode.alloc {
-        measure::MeasureMode::Alloc { runs }
-    } else {
-        measure::MeasureMode::Run
-    }
 }

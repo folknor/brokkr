@@ -1,9 +1,8 @@
 //! Monitoring sidecar that runs alongside benchmark processes.
 //!
 //! Samples `/proc/{pid}/*` at fixed intervals, reads application phase markers
-//! from a FIFO, and hands everything back to the harness, which stores it in
-//! SQLite after the child exits. Nothing is written during the benchmark
-//! itself. Measured modes always run it.
+//! from a FIFO, and hands everything back to the script-bench runner after
+//! the child exits. Nothing is written during the benchmark itself.
 //!
 //! # Capture
 //!
@@ -20,8 +19,7 @@
 //! can't starve the supervisor's deadline and shutdown checks.
 //!
 //! A run is supervision ([`supervise_sidecar`], ending in an [`OpenCapture`])
-//! and a finish that closes the capture. The typed paths call both back to
-//! back ([`run_sidecar_with_deadline`]). A script-bench call pumps the open
+//! and a finish that closes the capture. A script-bench call pumps the open
 //! capture while its borrow's release waits, and finishes only once no holder
 //! is left.
 //!
@@ -38,8 +36,8 @@
 //!
 //! # Deadlines
 //!
-//! [`run_sidecar_with_deadline`] kills the child's process group once it has
-//! run longer than the given limit, and the run records `Ending::Deadline`.
+//! [`supervise_sidecar`] kills the child's process group once it has run
+//! longer than the given limit, and the run records `Ending::Deadline`.
 //!
 //! # Pipe draining
 //!
@@ -93,8 +91,6 @@ pub(crate) const MARKER_FIFO_ENV: &str = "BROKKR_MARKER_FIFO";
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MeasurementTunables {
     pub sample_interval: Duration,
-    pub sidecar_backup_copies: usize,
-    pub hotpath_report_filename: &'static str,
     /// Maximum profile samples retained across every run in one measurement.
     pub max_samples: usize,
     /// Maximum phase markers retained across every run in one measurement.
@@ -107,9 +103,6 @@ pub(crate) struct MeasurementTunables {
 
 pub(crate) const DEFAULT_MEASUREMENT_TUNABLES: MeasurementTunables = MeasurementTunables {
     sample_interval: Duration::from_micros(100_000),
-    // A bounded recovery history: the current snapshot plus two prior copies.
-    sidecar_backup_copies: 3,
-    hotpath_report_filename: "hotpath-report.json",
     max_samples: 100_000,
     max_markers: 10_000,
     max_counters: 20_000,
@@ -190,6 +183,7 @@ macro_rules! define_sample {
                 ]
             }
 
+            #[cfg(test)]
             pub(crate) fn db_values(&self) -> Vec<rusqlite::types::Value> {
                 vec![
                     rusqlite::types::Value::Integer(i64::from(self.sample_idx)),
@@ -905,12 +899,10 @@ pub struct SidecarData {
     pub(crate) calls_seen: CallCensus,
     /// Each library call's boundaries and its sink's own account, from its
     /// call document; empty for every other capture, whose call streams have
-    /// no known boundary.
+    /// no known boundary. Read only by the test writer that seeds sidecar.db
+    /// for its readers.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) calls: Vec<CallSpan>,
-    /// Marker that actually ended the child, if a configured stop marker hit.
-    /// This is `None` when the child exited naturally, even if a stop was
-    /// requested.
-    pub fired_stop_marker: Option<String>,
     /// The termination cause assigned by the child supervisor.
     pub ending: Ending,
     pub summary: SidecarSummary,
@@ -925,7 +917,6 @@ impl SidecarData {
             records,
             calls_seen: CallCensus::default(),
             calls: Vec::new(),
-            fired_stop_marker: None,
             ending: Ending::Exited(0),
             summary: SidecarSummary {
                 loss: CaptureLoss::default(),
@@ -934,28 +925,6 @@ impl SidecarData {
         }
     }
 
-    /// The phase markers, in arrival order.
-    pub(crate) fn markers(&self) -> impl Iterator<Item = &Marker> {
-        self.records.iter().filter_map(|r| match r {
-            Record::Marker(m) => Some(m),
-            _ => None,
-        })
-    }
-
-    /// The ordinary counters, in arrival order.
-    pub(crate) fn counters(&self) -> impl Iterator<Item = &Counter> {
-        self.records.iter().filter_map(|r| match r {
-            Record::Counter(c) => Some(c),
-            _ => None,
-        })
-    }
-
-    /// Whether the stored trajectory omits anything the capture saw: a
-    /// capture loss. Every kept record, sealing and terminal records
-    /// included, has a place in sidecar.db.
-    pub(crate) fn stored_incomplete(&self) -> bool {
-        self.summary.loss.any()
-    }
 }
 
 /// One library call's boundaries, from its call document (`brokkr man
@@ -997,13 +966,9 @@ pub(crate) enum SinkEndKind {
 
 /// Result of a sidecar-monitored child process run.
 ///
-/// Contains bounded captured output with per-stream completeness flags, the
-/// child's ending and wall-clock time, and the sidecar profile data.
+/// Contains the child's wall-clock time and the sidecar profile data; a
+/// truncated output stream is a capture loss in the data's summary.
 pub struct SidecarRunResult {
-    pub stderr: Vec<u8>,
-    pub stdout_truncated: bool,
-    pub stderr_truncated: bool,
-    pub output_cut: bool,
     pub elapsed: Duration,
     /// The child's capture interval on its own (boot) clock.
     pub boot: ChildBoot,
@@ -1342,6 +1307,7 @@ impl SidecarFifo {
     /// line the last child left. (A FIFO's EOF is not permanent: a later
     /// writer would be read on the old end too.) The new end opens before
     /// the old one closes, so the FIFO never lacks a reader (`namespace`).
+    #[cfg(test)]
     pub(crate) fn reopen(&mut self) -> Result<(), DevError> {
         let file = Self::open_read_end(&self.path)?;
         self.reader = BufReader::new(file);
@@ -1638,15 +1604,9 @@ fn monotonic_ns() -> i64 {
 // Sidecar loop
 // ---------------------------------------------------------------------------
 
-/// A parsed `--stop` request. Resolve the spelling once before entering the
-/// sidecar loop, then compare each fresh FIFO drain against the requested name.
+/// How a stop request matches: an explicit marker name, such as `FOO_END`.
 enum StopSpec {
-    /// An explicit marker name, such as `FOO_END`.
     Exact(String),
-    /// The span-close spelling `-FOO`, resolved to `FOO_END`.
-    SpanEnd(String),
-    /// A bare name such as `FOO`: prefer a verbatim marker, then `FOO_END`.
-    Lenient { exact: String, span_end: String },
 }
 
 /// What ends a supervised child at a marker: the name as asked for, for
@@ -1657,15 +1617,6 @@ pub(crate) struct StopRequest {
 }
 
 impl StopRequest {
-    /// `--stop`'s spellings: `FOO_END`, `-FOO`, or a bare `FOO` that prefers
-    /// a verbatim marker and falls back to `FOO_END`.
-    pub(crate) fn spelled(raw: &str) -> Self {
-        Self {
-            requested: raw.to_owned(),
-            spec: StopSpec::parse(raw),
-        }
-    }
-
     /// Exactly the marker `name`, a span end or a point marker alike.
     pub(crate) fn exact(name: &str) -> Self {
         Self {
@@ -1676,28 +1627,10 @@ impl StopRequest {
 }
 
 impl StopSpec {
-    fn parse(raw: &str) -> Self {
-        if let Some(suffix) = raw.strip_prefix('-') {
-            return Self::SpanEnd(format!("{suffix}_END"));
-        }
-        if raw.ends_with("_END") {
-            return Self::Exact(raw.to_owned());
-        }
-        Self::Lenient {
-            exact: raw.to_owned(),
-            span_end: format!("{raw}_END"),
-        }
-    }
-
-    /// Whether a marker name matches the preferred or fallback spelling.
-    /// Lenient requests prefer an exact marker over the `_END` fallback even
-    /// when the fallback arrived first in the same FIFO drain.
+    /// Whether a marker name matches; `Some(true)` is a preferred match.
     fn match_priority(&self, name: &str) -> Option<bool> {
         match self {
-            Self::Exact(expected) | Self::SpanEnd(expected) => (name == expected).then_some(true),
-            Self::Lenient { exact, .. } if name == exact => Some(true),
-            Self::Lenient { span_end, .. } if name == span_end => Some(false),
-            Self::Lenient { .. } => None,
+            Self::Exact(expected) => (name == expected).then_some(true),
         }
     }
 }
@@ -1769,38 +1702,6 @@ fn warn_if_suspended(label: &str, wall: Duration, interval: BootElapsed) {
     }
 }
 
-/// Run one sidecar-observed child, killing its process group once it has run
-/// longer than `deadline` (measured from the caller's `start`) when one is
-/// given. Process polling, stop/deadline killing,
-/// output draining, and waiting are owned by the shared child supervisor;
-/// this observer only samples procfs and drains the marker FIFO.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_sidecar_with_deadline(
-    child_process: Child,
-    fifo: &mut SidecarFifo,
-    run_idx: usize,
-    start: RunStart,
-    stop_marker: Option<&str>,
-    deadline: Option<Duration>,
-    tunables: &MeasurementTunables,
-    capture_cap: child::CaptureCap,
-    sampler: &mut dyn SidecarSampler,
-) -> SidecarRunResult {
-    supervise_sidecar(
-        child_process,
-        fifo,
-        run_idx,
-        start,
-        stop_marker.map(StopRequest::spelled),
-        None,
-        deadline,
-        tunables,
-        capture_cap,
-        sampler,
-    )
-    .finish(fifo, true)
-}
-
 /// A sidecar-observed child whose supervision is over but whose FIFO capture
 /// is still open: the child has ended and its wall, ending, `/proc` samples
 /// and output are fixed, while records a surviving descendant writes may
@@ -1813,7 +1714,6 @@ pub(crate) struct OpenCapture {
     boot_origin: BootInstant,
     samples: Vec<Sample>,
     capture: FifoCapture,
-    fired_stop_marker: Option<String>,
     run_idx: usize,
     max_line_bytes: usize,
 }
@@ -1843,8 +1743,7 @@ impl OpenCapture {
         }
         let mut capture = self.capture;
         let samples = self.samples;
-        let (stdout_truncated, stderr_truncated) = (run.stdout_truncated, run.stderr_truncated);
-        capture.loss.output_truncated = stdout_truncated || stderr_truncated || run.output_cut;
+        capture.loss.output_truncated = run.stdout_truncated || run.stderr_truncated || run.output_cut;
         warn_if_truncated(&capture.loss);
         let (marker_total, counter_total) = capture.kept_counts();
         let label = format!("sidecar run {}", run_idx + 1);
@@ -1872,19 +1771,16 @@ impl OpenCapture {
         }
         announce_ending(&run.ending);
 
-        // The shared nearest-millisecond rule, so the sidecar summary agrees
-        // with the results row's rounded wall.
-        let wall_time_ms = crate::harness::elapsed_to_ms(&run.elapsed);
+        // Nearest, not floored: flooring reads every run as up to a whole
+        // millisecond faster than it was.
+        let wall_time_ms = i64::try_from(run.elapsed.as_micros().saturating_add(500) / 1000)
+            .unwrap_or(i64::MAX);
         console::detail(&run_summary_line(
             run_idx,
             [samples.len(), marker_total, counter_total],
             wall_time_ms,
         ));
         SidecarRunResult {
-            stderr: run.stderr,
-            stdout_truncated,
-            stderr_truncated,
-            output_cut: run.output_cut,
             elapsed: run.elapsed,
             boot,
             data: SidecarData {
@@ -1892,7 +1788,6 @@ impl OpenCapture {
                 records: capture.records,
                 calls_seen: capture.calls_seen,
                 calls: Vec::new(),
-                fired_stop_marker: self.fired_stop_marker,
                 ending: run.ending,
                 summary: SidecarSummary {
                     loss: capture.loss,
@@ -1903,8 +1798,8 @@ impl OpenCapture {
     }
 }
 
-/// The supervision half of [`run_sidecar_with_deadline`]: sample and drain
-/// until the child ends, and hand back the open capture. `stop_grace` is
+/// The supervision half of a sidecar run: sample and drain until the child
+/// ends, and hand back the open capture. `stop_grace` is
 /// how the stop marker ends the child (`child::ChildOptions::stop_grace`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn supervise_sidecar(
@@ -1932,7 +1827,6 @@ pub(crate) fn supervise_sidecar(
         Some(StopRequest { requested, spec }) => (requested, Some(spec)),
         None => (String::new(), None),
     };
-    let mut fired_stop_marker = None;
 
     console::detail(&format!(
         "sidecar attached to pid {pid}, run {}",
@@ -1981,7 +1875,6 @@ pub(crate) fn supervise_sidecar(
                 TICK_DRAIN_BUDGET,
             );
             let matched = matched?;
-            fired_stop_marker = Some(matched.clone());
             console::sidecar_msg(&stop_marker_message(&requested_stop, &matched));
             Some(matched)
         },
@@ -1993,7 +1886,6 @@ pub(crate) fn supervise_sidecar(
         boot_origin: start.boot,
         samples,
         capture,
-        fired_stop_marker,
         run_idx,
         max_line_bytes: tunables.max_fifo_line_bytes,
     }

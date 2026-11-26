@@ -54,7 +54,7 @@ No flag combination removes the measurement stores:
 | `.brokkr/ratatoskr/` | what brokkr's retired ratatoskr commands left, `gate.db` included; clean never names anything under it |
 | `.brokkr/library-certifications/` | certification records an older brokkr's library verification wrote; small, and nothing writes them now |
 | `.brokkr/bench/` | `brokkr crit`'s criterion baselines and their environment stamps |
-| `$XDG_DATA_HOME/brokkr/sidecar-backups/` | durable profiler backups |
+| `$XDG_DATA_HOME/brokkr/sidecar-backups/` | backup copies of sidecar.db the typed commands made; nothing writes them now |
 
 `brokkr crit` keeps its baselines in `.brokkr/bench/` rather than
 criterion's default `target/criterion`, so neither `brokkr clean` nor your
@@ -72,7 +72,7 @@ anything does:
 | `$XDG_DATA_HOME/brokkr/history.db` | nothing: every invocation, never pruned |
 | `$XDG_DATA_HOME/brokkr/bench.db` | nothing: every attempted run with its evidence, never pruned |
 | `SCRATCH/bench-iterations/` | each script-bench iteration's directory goes with its lease, at its end or, after a crash, once nothing holding its reservation runs; the empty container stays |
-| `$XDG_DATA_HOME/brokkr/sidecar-backups/` | nothing: three whole copies of each project root's sidecar.db, in a directory per root whose `origin` file names it, never pruned; a moved checkout starts a new one. The kind-keyed `KIND-sidecar.db`, `.1` and `.2` an older brokkr wrote at the top level stay too, never written again; delete either by hand |
+| `$XDG_DATA_HOME/brokkr/sidecar-backups/` | nothing: up to three whole copies of each project root's sidecar.db, in a directory per root whose `origin` file names it, plus the kind-keyed `KIND-sidecar.db`, `.1` and `.2` at the top level; never written again, never pruned; delete by hand |
 | `.brokkr/hash_cache`, `hash_cache.lock` | a save drops entries for files that no longer exist; a run that only hits the cache does not save |
 | `.brokkr/pbfhogg-capabilities` | not read or written; safe to delete |
 | `.brokkr/worktrees.toml` | cutting a new `--commit` worktree drops the vanished records of that checkout only; nothing else does |

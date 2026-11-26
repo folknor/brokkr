@@ -10,6 +10,7 @@ use std::time::Duration;
 
 static QUIET: AtomicBool = AtomicBool::new(false);
 
+#[cfg(test)]
 pub fn set_quiet(q: bool) {
     QUIET.store(q, Ordering::Relaxed);
 }
@@ -332,15 +333,18 @@ pub fn plain(msg: &str) {
 }
 
 /// Replay captured stdout without adding or removing bytes.
+#[cfg(test)]
 pub fn raw_stdout(text: &str) {
     raw_stdout_bytes(text.as_bytes());
 }
 
 /// Raw pipe chunks retain arbitrary bytes, including split UTF-8 sequences.
+#[cfg(test)]
 pub fn raw_stdout_bytes(bytes: &[u8]) {
     emit_bytes(Stream::Out, bytes);
 }
 
+#[cfg(test)]
 fn emit_bytes(stream: Stream, bytes: &[u8]) {
     log_write_bytes(bytes, false);
     let mut r = RENDER
@@ -385,6 +389,7 @@ pub fn bench_msg(msg: &str) {
 }
 
 /// Interpretation notes must remain visible even on a quiet measured run.
+#[cfg(test)]
 pub fn hotpath_msg(msg: &str) {
     emit_tag("[hotpath]", msg);
 }
@@ -428,6 +433,7 @@ pub fn sidecar_msg(msg: &str) {
 /// The line that alone names a sidecar session with no results row, visible
 /// in quiet mode: like an unretrievable [`result_forced`] result, nothing
 /// else will show its id again. Measured runs are quiet by default.
+#[cfg(test)]
 pub fn sidecar_forced(msg: &str) {
     emit_text(Stream::Err, &prefixed(&tag_prefix("[sidecar]"), msg));
 }

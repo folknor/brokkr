@@ -25,11 +25,6 @@ pub(crate) const LONG_VERSION: &str = env!("BROKKR_LONG_VERSION");
 /// help text, so the doc comment does not repeat it.
 const DEFAULT_OUTLINE_DEPTH: usize = 4;
 
-/// Run count a bare `--bench` (no COUNT) means, for every command that takes
-/// one. A string because clap's `default_missing_value` is parsed like argv.
-const DEFAULT_BENCH_RUNS: &str = "3";
-const DEFAULT_SINGLE_RUNS: &str = "1";
-
 #[derive(Parser)]
 #[command(name = "brokkr", about = "Shared development tooling", version = LONG_VERSION)]
 pub(crate) struct Cli {
@@ -557,30 +552,6 @@ Examples:
     /// Print structural outline of a prepared HTML file
     #[command(display_order = 51)]
     Outline(OutlineCmd),
-
-    // ----- mogwai-only commands (display_order = 58) -----
-    /// Benchmark a mogwai surface (CLI invocation or harness target)
-    ///
-    /// Two kinds of surface, one row shape, no layers.
-    ///
-    /// ARGV-SHAPED surfaces go through the shipped bin and need no
-    /// registration: `brokkr mogwai -- gen --type summary --seed 1`. Benching
-    /// the release binary measures what ships, startup and argument parsing
-    /// included.
-    ///
-    /// HARNESS-SHAPED surfaces have no command line, so the harness is the
-    /// addressable thing: `brokkr mogwai screen_projection -- --cells 4`
-    /// resolves `[mogwai.targets.screen_projection]` to a cargo example plus
-    /// the features it must be built with. Those features are why `--hotpath`
-    /// and `--alloc` produce a profile rather than an empty row.
-    ///
-    /// Bare `brokkr mogwai` lists both. Invocations are composed at the call
-    /// site and captured verbatim, so selecting an arm is a query
-    /// (`brokkr results --grep`) rather than a name lookup.
-    ///
-    /// In depth: `brokkr man mogwai`.
-    #[command(name = "mogwai", display_order = 58)]
-    Mogwai(MogwaiCmd),
 }
 
 // ---------------------------------------------------------------------------
@@ -1559,83 +1530,6 @@ pub(crate) struct OutlineCmd {
     /// Print suggested CSS selectors for top-level sections
     #[arg(long)]
     pub(crate) selectors: bool,
-}
-
-// `brokkr mogwai`'s arguments; see `Command::Mogwai`.
-#[derive(Args)]
-pub(crate) struct MogwaiCmd {
-    #[command(flatten)]
-    pub(crate) mode: ModeArgs,
-
-    /// Harness target from `[mogwai.targets.*]`; omit for the CLI (bare lists both)
-    // `value_terminator`: as `RunCmd::name`, a `--` before any TARGET leaves
-    // it empty, so `mogwai -- ARGS` reaches the CLI surface.
-    #[arg(value_terminator = "--")]
-    pub(crate) target: Option<String>,
-
-    /// Arguments forwarded to the binary or harness (after `--`)
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    pub(crate) args: Vec<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Shared mode args (measurement/build flags for all measurable commands)
-// ---------------------------------------------------------------------------
-
-#[derive(Args, Clone)]
-pub(crate) struct ModeArgs {
-    /// Full benchmark: lockfile, N runs (bare `--bench` means the default
-    /// run count), DB storage
-    #[arg(long, conflicts_with_all = ["hotpath", "alloc"], num_args = 0..=1, default_missing_value = DEFAULT_BENCH_RUNS)]
-    pub(crate) bench: Option<std::num::NonZeroUsize>,
-
-    /// Function-level timing via hotpath feature (optional run count, default 1)
-    #[arg(
-        long,
-        conflicts_with_all = ["bench", "alloc"],
-        num_args = 0..=1,
-        default_missing_value = DEFAULT_SINGLE_RUNS
-    )]
-    pub(crate) hotpath: Option<std::num::NonZeroUsize>,
-
-    /// Per-function allocation tracking via hotpath-alloc feature (optional run count, default 1)
-    #[arg(
-        long,
-        conflicts_with_all = ["bench", "hotpath"],
-        num_args = 0..=1,
-        default_missing_value = DEFAULT_SINGLE_RUNS
-    )]
-    pub(crate) alloc: Option<std::num::NonZeroUsize>,
-
-    /// Print full build/bench/result output
-    #[arg(short, long)]
-    pub(crate) verbose: bool,
-
-    /// Build and benchmark an old commit via git worktree
-    #[arg(long)]
-    pub(crate) commit: Option<String>,
-
-    /// Cargo features to enable (e.g. linux-io-uring)
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) features: Vec<String>,
-
-    /// Run even if the measured tree is dirty (a dirty tree's results are not
-    /// stored; a clean tree, such as a --commit worktree, still stores)
-    #[arg(long)]
-    pub(crate) force: bool,
-
-    /// Validate argv, config, and path resolution without building or running.
-    /// Short-circuits after path/arg-vector construction. Skips cargo build and
-    /// process execution; the command's configured lock policy still applies.
-    /// Useful for sanity-checking a script of queued benches before leaving it
-    /// overnight.
-    #[arg(long)]
-    pub(crate) dry_run: bool,
-
-    /// Kill the child process when this marker is emitted via the sidecar FIFO.
-    /// Useful for benchmarking only a specific phase of execution.
-    #[arg(long)]
-    pub(crate) stop: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

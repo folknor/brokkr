@@ -213,6 +213,7 @@ input_file, input_mb, elapsed_ms, elapsed_us, peak_rss_mb, cargo_features, cargo
 kernel, cpu_governor, avail_memory_mb, storage_notes, uuid, \
 cli_args, project, stop_marker, stop_marker_requested, brokkr_args, arm_key";
 
+#[cfg(test)]
 pub(super) const INSERT_SQL: &str = "\
 INSERT INTO runs (\
     timestamp, hostname, [commit], subject, command, mode, \

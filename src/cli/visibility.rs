@@ -39,16 +39,12 @@ pub(crate) enum LockPolicy {
 #[derive(Clone, Copy)]
 pub(crate) enum WorktreePolicy {
     None,
-    Mode,
     Direct,
 }
 
 macro_rules! worktree_policy {
     () => {
         WorktreePolicy::None
-    };
-    (Mode) => {
-        WorktreePolicy::Mode
     };
     (Direct) => {
         WorktreePolicy::Direct
@@ -61,14 +57,13 @@ pub(crate) struct CommandSpec {
     pub config: ConfigNeed,
     pub lock: LockPolicy,
     pub disk_gate: bool,
-    pub default_mode: crate::measure::MeasureMode,
     pub run_log: Option<&'static str>,
     pub tools: &'static [&'static str],
     pub worktree: WorktreePolicy,
 }
 
 macro_rules! commands {
-    ($($variant:ident => ($name:literal, $applies:expr, $config:ident, $lock:ident, $gate:literal, $mode:expr, $log:expr, $tools:expr $(, $worktree:ident)?)),* $(,)?) => {
+    ($($variant:ident => ($name:literal, $applies:expr, $config:ident, $lock:ident, $gate:literal, $log:expr, $tools:expr $(, $worktree:ident)?)),* $(,)?) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub(crate) enum CommandId { $($variant),* }
         impl CommandId {
@@ -76,7 +71,7 @@ macro_rules! commands {
                 match self { $(Self::$variant => &CommandSpec {
                     name: $name, applies: $applies, config: ConfigNeed::$config,
                     lock: LockPolicy::$lock, disk_gate: $gate,
-                    default_mode: $mode, run_log: $log, tools: $tools,
+                    run_log: $log, tools: $tools,
                     worktree: worktree_policy!($($worktree)?),
                 }),* }
             }
@@ -89,40 +84,39 @@ macro_rules! commands {
 }
 
 commands! {
-Check => ("check", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::CHECK), &["cargo"]),
-Clippy => ("clippy", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Fmt => ("fmt", Visibility::Any, Optional, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Run => ("run", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
-Serve => ("serve", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
-Build => ("build", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
-Install => ("install", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Wc => ("wc", Visibility::Any, Optional, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Man => ("man", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Crit => ("crit", Visibility::Any, Optional, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::CRIT), &["cargo"], Direct),
-Bench => ("bench", Visibility::Any, Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::SCRIPT_BENCH), &["cargo"], Direct),
-Deps => ("deps", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Env => ("env", Visibility::Any, Required, None, false, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Passthrough => ("passthrough", Visibility::Any, Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Results => ("results", Visibility::Any, Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Sidecar => ("sidecar", Visibility::Any, Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Clean => ("clean", Visibility::Any, Required, Blocking, false, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Lock => ("lock", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Strays => ("strays", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Guard => ("guard", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Fstrim => ("fstrim", Visibility::Any, Optional, Blocking, false, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &[]),
-Kill => ("kill", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
-History => ("history", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Invalidate => ("invalidate", Visibility::Except(MEASURED_DB_ABSENT), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Visual => ("visual", Visibility::Only(&[Project::Litehtml, Project::Sluggrs]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "node"]),
-Test => ("test", Visibility::Any, Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::TEST), &["cargo"]),
-List => ("list", Visibility::Only(&[Project::Litehtml, Project::Sluggrs]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Approve => ("approve", Visibility::Only(&[Project::Litehtml, Project::Sluggrs]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Report => ("report", Visibility::Only(&[Project::Litehtml, Project::Sluggrs]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-VisualStatus => ("visual-status", Visibility::Only(&[Project::Litehtml, Project::Sluggrs]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Prepare => ("prepare", Visibility::Only(&[Project::Litehtml]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "node"]),
-HtmlExtract => ("html-extract", Visibility::Only(&[Project::Litehtml]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Outline => ("outline", Visibility::Only(&[Project::Litehtml]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Mogwai => ("mogwai", Visibility::Only(&[Project::Mogwai]), Required, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),}
+Check => ("check", Visibility::Any, Optional, Blocking, true, Some(crate::run_log::run_log_kind::CHECK), &["cargo"]),
+Clippy => ("clippy", Visibility::Any, Optional, Blocking, true, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
+Fmt => ("fmt", Visibility::Any, Optional, None, true, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
+Run => ("run", Visibility::Any, Optional, Blocking, true, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
+Serve => ("serve", Visibility::Any, Optional, Blocking, true, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
+Build => ("build", Visibility::Any, Optional, Blocking, true, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
+Install => ("install", Visibility::Any, Optional, Blocking, true, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
+Wc => ("wc", Visibility::Any, Optional, None, true, None, &[]),
+Man => ("man", Visibility::Any, None, None, true, None, &[]),
+Crit => ("crit", Visibility::Any, Optional, None, true, Some(crate::run_log::run_log_kind::CRIT), &["cargo"], Direct),
+Bench => ("bench", Visibility::Any, Required, Blocking, true, Some(crate::run_log::run_log_kind::SCRIPT_BENCH), &["cargo"], Direct),
+Deps => ("deps", Visibility::Any, Optional, Blocking, true, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
+Env => ("env", Visibility::Any, Required, None, false, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
+Passthrough => ("passthrough", Visibility::Any, Required, Blocking, true, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
+Results => ("results", Visibility::Any, Required, None, true, None, &[]),
+Sidecar => ("sidecar", Visibility::Any, Required, None, true, None, &[]),
+Clean => ("clean", Visibility::Any, Required, Blocking, false, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
+Lock => ("lock", Visibility::Any, None, None, true, None, &[]),
+Strays => ("strays", Visibility::Any, None, None, true, None, &[]),
+Guard => ("guard", Visibility::Any, None, None, true, None, &[]),
+Fstrim => ("fstrim", Visibility::Any, Optional, Blocking, false, Some(crate::run_log::run_log_kind::MEASURE), &[]),
+Kill => ("kill", Visibility::Any, None, None, true, None, &[]),
+History => ("history", Visibility::Any, None, None, true, None, &[]),
+Invalidate => ("invalidate", Visibility::Except(MEASURED_DB_ABSENT), Required, None, true, None, &[]),
+Visual => ("visual", Visibility::Only(&[Project::Litehtml, Project::Sluggrs]), Required, Blocking, true, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "node"]),
+Test => ("test", Visibility::Any, Required, Blocking, true, Some(crate::run_log::run_log_kind::TEST), &["cargo"]),
+List => ("list", Visibility::Only(&[Project::Litehtml, Project::Sluggrs]), Required, None, true, None, &[]),
+Approve => ("approve", Visibility::Only(&[Project::Litehtml, Project::Sluggrs]), Required, Blocking, true, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
+Report => ("report", Visibility::Only(&[Project::Litehtml, Project::Sluggrs]), Required, None, true, None, &[]),
+VisualStatus => ("visual-status", Visibility::Only(&[Project::Litehtml, Project::Sluggrs]), Required, None, true, None, &[]),
+Prepare => ("prepare", Visibility::Only(&[Project::Litehtml]), Required, Blocking, true, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "node"]),
+HtmlExtract => ("html-extract", Visibility::Only(&[Project::Litehtml]), Required, None, true, None, &[]),
+Outline => ("outline", Visibility::Only(&[Project::Litehtml]), Required, None, true, None, &[]),}
 
 static INVOCATION: std::sync::OnceLock<CommandId> = std::sync::OnceLock::new();
 pub(crate) fn set_invocation(command: CommandId) {
@@ -208,17 +202,6 @@ impl CommandSpec {
     ) -> Result<bool, crate::error::DevError> {
         match self.worktree {
             WorktreePolicy::None => Ok(false),
-            WorktreePolicy::Mode => {
-                let mode = match command {
-                    super::Command::Mogwai(super::MogwaiCmd { mode, .. }) => Some(mode),
-                    _ => None,
-                };
-                mode.map(|mode| mode.commit.is_some()).ok_or_else(|| {
-                    crate::error::DevError::Internal(
-                        "command has mode-based worktree policy but does not carry ModeArgs".into(),
-                    )
-                })
-            }
             WorktreePolicy::Direct => match command {
                 // Historical only when no stage builds the live tree: a
                 // `--with` target built from the live tree needs the live

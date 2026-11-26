@@ -47,8 +47,8 @@ pub(crate) enum KvClass {
     ThreadSummary,
     Sidecar,
     /// What the measured binary was built with beyond what its commit
-    /// records (`crate::build_provenance`). Written by the harness alone: a
-    /// runtime pair in this namespace is dropped, never stored.
+    /// records. Written by the typed harness alone: a runtime pair in this
+    /// namespace was dropped, never stored.
     Provenance,
     Counter,
 }
@@ -144,12 +144,8 @@ impl KvKey {
         Self::new(KvClass::Environment, name)
     }
 
-    /// Build a predecessor-provenance key from its bare name.
-    pub fn predecessor(name: impl Into<String>) -> Self {
-        Self::new(KvClass::Predecessor, name)
-    }
-
     /// Build a build-provenance key from its bare name.
+    #[cfg(test)]
     pub fn provenance(name: impl Into<String>) -> Self {
         Self::new(KvClass::Provenance, name)
     }
@@ -277,12 +273,14 @@ pub enum KvValue {
 }
 
 impl KvPair {
+    #[cfg(test)]
     pub fn int(key: impl Into<KvKey>, value: i64) -> Self {
         Self {
             key: key.into(),
             value: KvValue::Int(value),
         }
     }
+    #[cfg(test)]
     pub fn real(key: impl Into<KvKey>, value: f64) -> Self {
         Self {
             key: key.into(),
@@ -363,6 +361,7 @@ impl Wall {
     }
 
     /// Exact microseconds when measured, otherwise `None`.
+    #[cfg(test)]
     pub const fn micros(self) -> Option<i64> {
         match self {
             Self::Micros(value) => Some(value),
@@ -402,6 +401,7 @@ pub enum QuantityKind {
 }
 
 impl QuantityKind {
+    #[cfg(test)]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Duration => "duration_ns",
@@ -483,6 +483,7 @@ impl Quantity {
 
     /// The typed metric tables' columns, `None` for display text: those
     /// tables hold numeric quantities only.
+    #[cfg(test)]
     pub(crate) fn storage_parts(&self) -> Option<(&'static str, Option<i64>, Option<f64>)> {
         match self {
             Self::DurationNs(value) => Some((QuantityKind::Duration.as_str(), Some(*value), None)),
@@ -593,6 +594,7 @@ impl Percentile {
         Self::new(key.strip_prefix('p')?.parse().ok()?)
     }
 
+    #[cfg(test)]
     pub(crate) fn value(self) -> f64 {
         self.0
     }
@@ -629,6 +631,8 @@ impl std::fmt::Display for Percentile {
 pub struct HotpathFunction {
     pub section: String,
     pub description: Option<String>,
+    /// Read only by the test writer that seeds results.db for its readers.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub ordinal: i64,
     pub name: String,
     pub calls: Option<i64>,
@@ -664,6 +668,7 @@ pub struct HotpathData {
 // ---------------------------------------------------------------------------
 
 /// A benchmark result row to insert.
+#[cfg(test)]
 pub struct RunRow {
     pub hostname: String,
     pub commit: ShortCommit,
@@ -803,32 +808,6 @@ impl StoredRow {
             .collect::<Vec<_>>()
             .join("\x1f")
     }
-}
-
-/// The row recorded immediately before this one in the same project's
-/// results database. Dirty runs and runs from other projects are outside this
-/// store.
-/// A benchmark's wall time depends heavily on what ran just before it: a cell
-/// reading a 92 GB file four minutes after another cell read the same file
-/// finds the headers warm in the page cache and reports a wall that the code
-/// had nothing to do with. Storing the predecessor makes that visible from the
-/// row alone instead of requiring a reconstruction of the suite's ordering.
-///
-/// `input_file` is what it read, and the caller turns `timestamp_epoch` into a
-/// gap - together they say whether this run could plausibly have inherited a
-/// warm cache.
-pub struct PreviousRun {
-    pub uuid: String,
-    pub command: String,
-    pub input_file: Option<String>,
-    /// The previous run's recorded timestamp as whole Unix seconds (SQLite
-    /// converts the stored timestamp with `strftime('%s', ...)`). Deliberately
-    /// raw rather than a pre-computed gap: rows are timestamped when they are
-    /// *inserted*, i.e. when that run finished, and the gap that matters is
-    /// measured to the moment the current run *started*. Computing it here
-    /// against `now` would silently fold the current run's own duration into
-    /// the answer.
-    pub timestamp_epoch: i64,
 }
 
 /// Filters for querying stored rows.

@@ -164,7 +164,7 @@ stage = "pre-test"
 [[textlint]]
 name = "reserved-mutations-through-the-gate"
 pattern = '\bfs::(?:remove_file|remove_dir_all|rename)\b'
-paths = ["src/measure/**/*.rs", "src/measure.rs", "src/atomic_write.rs", "src/bench/**/*.rs"]
+paths = ["src/atomic_write.rs", "src/bench/**/*.rs"]
 region = "code"
 test_code = "skip"
 # A raw call carries this marker with its reason: the operation a

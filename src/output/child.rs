@@ -1260,6 +1260,7 @@ const SIGTERM_FORWARD_BUDGET: Duration = Duration::from_millis(1500);
 ///
 /// The caller is responsible for waiting on the child and collecting output.
 /// Used by the sidecar to run sampling alongside the child process.
+#[cfg(test)]
 pub fn spawn_captured(
     program: &str,
     args: &[&str],
@@ -1273,6 +1274,7 @@ pub fn spawn_captured(
 
 /// [`spawn_captured`] with `unset` removed from the inherited environment
 /// (applied before `env`, so a name in both is set).
+#[cfg(test)]
 pub fn spawn_captured_unsetting(
     program: &str,
     args: &[&str],

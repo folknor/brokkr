@@ -1,15 +1,13 @@
-//! Command context: the command lock, path bootstrap, [`MeasurementSession`]
-//! with its [`DirtyPolicy`], and the `--commit` worktree lifecycle
+//! Command context: the command lock, path bootstrap, and the `--commit`
+//! worktree lifecycle
 //! ([`with_worktree`]). [`bootstrap_config`] resolves host paths from config
 //! alone; [`bootstrap`] is the cargo query a command that needs its target
 //! dir makes of the tree it acts on.
 
-use std::path::Path;
 
 use crate::build;
 use crate::config;
 use crate::error::DevError;
-use crate::harness;
 use crate::lockfile;
 use crate::output;
 use crate::project::{BuildRoot, Project, ProjectRoot};
@@ -103,189 +101,11 @@ pub(crate) fn bootstrap_config(
     ))
 }
 
-/// One lock, path resolution and measurement provenance for a command.
-/// A build is optional; external tools and HTTP lifecycles use the same session.
-pub(crate) struct MeasurementSession {
-    pub(crate) harness: harness::BenchHarness,
-    /// The artifact a build-shaped session produced; its identity is on the
-    /// harness, which stamps every row with it.
-    binary: Option<build::BuiltArtifact>,
-}
-
-/// Whether a measurement request may run against a dirty tree.
-///
-/// Run mode does not persist results, so it is safe regardless of the tree
-/// state. Stored measurement modes still require the explicit `--force` flag.
-#[derive(Clone, Copy)]
-pub(crate) enum DirtyPolicy {
-    Allow,
-    Gate { force: bool },
-}
-
-impl DirtyPolicy {
-    pub(crate) fn for_request(req: &crate::measure::MeasureRequest<'_>) -> Self {
-        match req.mode {
-            crate::measure::MeasureMode::Run => Self::Allow,
-            _ => Self::Gate { force: req.force },
-        }
-    }
-
-    fn allowed(self) -> bool {
-        match self {
-            Self::Allow => true,
-            Self::Gate { force } => force,
-        }
-    }
-}
-
 /// Resolve the worktree retention value for this machine at the shared
 /// context boundary.
 pub(crate) fn worktree_keep(dev_config: &config::DevConfig) -> Result<usize, DevError> {
     let hostname = config::hostname()?;
     Ok(dev_config.worktree_keep(&hostname))
-}
-
-impl MeasurementSession {
-    /// The dirty-tree policy must be applied before `BenchHarness` is
-    /// constructed, since its constructor performs the dirty-tree check.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        dev_config: &config::DevConfig,
-        project: Project,
-        project_root: &ProjectRoot,
-        build_root: &BuildRoot,
-        force: bool,
-        stop_marker: Option<String>,
-    ) -> Result<Self, DevError> {
-        // The lock first, which activates the configured tree policy before
-        // anything the session does with the tree; the harness is handed the
-        // held lock. Path resolution is config alone and asks cargo nothing.
-        let lock = lockfile::acquire(&lockfile::LockContext {
-            project: Some(project.name()),
-            command: crate::cli::invocation()?,
-            project_root,
-            build_root,
-            tree: configured_tree(),
-        })?;
-        let paths = bootstrap_config(dev_config, project_root)?;
-        let harness = harness::BenchHarness::new_with_lock(
-            lock,
-            &paths,
-            &dev_config.included_config_files,
-            build_root,
-            project_root,
-            project,
-            force,
-            stop_marker,
-        )?;
-        Ok(Self {
-            harness,
-            binary: None,
-        })
-    }
-
-    /// Attach the brokkr invocation string and measurement mode from the
-    /// given `MeasureRequest` to the harness. Every row built by this
-    /// harness will carry them in the `brokkr_args` and `variant`
-    /// columns, so individual bench writers don't have to plumb them.
-    ///
-    /// Every measured command's session passes here, under its hold, before
-    /// its first sample: a recorded mode refuses while a `brokkr serve`
-    /// generation is outstanding.
-    pub(crate) fn with_request(
-        mut self,
-        req: &crate::measure::MeasureRequest,
-    ) -> Result<Self, DevError> {
-        if let Some(mode) = req.mode.recorded()
-            && !req.dry_run
-        {
-            crate::serve::refuse_measurement(&format!("a --{} run", mode.label()))?;
-        }
-        if req.mode.recorded().is_some() {
-            self.harness.note_unneeded_force(req.force);
-        }
-        self.harness = self
-            .harness
-            .with_invocation(req.invocation.clone())
-            .with_measure_mode(req.mode.recorded())
-            .with_env_kv(config::captured_env_pairs(req.dev_config));
-        Ok(self)
-    }
-
-    /// Create a session with a built executable: lock, then `cargo_build` of
-    /// the caller's `BuildConfig`, then `BenchHarness`. Builds use the
-    /// selected checkout while the results DB uses `project_root` (main
-    /// tree); git info comes from the build root so the commit hash matches
-    /// the built code.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn with_build_config(
-        dev_config: &config::DevConfig,
-        project: Project,
-        project_root: &ProjectRoot,
-        build_root: &BuildRoot,
-        build_config: &build::BuildConfig,
-        force: bool,
-        stop_marker: Option<String>,
-    ) -> Result<Self, DevError> {
-        let mut session = Self::new(
-            dev_config,
-            project,
-            project_root,
-            build_root,
-            force,
-            stop_marker,
-        )?;
-        let effective_build_root = build_root.as_path();
-        // A session build always carries this host's configured defaults,
-        // even when its caller built the BuildConfig through a different path.
-        // Request callers may already have merged them into the request; the
-        // shared resolver dedupes that overlap before cargo and DB labeling.
-        // Direct cargo command paths that do not construct this context retain
-        // their own command or sweep feature selection.
-        let effective_config = build::BuildConfig {
-            package: build_config.package.clone(),
-            bin: build_config.bin.clone(),
-            example: build_config.example.clone(),
-            features: crate::command_args::resolve_features(dev_config, &build_config.features),
-            default_features: build_config.default_features,
-            all_features: build_config.all_features,
-            profile: build_config.profile.clone(),
-        };
-        let artifact = build::cargo_build(&effective_config, effective_build_root)?;
-        // The row's `cargo_profile` and canonical `cargo_features` describe
-        // the artifact cargo actually produced.
-        session.harness = session
-            .harness
-            .with_build_identity(harness::BuildIdentity::of(&artifact));
-        session.binary = Some(artifact);
-        Ok(session)
-    }
-
-    /// As [`with_build_config`](Self::with_build_config), with dirty-tree
-    /// handling derived from the request's mode in one shared place.
-    pub(crate) fn with_build_config_for_request(
-        req: &crate::measure::MeasureRequest<'_>,
-        build_config: &build::BuildConfig,
-    ) -> Result<Self, DevError> {
-        Self::with_build_config(
-            req.dev_config,
-            req.project.clone(),
-            req.project_root,
-            req.build_root,
-            build_config,
-            DirtyPolicy::for_request(req).allowed(),
-            req.stop_marker.map(str::to_owned),
-        )
-        .and_then(|ctx| ctx.with_request(req))
-    }
-
-    /// The built executable's path.
-    pub(crate) fn binary(&self) -> Result<&Path, DevError> {
-        self.binary
-            .as_ref()
-            .map(|artifact| artifact.path.as_path())
-            .ok_or_else(|| DevError::Internal("session has no built executable".into()))
-    }
 }
 
 // ---------------------------------------------------------------------------

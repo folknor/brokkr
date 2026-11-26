@@ -1,7 +1,8 @@
 # brokkr results
 
 `brokkr results` queries the results database, `.brokkr/results.db`, the
-durable record every measured run writes. It then lists the current
+durable record of the typed runs from before script benches (`brokkr man
+measure stored-history`). It then lists the current
 project's script-bench runs, kept in the per-user bench store, after those
 rows (see Script benches). This page covers the table, precision, filters,
 `--grep`, a single run, `--compare` and script benches.
@@ -16,9 +17,8 @@ The sibling command `brokkr sidecar` queries the profiler store
 databases. The mark flags of `results` (see Marks) are its one write, to an
 existing bench store.
 
-brokkr migrates a store on an older schema first, with the same
-transactional migrations a measured write applies, then runs the query
-read-only. An upgrade never makes existing history unreadable. A store
+brokkr migrates a store on an older schema first, with the store's
+transactional migrations, then runs the query read-only. An upgrade never makes existing history unreadable. A store
 stamped with a newer schema version than this brokkr knows is refused, by
 queries and writes alike; brokkr never lowers a stamp.
 
@@ -227,8 +227,8 @@ profile differently.
 
 `arm_key` represents the measurement-affecting options, so arm-defining
 flags like `--direct-io` keep different measurements apart without the
-comparison reparsing argv. brokkr computes it from the parsed CLI arguments
-when it records the row. The comparison treats the key as an opaque
+comparison reparsing argv. brokkr computed it from the parsed CLI arguments
+when it recorded the row. The comparison treats the key as an opaque
 identity and implements no second CLI grammar.
 
 The key excludes these:
@@ -239,8 +239,8 @@ The key excludes these:
 
 Tokens the parse assigned to a command's trailing positional are kept
 verbatim whatever they spell, with or without a `--` before them. That is the
-argv `brokkr mogwai TARGET ARGS...` forwards to its child: a child's `-v` or
-`--bench 3` is part of what was asked.
+argv a command forwarded to its child: a child's `-v` or `--bench 3` is part
+of what was asked.
 
 The key joins its tokens with single spaces. When a token is empty or holds
 whitespace, or the first starts with `[`, the key is the JSON array
@@ -407,8 +407,8 @@ longer run; brokkr accepts their config expectations and ignores them.
 
 ### Build provenance
 
-A row whose binary brokkr built has `provenance.*` pairs: what the build was
-made with beyond what its commit records. The host side is read for the
+A typed row whose binary brokkr built has `provenance.*` pairs: what the
+build was made with beyond what its commit records. The host side is read for the
 directory cargo ran in:
 
 - **`rustc`**: the compiler's `-V` line, the compiler chosen by cargo's own
@@ -441,10 +441,10 @@ The unit side comes from cargo's own record of the measured executable:
 A row measuring a binary brokkr didn't build records none. The retired
 suites attributed each row to the build it measured, and their rows of
 installed tools (osmium, planetiler, tilemaker) have none. The namespace is
-brokkr's alone: brokkr drops a `provenance.*` pair the measured program
-prints, with a warning, as it does one in any other brokkr namespace
-(`brokkr man output-channels`). `brokkr results UUID` lists the pairs as
-`build ...` fields.
+brokkr's alone: the scrape dropped a `provenance.*` pair the measured
+program printed, as it did one in any other brokkr namespace (`brokkr man
+output-channels`). `brokkr results UUID` lists the pairs as `build ...`
+fields.
 
 Differing provenance never splits a pair. What it covers is what a
 legitimate A/B varies, such as a toolchain-bump commit or a commit adding

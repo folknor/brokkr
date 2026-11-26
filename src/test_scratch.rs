@@ -19,7 +19,7 @@
 //!   failures at `--test-threads=8`, and the symptom was a hash mismatch or a
 //!   missing file - a fixture race wearing the costume of a bug in the code
 //!   under test.
-//! - `mogwai::targets`' `config_with` reached for
+//! - the since-retired mogwai command's `config_with` reached for
 //!   `tmpdir(format!("cfg-{:?}", thread::current().id()))`, which works only
 //!   because Rust guarantees a `ThreadId` is never reused. Correct, but by a
 //!   guarantee subtle enough that the next person to copy the line will not

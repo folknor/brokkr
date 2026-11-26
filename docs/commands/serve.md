@@ -80,8 +80,6 @@ A live serve holds no lock, so other commands run. The rule is the
 bench-lock: every measurement refuses while any serve is outstanding, because
 a serving process perturbs what is measured. A measurement is any of:
 
-- a measured command with `--bench`, `--hotpath` or `--alloc`, or one whose
-  default mode measures, unless `--dry-run`
 - `brokkr bench NAME` (not `--dry-run` or `--test`), refused before its
   preflight launches anything
 - `brokkr crit TARGET` sampling into a baseline (`--compare` and
@@ -89,8 +87,7 @@ a serving process perturbs what is measured. A measurement is any of:
 
 brokkr checks for serves where the measurement starts, under its hold. No
 serve can start inside that hold, so the answer stays true for the whole
-measurement. A measured command that builds first is refused after its build.
-The refusal names the live serves and how to stop them.
+measurement. The refusal names the live serves and how to stop them.
 
 Every other command that takes the lock (`check`, `test`, `run`, `build`)
 proceeds, with one warning naming the serves.

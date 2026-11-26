@@ -79,9 +79,7 @@ impl Project {
             | Self::Saehrimnir
             | Self::Piners
             | Self::Dellingr
-            // The CLI package is named by `[mogwai] package`, not hardcoded:
-            // mogwai is a multi-crate workspace and the contract already has a
-            // place to say which crate carries the binary.
+            // A multi-crate workspace with no single binary crate to default to.
             | Self::Mogwai
             | Self::Other(_) => None,
         }
@@ -269,30 +267,6 @@ impl Detection {
     }
 }
 
-/// Require the current project matches the expected project.
-/// Returns an error with a helpful message if mismatched.
-///
-/// `command` is rendered as `'brokkr {command}'`, so it must be what the user
-/// actually types: its first word a real subcommand name (one the command
-/// catalogue knows, `cli::CommandId::from_name`), optionally followed by a sub-subcommand.
-/// A literal label that names no command is caught by
-/// `tests::require_labels_are_real_commands`.
-pub fn require(current: &Project, expected: &Project, command: &str) -> Result<(), DevError> {
-    if let Some(id) =
-        crate::cli::CommandId::from_name(command.split_whitespace().next().unwrap_or(""))
-    {
-        id.spec().require(current)?;
-    }
-    if current != expected {
-        return Err(DevError::WrongProject {
-            command: command.to_owned(),
-            expected: expected.to_string(),
-            current: current.to_string(),
-        });
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -341,61 +315,6 @@ mod tests {
         let deep = root.join("a").join("b");
         fs::create_dir_all(&deep).unwrap();
         assert_eq!(find_config_dir(&deep), None);
-    }
-
-    /// Every literal `project::require` label must start with a real
-    /// subcommand name. Labels like `"litehtml extract"` rendered as
-    /// `'brokkr litehtml extract' is only available...` - a command that does
-    /// not exist, in the one message whose job is to name the right one.
-    /// Scans the source rather than a registry because the labels are
-    /// arguments at scattered call sites; non-literal labels (`command.id()`)
-    /// are skipped.
-    #[test]
-    fn require_labels_are_real_commands() {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut stack = vec![src];
-        let mut files = Vec::new();
-        while let Some(dir) = stack.pop() {
-            for entry in fs::read_dir(&dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.extension().is_some_and(|e| e == "rs") {
-                    files.push(path);
-                }
-            }
-        }
-
-        // Built with concat! so this file's own source never matches it.
-        let needle = concat!("project::", "require(");
-        let mut bad = Vec::new();
-        let mut seen = 0usize;
-        for file in &files {
-            let text = fs::read_to_string(file).unwrap();
-            for (at, _) in text.match_indices(needle) {
-                let call = &text[at + needle.len()..];
-                let close = call.find(')').unwrap_or(call.len());
-                let Some(open) = call[..close].find('"') else {
-                    continue; // non-literal label
-                };
-                let rest = &call[open + 1..];
-                let Some(end) = rest.find('"') else { continue };
-                let label = &rest[..end];
-                seen += 1;
-                let head = label.split_whitespace().next().unwrap_or("");
-                if crate::cli::CommandId::from_name(head).is_none() {
-                    bad.push(format!("{}: {label:?}", file.display()));
-                }
-            }
-        }
-        assert!(
-            seen > 0,
-            "found no literal require labels - the scan is broken"
-        );
-        assert!(
-            bad.is_empty(),
-            "require labels naming no subcommand: {bad:#?}"
-        );
     }
 
     #[test]

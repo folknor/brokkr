@@ -8,7 +8,7 @@ Two kinds of project use host datasets:
 
 - the map-data projects, which use the PBF, OSC, PMTiles and polygon entries
   described below
-- Mogwai, which pins out-of-git inputs with `path` plus `xxh128`
+- projects that pin out-of-git inputs with `path` plus `xxh128`
 
 Other project-specific inputs belong in their project's config. Datasets are
 host-scoped: they live under `[HOSTNAME.datasets.NAME]`, never in a global

@@ -6,7 +6,7 @@ use super::schema::SELECT_COLS;
 use super::types::{KvClass, KvKey, Wall, canonical_cargo_features};
 use super::{
     Distribution, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, Percentile,
-    PreviousRun, Quantity, QueryFilter, RunId, StoredRow,
+    Quantity, QueryFilter, RunId, StoredRow,
 };
 use crate::error::DevError;
 use crate::git::ShortCommit;
@@ -128,36 +128,6 @@ impl ResultsDb {
             rusqlite::params![uuid],
             |row| row.get(0),
         )?)
-    }
-
-    /// The most recently recorded run in this database, or `None` when it is
-    /// empty. Call *before* inserting the current run, or it returns itself.
-    ///
-    /// Deliberately unfiltered within this project's results database: the
-    /// question is what this project recorded most recently, not what last ran
-    /// with these flags. Dirty runs and other projects are outside this store.
-    /// Ordered by `id` rather than `timestamp` because `timestamp` has
-    /// one-second resolution and two runs can share it; `id` is the true
-    /// insertion order.
-    pub fn previous_run(&self) -> Result<Option<PreviousRun>, DevError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT uuid, command, input_file, \
-                    CAST(strftime('%s', timestamp) AS INTEGER) \
-             FROM runs ORDER BY id DESC LIMIT 1",
-        )?;
-        let mut rows = stmt.query_map([], |row| {
-            Ok(PreviousRun {
-                uuid: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                command: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                input_file: row.get::<_, Option<String>>(2)?,
-                timestamp_epoch: row.get::<_, Option<i64>>(3)?.unwrap_or_default(),
-            })
-        })?;
-        match rows.next() {
-            Some(Ok(prev)) => Ok(Some(prev)),
-            Some(Err(e)) => Err(e.into()),
-            None => Ok(None),
-        }
     }
 
     /// Query rows with optional filters. Commit matches by prefix (LIKE).

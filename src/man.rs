@@ -12,7 +12,7 @@
 //! headings themselves - see [`sections`].
 //!
 //! Topics are filtered by the detected project, the same way `--help` filters
-//! subcommands: a pbfhogg tree has no use for the mogwai reference. The
+//! subcommands: a pbfhogg tree has no use for the litehtml reference. The
 //! project-agnostic topics - the ones about `check`, `deps`, `clippy`,
 //! measurement and config - are always listed, because they describe machinery
 //! that runs everywhere.
@@ -157,13 +157,13 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "measure",
-        summary: "--bench/--hotpath/--alloc, the sidecar profiler, marker FIFOs",
+        summary: "the sidecar profiler, marker FIFOs, sidecar queries, typed history",
         content: include_str!("../docs/commands/measure.md"),
         commands: &[CommandId::Env],
     },
     Topic {
         name: "output-channels",
-        summary: "where a run's output goes: stdout, stderr key=value, FIFO markers",
+        summary: "where a run's output goes: stores, console, output streams, FIFO markers",
         content: include_str!("../docs/commands/output-channels.md"),
         commands: &[CommandId::Env],
     },
@@ -198,12 +198,6 @@ const TOPICS: &[Topic] = &[
         summary: "sluggrs config, snapshot outputs and the snapshot store",
         content: include_str!("../docs/projects/sluggrs.md"),
         commands: &[CommandId::Visual],
-    },
-    Topic {
-        name: "mogwai",
-        summary: "benching mogwai surfaces: the [mogwai.targets.*] registry, counters, datasets",
-        content: include_str!("../docs/projects/mogwai.md"),
-        commands: &[CommandId::Mogwai],
     },
 ];
 
@@ -395,18 +389,18 @@ mod tests {
     /// And the project-scoped ones must not leak across.
     #[test]
     fn scoped_topics_stay_in_their_project() {
-        let mogwai: Vec<&str> = visible(Some(&Project::Mogwai))
+        let sluggrs: Vec<&str> = visible(Some(&Project::Sluggrs))
             .iter()
             .map(|t| t.name)
             .collect();
-        assert!(mogwai.contains(&"mogwai"));
+        assert!(sluggrs.contains(&"sluggrs"));
 
         let pbfhogg: Vec<&str> = visible(Some(&Project::Pbfhogg))
             .iter()
             .map(|t| t.name)
             .collect();
         assert!(pbfhogg.contains(&"pbfhogg"));
-        assert!(!pbfhogg.contains(&"mogwai"));
+        assert!(!pbfhogg.contains(&"sluggrs"));
     }
 
     /// An unrecognised project still gets a usable listing rather than an empty
