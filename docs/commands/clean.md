@@ -76,7 +76,7 @@ anything does:
 | `.brokkr/hash_cache`, `hash_cache.lock` | a save drops entries for files that no longer exist; a run that only hits the cache does not save |
 | `.brokkr/pbfhogg-capabilities` | not read or written; safe to delete |
 | `.brokkr/worktrees.toml` | cutting a new `--commit` worktree drops the vanished records of that checkout only; nothing else does |
-| `.brokkr/parallel-timings.toml` | nothing: measured costs merge in per sweep and binary, and a sweep or binary that stops existing keeps its entries; advisory, and safe to delete |
+| `.brokkr/parallel-timings.toml` | each parallel sweep's write drops test records unobserved for 30 days, and a binary or entry left empty; safe to delete, at the cost of estimated allocations until the tests run again |
 | `.brokkr/.sidecar.lock`, `.gitignore` | one small file each; the lock persists, and an existing `.gitignore` is never rewritten |
 
 Some files exist only while their writer runs, and a writer killed with

@@ -707,22 +707,30 @@ explicit count prints bare.
 ### allocation
 
 Each binary's slice is proportional to how long it takes, floored at one
-slot and capped at its own test count. brokkr admits binaries in order of
-claim size, largest first. When the long pole holds the largest claim, it is
-admitted while the pool is whole. When it doesn't (a one-slot pole), it
-queues behind every wider claim.
+slot and capped at the number of tests it executes this run. brokkr admits
+binaries in order of claim size, largest first. When the long pole holds the
+largest claim, it is admitted while the pool is whole. When it doesn't (a
+one-slot pole), it queues behind every wider claim.
 
-Proportional isn't a heuristic. Model a binary of cost `c` on `k` threads as
-taking `c/k`; the sweep's wall time is then `max(c_i / k_i)`. That maximum is
-smallest when `c_i / k_i` is equal across binaries, which is threads in
-proportion to cost. Every binary then finishes at the same moment, and any
-other split gives one binary a longer pole than it needed.
+Proportional follows from a model. Model a binary of cost `c` on `k` threads
+as taking `c/k`; the sweep's wall time is then `max(c_i / k_i)`. That
+maximum is smallest when `c_i / k_i` is equal across binaries, which is
+threads in proportion to cost. Whole slots, the floor, the count cap and
+queued admission make the real allocation an approximation of that optimum.
 
-The cost is the binary's serial cost, the sum of its own tests' durations.
-brokkr keeps it in `.brokkr/parallel-timings.toml` and merges it after every
-parallel sweep, keyed by the `[[check]]` entry name. The key is never the
+The cost is the binary's serial cost for this run: the sum of the recorded
+durations of the tests it will execute. Those are its selected tests, less
+the `#[ignore]`d ones unless the lane runs them, plus the benchmark functions
+test mode runs once. brokkr records each test's duration in
+`.brokkr/parallel-timings.toml` after every parallel sweep and merges it per
+test name. A run doesn't overwrite the record of a test it didn't complete.
+Only the 30-day retention under warm-up can remove it. So a plain check that
+skips a binary's slow ignored tests leaves their durations in place for the
+next gate, and a skip or only filter can't overwrite the costs of tests it
+left out. Records are grouped by the `[[check]]` entry name, never the
 lane-qualified label, so `default` under plain check and `tier1/default`
-under a lanes gate share one record.
+under a lanes gate share them. Within an entry a binary is identified by its
+cargo resolution, package id and `kind:target`.
 
 Test count is only a fallback. Count-as-cost assumes every test costs the
 same, and starves whichever binary is slow but small, which on a
@@ -732,24 +740,36 @@ tests then ran end to end for 22.3s of a 24.5s sweep, where overlapping them
 would have cost 10.1s.
 
 The cost is serial cost and not wall time, because wall time depends on the
-slots the allocator granted, so feeding it back oscillates. Serial cost
-doesn't move when the allocation moves.
+slots the allocator granted, so feeding it back oscillates. Serial cost has
+no direct dependence on the grant, though contention between tests under a
+wider grant can still move a test's own duration.
 
-Claims are capped where extra threads stop helping. The same identity says
-no binary finishes before its longest single test, so slots past
-`serial / slowest` do nothing for it, and are worth more to a binary not yet
-at its own floor. The cap stops the allocator pouring slots into a binary
-that is already as fast as it can be.
+There's no cap below the test count. `wall = max(serial / k, slowest)` is
+a lower bound on a binary's wall time, not its value, so a cap read off it
+can withhold a slot that would have helped. Four tests of 10, 6, 6 and 6
+seconds give `serial / slowest` a ceiling of three slots. Three slots take
+12s, while four take 10s.
 
 ### warm-up
 
 The allocation warms up. The first run of a tree has no history and weights
-by count. A binary with no record of its own is estimated from its
-siblings' mean cost per test, and brokkr replaces the estimate with a
-measurement once the binary has run. The timings file is advisory in every
-direction. A missing, unreadable or stale file, including one in an older
-format that no longer parses, costs one warm-up run and never a wrong
-result.
+by count. A test with no record is priced at the mean over the recorded
+tests this run executes, across every binary in the plan rather than its
+own binary, so one cheap sample can't price its unseen siblings cheap. A
+test stays estimated until a run completes it. A failed, aborted or
+interrupted run still records the tests that completed. A test it didn't
+complete keeps whatever record it had. A binary an interrupt cut off
+mid-run reports no tests, so it records nothing.
+
+The timings file never decides which tests are selected or how a result is
+judged.
+A missing or unreadable file, or one in an older format that no longer
+parses, reads as no history. An allocation is still a performance input,
+though. A stale estimate can lengthen the test phase, and the phase's time
+ceiling judges the longer phase. A test unobserved for 30 days is dropped
+on the next write, so renamed and deleted tests don't pile up. That only
+limits what the file keeps: until then, an old record is read like a fresh
+one.
 
 > [!NOTE]
 > Budget tuning needs settled weights. The first run weights by count, and

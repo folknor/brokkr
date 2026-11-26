@@ -1834,19 +1834,25 @@ included, by committing the equivalent `[unstable]` and `[resolver]` pin in
 
 The parallel lane runs a sweep's test binaries at once under a budget of
 in-flight tests. Each binary claims a slice of the budget proportional to its
-serial cost from the previous run, the sum of its own tests' durations. The
-claim is:
+serial cost for this run. That cost is the sum of the recorded durations of
+the names it will execute: `PreparedBinary::executed` under the lane's
+`include_ignored`, plus its benchmark functions. The claim is floored at one
+slot and capped at that count.
 
-- floored at one slot
-- capped at the binary's own test count
-- capped again where extra threads stop helping (`serial / slowest_test`)
-
-Costs live in `.brokkr/parallel-timings.toml`. A tree with no history weights
-by test count instead, so a budget change takes two runs to measure, not one.
-The pure allocator combines these rules and orders binaries largest-first.
-Serial cost is stored as integer milliseconds, not wall time, because wall
-time depends on the slots granted and feeding it back oscillates (see
-"Parallel allocator rationale").
+Costs live in `.brokkr/parallel-timings.toml`, one record per test name
+(integer microseconds and the time it was last observed). They're grouped by
+`[[check]]` entry, then by a measurement key of resolution, package id and
+`kind:target`. A run merges what it completed, interrupted runs included,
+and overwrites no other name's record. Only the 30-day write-time retention
+removes one. Per-binary records were overwritten by whichever selection ran
+last (brokkr#224). An unrecorded name is priced at the mean over the recorded
+names in the plan's inventories. A tree with no history weights by test
+count instead, so a budget change measured there takes two runs, not one.
+The write goes to a sibling file renamed over the store, so a failed write
+leaves the old store whole. The pure allocator returns claims by plan index,
+largest first, so two runs sharing a measurement key both launch. Durations
+are stored, not wall time, because wall time depends on the slots granted
+and feeding it back oscillates (see "Parallel allocator rationale").
 
 The budget resolves at profile resolution, where `LaneExec::resolve` keys
 only on the presence of `parallel`, so loading never depends on the host. The
@@ -2611,10 +2617,38 @@ collapsed run over run (1-7, 1-6, 1-4, 1-3) rather than converging.
 Left running, the loop reached `1-1`, every binary at the floor. It took 55.8s
 against a baseline of about 50s for not fanning out at all, so its terminal
 state lost to the thing the lane exists to beat, while still reporting
-success. Serial cost doesn't move when the allocation moves. Roughly
-`wall = max(serial / k, slowest_test)`, so wall conflates what is measured
-with what was chosen. Wall time is what you want to know, and for exactly that
-reason not what you may feed back.
+success. Serial cost has no direct dependence on the grant, though contention
+under a wider grant can still move a test's own duration. Wall time conflates
+what is measured with what was chosen. It's what you want to know, and for
+exactly that reason not what you may feed back.
+
+**Per test, not per binary.** A binary's cost depends on which of its tests a
+run executes. One record per binary was overwritten by whichever selection
+ran last. A plain check that left out a binary's `#[ignore]`d socket tests
+recorded it as cheap, and the next gate starved its real pole, 1m05s against
+33s. Summing per-name records over the executed names stops a selection from
+overwriting the costs of tests it left out. Overlapping selections still
+update shared names, under whatever contention their run had. Keep the merge
+per name: a run must never write a name it didn't complete.
+
+**No useful-slot cap.** The allocator once capped a claim at
+`ceil(serial / slowest_test)`, read off `wall = max(serial / k, slowest)`.
+That identity is a lower bound on a binary's wall time, not its value, so the
+cap withheld slots that helped. Four tests of 10, 6, 6 and 6 seconds cap at
+three slots, which take 12s, against 10s on four. An exact list-scheduling
+simulation was weighed and declined. It's valid only when the dispatch order
+is known for every grant and selection, and nothing establishes that: a
+nightly `#![test_runner]` crate keeps the default manifest harness and can
+dispatch in any order. Shuffle and fail-fast change the model too. The
+simulation would also have cut a binary alone in its plan below slots nobody
+else could use. The cap's original reason was the collapse under wall-time
+feedback, which serial cost had already removed.
+
+**What advisory means.** History never decides which tests are selected or
+how a result is judged. But the allocation does reach the verdict through the
+test phase's time ceiling: a stale estimate that under-grants a binary can
+lengthen the phase into a timeout. Don't describe the store as unable to
+cause a wrong result.
 
 **Proportional claims, not test counts.** Taking as many slots as a binary has
 tests, capped at the budget, silently defeats the lane on the workspaces that

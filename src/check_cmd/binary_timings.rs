@@ -1,5 +1,5 @@
-// Per-binary costs carried between runs, so one pure allocator can hand out
-// threads in proportion to how long a binary actually takes.
+// Per-test costs carried between runs, so one pure allocator can hand out
+// threads in proportion to how long a binary will actually take THIS run.
 //
 // WHY COUNT IS THE WRONG WEIGHT. The allocation's derivation - minimise
 // `max(c_i / k_i)` by holding `c_i / k_i` equal - is right, but `c` has to be
@@ -11,15 +11,9 @@
 // budget 24, and the sweep's slowest binary held about ten latency-bound
 // integration tests - so its count-share computed to `24 * 10 / 2224`, floored
 // to ONE slot. Its eight slowest tests then ran end to end for 22.3s of a
-// 24.5s sweep, where overlapping them would have cost 10.1s: the duration of
-// its own slowest test, and nothing more. Meanwhile a fat unit-test binary
-// with hundreds of millisecond tests drew seven slots it had no use for.
-//
-// The costs in that suite cluster on round numbers - 10.115, 6.015, 5.002,
-// 3.006, 1.003 - because they are ceilings and timeouts being waited out
-// rather than work being done. That is worth stating plainly: such a suite is
-// not competing for cores at all, so thread count is nearly free and the only
-// thing the allocation decides is which binary finishes last.
+// 24.5s sweep, where overlapping them would have cost 10.1s. Meanwhile a fat
+// unit-test binary with hundreds of millisecond tests drew seven slots it had
+// no use for.
 //
 // WHY SERIAL COST AND NOT WALL TIME. The first version of this stored each
 // binary's measured WALL time, and that oscillated - because wall time is a
@@ -28,82 +22,72 @@
 // it becomes the pole again. Measured as a clean two-cycle at a fixed budget
 // on a warm machine: the pole alternated between the same two binaries and the
 // sweep swung between 13.8s and 19.5s, while the claim spread collapsed run
-// over run (1-7, 1-6, 1-4, 1-3) instead of converging. Feeding back the
-// outcome of your own decision as its input is a control loop, not a measure.
+// over run instead of converging, and left running reached `1-1` and lost to
+// not fanning out at all. Serial cost - the sum of the tests' own durations -
+// has no direct dependence on the grant. (Contention between tests under a
+// wider grant can still move a test's own duration; that is a second-order
+// effect, and the store does not pretend to remove it.)
 //
-// AND IT DID NOT MERELY CYCLE - IT COLLAPSED. Left running, the spread reached
-// `1-1`, every binary at the floor, and the sweep took 55.8s against a ~50s
-// baseline for not fanning out at all. So the terminal state of the feedback
-// loop was losing to the thing the lane exists to beat, while still reporting
-// success. That is the reason this stores serial cost and not the obvious
-// quantity: wall time is what you want to know, and precisely therefore not
-// what you may measure.
+// WHY PER TEST AND NOT PER BINARY. A binary's cost depends on WHICH of its
+// tests a run executes. One store per binary was overwritten by whatever
+// selection ran last: a plain check that leaves a binary's `#[ignore]`d socket
+// tests out recorded it as cheap, and the next gate, which includes them,
+// scheduled its real pole from that figure and starved it (brokkr#224). The
+// same happened under any skip or only filter. So each test's duration is
+// recorded under its own name and merged, and a binary's cost for a run is the
+// sum over the names that run will execute. A run never overwrites a test it
+// did not execute, so no selection can corrupt another's estimate.
 //
-// Serial cost - the sum of the binary's own tests' durations - does not move
-// when the allocation moves. Roughly `wall = max(serial / k, slowest_test)`,
-// so wall conflates the thing being measured with the thing being chosen, and
-// serial does not.
+// NO USEFUL-SLOT CAP. An earlier allocator capped a claim at
+// `ceil(serial / slowest)`, read off `wall = max(serial / k, slowest)`. That
+// identity is a LOWER BOUND on the makespan, not its value, so the cap could
+// withhold a slot that would have helped (tests of 10, 6, 6, 6 seconds: the
+// cap says three, three take 12s, four take 10s). An exact list-scheduling
+// simulation is only valid when the dispatch order is known for every grant,
+// which a custom test runner behind a default-harness manifest can break, and
+// a single binary alone in a plan lost slots nobody else could use. The cap's
+// original reason was the collapse under wall-time feedback, which serial
+// cost already removed, so it is gone.
 //
-// `slowest` is stored alongside for the second half of that identity: no
-// number of threads takes a binary below its longest single test, so slots
-// past `serial / slowest` do nothing for it and are better spent elsewhere.
+// WHAT "ADVISORY" MEANS HERE. History never decides which tests are selected
+// or how a test's result is judged, and a missing, unreadable or old-format
+// file is read as empty and never fails a run. But a bad allocation can
+// lengthen the test phase, and the phase ceiling judges the lengthened phase,
+// so a stale estimate is a performance input that can still reach a timeout.
 //
-// WHY A FILE RATHER THAN A GUESS. Duration cannot be derived from the config
-// or from a listing; it has to be measured, which means the first run of a
-// new binary has nothing to go on. So the store warms up: a binary with no
-// record is estimated from the known binaries' mean cost per test, which is a
-// far better prior than counting tests as equal, and the estimate is replaced
-// by a measurement as soon as the binary has run once.
-//
-// The file is brokkr-owned state under `state_root/.brokkr/`, alongside the
-// other measurement stores, and is advisory in every direction: a missing,
-// unreadable or stale file costs a worse allocation and never a wrong result.
-// Nothing here may fail a run.
+// The file is brokkr-owned state under `state_root/.brokkr/`. Each record
+// carries when it was last observed; a name unobserved for
+// `RETENTION_SECS` is dropped on the next write, so renamed and deleted tests
+// do not accumulate. That is retention only: an old sample is still a better
+// prior than the plan mean, so lookups do not age records out.
 
 // `include!` puts every check_cmd file in one namespace, so BTreeMap, Path,
 // PathBuf and Duration are already imported by a sibling.
 
-/// What one binary cost last time, in a form that does not move when the
-/// allocation moves.
-#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
-pub(crate) struct BinaryCost {
-    /// Sum of the binary's own tests' durations - its cost if run on one
-    /// thread. **Independent of the slots it was granted**, which is the whole
-    /// point: see the module header.
-    #[serde(with = "duration_millis")]
-    pub(crate) serial: Duration,
-    /// Its single longest test. No number of threads takes the binary below
-    /// this, so it is where extra slots stop buying anything.
-    #[serde(with = "duration_millis")]
-    pub(crate) slowest: Duration,
+/// One test's last observed duration, and when it was observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TestCost {
+    /// Integer microseconds, so the file is independent of serde's `Duration`
+    /// representation. Not milliseconds: a suite of sub-millisecond tests
+    /// would record every one as zero and lose its binaries' relative costs.
+    pub(crate) us: u64,
+    /// Unix seconds of the run that observed it, for retention.
+    pub(crate) seen: u64,
 }
 
-/// Keep the on-disk cache compact and independent of serde's representation
-/// for `Duration`: both fields are integer milliseconds.
-mod duration_millis {
-    use std::time::Duration;
+/// How long a test name may go unobserved before a write drops it. Wall
+/// clock, not a run count: a binary's ignored tests go unobserved through
+/// every plain check between two gates, however many there are.
+const RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
 
-    use serde::{Deserialize, Deserializer, Serializer};
+/// One binary's recorded tests: name -> cost.
+pub(crate) type BinaryHistory = BTreeMap<String, TestCost>;
 
-    pub(super) fn serialize<S>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_u64(u64::try_from(value.as_millis()).unwrap_or(u64::MAX))
-    }
-
-    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        u64::deserialize(deserializer).map(Duration::from_millis)
-    }
-}
-
-/// `[[check]] entry name -> package/kind:target identity -> cost`. The entry
-/// name, not the lane-qualified sweep label: `default` and `tier1/default` run
-/// the same binaries, and keying by label made every profile re-pay the warm-up.
-type Store = BTreeMap<String, BTreeMap<String, BinaryCost>>;
+/// `[[check]] entry name -> binary measurement key -> test name -> cost`.
+/// The entry name, not the lane-qualified sweep label: `default` and
+/// `tier1/default` run the same binaries, and keying by label made every
+/// profile re-pay the warm-up.
+type Store = BTreeMap<String, BTreeMap<String, BinaryHistory>>;
 
 fn store_path(state_root: &Path) -> std::path::PathBuf {
     crate::clean::layout::ProjectState::new(state_root).parallel_timings_file()
@@ -111,9 +95,8 @@ fn store_path(state_root: &Path) -> std::path::PathBuf {
 
 /// Read the recorded times, or an empty store.
 ///
-/// Every failure path yields an empty store rather than an error: this feeds
-/// an allocation heuristic, and a run must never fail because a cache did not
-/// parse.
+/// Every failure path yields an empty store rather than an error, including
+/// the per-binary format an older brokkr wrote, which no longer parses.
 pub(crate) fn timings_load(state_root: &Path) -> Store {
     std::fs::read_to_string(store_path(state_root))
         .ok()
@@ -121,94 +104,112 @@ pub(crate) fn timings_load(state_root: &Path) -> Store {
         .unwrap_or_default()
 }
 
-/// Allocate each binary a proportional share of the test budget and order
-/// the result largest-first. Test counts estimate missing history; recorded
-/// serial durations replace those estimates. The function is pure so a whole
-/// allocation shape can be checked without launching a test process.
+/// One binary of a plan as the allocator sees it: its measurement key and the
+/// names this run will execute.
+pub(crate) struct AllocInput<'a> {
+    pub(crate) key: String,
+    pub(crate) names: Vec<&'a str>,
+}
+
+/// Allocate each binary a proportional share of the test budget, returned as
+/// `(input index, slots)` ordered largest claim first.
+///
+/// A binary's weight is the sum of its executed names' recorded durations.
+/// An unrecorded name is priced at the mean over every recorded name in this
+/// plan's inventories (not the binary's own mean: one cheap sample would price
+/// its unseen siblings cheap). With nothing recorded anywhere the weights are
+/// the test counts. Claims are clamped to `[1, min(budget, count)]`. Pure, so a
+/// whole allocation shape can be checked without launching a test process.
 pub(crate) fn allocate(
-    binaries: &[(String, u32)],
-    history: Option<&BTreeMap<String, BinaryCost>>,
+    inputs: &[AllocInput<'_>],
+    history: Option<&BTreeMap<String, BinaryHistory>>,
     budget: u32,
-) -> Vec<(String, u32)> {
+) -> Vec<(usize, u32)> {
     let budget = budget.max(1);
-    let (known_nanos, known_tests) = binaries
+    let lookup = |input: &AllocInput<'_>, name: &str| -> Option<u128> {
+        history?
+            .get(&input.key)?
+            .get(name)
+            .map(|cost| u128::from(cost.us))
+    };
+    let (known_us, known_names) = inputs
         .iter()
-        .filter_map(|(key, count)| {
-            let serial = history?.get(key)?.serial;
-            (serial > Duration::ZERO && *count > 0)
-                .then_some((serial.as_nanos(), u128::from(*count)))
-        })
-        .fold((0_u128, 0_u128), |(nanos, tests), (cost, count)| {
-            (nanos.saturating_add(cost), tests.saturating_add(count))
-        });
+        .flat_map(|input| input.names.iter().filter_map(move |name| lookup(input, name)))
+        .fold((0_u128, 0_u128), |(us, n), cost| (us.saturating_add(cost), n + 1));
 
-    let allocated = binaries
+    let weights: Vec<u128> = inputs
         .iter()
-        .map(|(key, count)| {
-            let cost = history.and_then(|store| store.get(key)).copied();
-            let weight = cost
-                .filter(|cost| cost.serial > Duration::ZERO)
-                .map(|cost| cost.serial.as_nanos())
-                .unwrap_or_else(|| {
-                    known_nanos
-                        .saturating_mul(u128::from(*count))
-                        .checked_div(known_tests)
-                        .map_or_else(|| u128::from(*count), |average| average.max(1))
-                });
-            (key.clone(), *count, weight, cost)
+        .map(|input| {
+            let count = input.names.len() as u128;
+            if known_names == 0 {
+                // No history at all: weight by count.
+                return count;
+            }
+            let (recorded, unseen) = input.names.iter().fold((0_u128, 0_u128), |(sum, unseen), name| {
+                match lookup(input, name) {
+                    Some(us) => (sum.saturating_add(us), unseen),
+                    None => (sum, unseen + 1),
+                }
+            });
+            // Unseen names at the plan mean, multiplied before dividing so
+            // the mean is not rounded once per name. `max(1)` keeps a
+            // zero-duration total off the zero-weight path.
+            let estimated = unseen.saturating_mul(known_us) / known_names;
+            recorded.saturating_add(estimated).max(1)
         })
-        .collect::<Vec<_>>();
-    let total_weight = allocated
-        .iter()
-        .map(|(_, _, weight, _)| *weight)
-        .fold(0_u128, u128::saturating_add);
+        .collect();
+    let total_weight = weights.iter().copied().fold(0_u128, u128::saturating_add);
 
-    let mut result = allocated
-        .into_iter()
-        .map(|(key, count, weight, cost)| {
+    let mut result: Vec<(usize, u32)> = inputs
+        .iter()
+        .zip(&weights)
+        .enumerate()
+        .map(|(index, (input, weight))| {
             let share = u128::from(budget)
-                .saturating_mul(weight)
+                .saturating_mul(*weight)
                 .checked_div(total_weight)
                 .unwrap_or(1);
-            let slots = u32::try_from(share).unwrap_or(budget).clamp(1, budget);
-            let slots = slots
-                .min(count.max(1))
-                .min(useful_slot_cap(cost).unwrap_or(u32::MAX).max(1));
-            (key, slots)
+            let count = u32::try_from(input.names.len()).unwrap_or(u32::MAX).max(1);
+            let slots = u32::try_from(share).unwrap_or(budget).clamp(1, budget).min(count);
+            (index, slots)
         })
-        .collect::<Vec<_>>();
-    result.sort_by(|(key_a, slots_a), (key_b, slots_b)| {
-        slots_b.cmp(slots_a).then_with(|| key_a.cmp(key_b))
+        .collect();
+    result.sort_by(|(a, slots_a), (b, slots_b)| {
+        slots_b
+            .cmp(slots_a)
+            .then_with(|| inputs[*a].key.cmp(&inputs[*b].key))
+            .then_with(|| a.cmp(b))
     });
     result
 }
 
-/// Merge this sweep's measured times into the store and write it back.
+/// What one binary of a finished sweep observed: its measurement key and each
+/// completed test's duration.
+pub(crate) struct Observed {
+    pub(crate) key: String,
+    pub(crate) completed: Vec<(String, Duration)>,
+}
+
+/// Merge this sweep's observations into the store and write it back.
 ///
-/// Merged rather than replaced so a sweep run under a narrowing filter does
-/// not discard the times of binaries it did not run this time.
-pub(crate) fn timings_record(state_root: &Path, sweep: &str, measured: &[(String, BinaryCost)]) {
+/// Per test name: a completed observation replaces that name's record (the
+/// last sample of a name within the run wins), and every name the run did not
+/// complete - unselected, ignored, unstarted, hung - keeps its record. Names
+/// unobserved for [`RETENTION_SECS`] are then dropped store-wide.
+pub(crate) fn timings_record(state_root: &Path, entry: &str, observed: &[Observed], now: u64) {
     let mut store = timings_load(state_root);
-    // The old `<package>/<target>` identity cannot distinguish a library
-    // harness from a same-named bin or integration target. It is no longer
-    // consulted, so drop those stale cache keys on the next recording pass.
-    let mut pruned_legacy = false;
-    for entries in store.values_mut() {
-        entries.retain(|key, _| {
-            let keep = !is_legacy_timing_key(key);
-            pruned_legacy |= !keep;
-            keep
-        });
-    }
-    if measured.is_empty() && !pruned_legacy {
-        return;
-    }
-    if !measured.is_empty() {
-        let entry = store.entry(sweep.to_owned()).or_default();
-        for (key, cost) in measured {
-            entry.insert(key.clone(), *cost);
+    let entries = store.entry(entry.to_owned()).or_default();
+    for binary in observed {
+        if binary.completed.is_empty() {
+            continue;
+        }
+        let tests = entries.entry(binary.key.clone()).or_default();
+        for (name, duration) in &binary.completed {
+            let us = u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+            tests.insert(name.clone(), TestCost { us, seen: now });
         }
     }
+    expire(&mut store, now);
 
     let path = store_path(state_root);
     let Some(parent) = path.parent() else {
@@ -218,42 +219,36 @@ pub(crate) fn timings_record(state_root: &Path, sweep: &str, measured: &[(String
         return;
     }
     if let Ok(text) = toml::to_string(&store) {
-        // Best effort by design - see the module header. A read-only or full
-        // filesystem degrades the next run's allocation and nothing else.
-        drop(std::fs::write(&path, text));
+        // Written beside and renamed over, so a kill or a full disk mid-write
+        // leaves the previous store whole rather than a truncated file that
+        // reads as empty and loses every entry this run did not touch. Best
+        // effort: a failed write costs later allocations, never this run.
+        let partial = path.with_extension("toml.partial");
+        if std::fs::write(&partial, text).is_ok() && std::fs::rename(&partial, &path).is_err() {
+            drop(std::fs::remove_file(&partial));
+        }
     }
 }
 
-fn is_legacy_timing_key(key: &str) -> bool {
-    key.rsplit_once('/')
-        .is_some_and(|(_, target)| !target.contains(':'))
+/// Drop names unobserved for [`RETENTION_SECS`], then any binary or entry
+/// left empty.
+fn expire(store: &mut Store, now: u64) {
+    let cutoff = now.saturating_sub(RETENTION_SECS);
+    for binaries in store.values_mut() {
+        for tests in binaries.values_mut() {
+            tests.retain(|_, cost| cost.seen >= cutoff);
+        }
+        binaries.retain(|_, tests| !tests.is_empty());
+    }
+    store.retain(|_, binaries| !binaries.is_empty());
 }
 
-/// The most slots a binary can still use, from `wall = max(serial/k, slowest)`.
-///
-/// Once `serial / k` has fallen to the binary's longest single test, another
-/// thread changes nothing - the binary cannot finish before that test does.
-/// Slots past this point are not merely wasted on it, they are withheld from
-/// binaries that could still use them, and granting them is what let the claim
-/// spread collapse as the allocator poured slots into a binary that was
-/// already at its floor.
-///
-/// `None` means "no useful limit known" - no measurement, or a `slowest` of
-/// zero, where the caller's own count cap is the only bound that applies.
-pub(crate) fn useful_slot_cap(cost: Option<BinaryCost>) -> Option<u32> {
-    let c = cost?;
-    if c.slowest.is_zero() || c.serial.is_zero() {
-        return None;
-    }
-    let serial = c.serial.as_nanos();
-    let slowest = c.slowest.as_nanos();
-    let quotient = serial / slowest;
-    let ratio = if serial % slowest == 0 {
-        quotient
-    } else {
-        quotient + 1
-    };
-    Some(u32::try_from(ratio).unwrap_or(u32::MAX).max(1))
+/// Unix seconds now, for [`timings_record`]; zero on a clock before the epoch,
+/// which only delays expiry.
+pub(crate) fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 #[cfg(test)]
@@ -261,173 +256,186 @@ mod binary_timings_tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
 
-    // With nothing recorded the weights ARE the test counts, so a fresh tree
-    // allocates exactly as it did before the store existed.
+    fn input<'a>(key: &str, names: &[&'a str]) -> AllocInput<'a> {
+        AllocInput { key: key.into(), names: names.to_vec() }
+    }
+
+    fn history(rows: &[(&str, &[(&str, u64)])]) -> BTreeMap<String, BinaryHistory> {
+        rows.iter()
+            .map(|(key, tests)| {
+                let tests = tests
+                    .iter()
+                    .map(|(name, ms)| ((*name).to_owned(), TestCost { us: *ms * 1_000, seen: 0 }))
+                    .collect();
+                ((*key).to_owned(), tests)
+            })
+            .collect()
+    }
+
+    fn names(prefix: &str, n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("{prefix}{i}")).collect()
+    }
+
+    // With nothing recorded the weights ARE the test counts.
     #[test]
     fn no_history_falls_back_to_counts() {
-        assert_eq!(
-            allocate(&[("one".into(), 10)], None, 8),
-            vec![("one".into(), 8)]
-        );
+        let n = names("t", 10);
+        let refs: Vec<&str> = n.iter().map(String::as_str).collect();
+        assert_eq!(allocate(&[input("one", &refs)], None, 8), vec![(0, 8)]);
     }
 
-    fn cost(serial_ms: u64, slowest_ms: u64) -> Option<BinaryCost> {
-        Some(BinaryCost {
-            serial: Duration::from_millis(serial_ms),
-            slowest: Duration::from_millis(slowest_ms),
-        })
-    }
-
-    // No number of threads takes a binary below its longest single test, so
-    // slots past that ratio buy nothing and are withheld from binaries that
-    // could still use them.
+    // THE TICKET. A plain run records a binary's cheap tests only; the gate,
+    // which also executes its slow ignored tests, must price those from their
+    // own records, which the plain run never touched.
     #[test]
-    fn the_useful_cap_is_where_extra_threads_stop_helping() {
-        // 22.3s of work whose longest test is 10.1s: three threads reach the
-        // floor, a fourth cannot beat it.
-        assert_eq!(useful_slot_cap(cost(22_300, 10_100)), Some(3));
-        // Evenly divisible work still needs the rounded-up thread count.
-        assert_eq!(useful_slot_cap(cost(10_000, 5_000)), Some(2));
-        // A binary that is one long test cannot use a second thread at all.
-        assert_eq!(useful_slot_cap(cost(10_100, 10_100)), Some(1));
+    fn a_narrower_run_cannot_cheapen_a_wider_selection() {
+        let slow: Vec<String> = names("socket", 30);
+        let mut all: Vec<&str> = slow.iter().map(String::as_str).collect();
+        all.push("unit");
+        let mut cli_tests: Vec<(&str, u64)> = slow.iter().map(|n| (n.as_str(), 1_600)).collect();
+        cli_tests.push(("unit", 1));
+        let rest = names("r", 200);
+        let rest_refs: Vec<&str> = rest.iter().map(String::as_str).collect();
+        let rest_tests: Vec<(&str, u64)> = rest.iter().map(|n| (n.as_str(), 50)).collect();
+        let h = history(&[("cli", &cli_tests), ("rest", &rest_tests)]);
+
+        // Gate: the ignored socket tests are executed, so `cli` is the pole.
+        let gate = allocate(&[input("cli", &all), input("rest", &rest_refs)], Some(&h), 24);
+        assert_eq!(gate[0], (0, 19), "{gate:?}");
+        // Plain: only `unit` executes, and `cli` is cheap for THIS run only.
+        let plain = allocate(&[input("cli", &["unit"]), input("rest", &rest_refs)], Some(&h), 24);
+        assert_eq!(plain, vec![(1, 23), (0, 1)]);
     }
 
-    // No measurement, or a degenerate one, means no known limit - the
-    // caller's count cap is then the only bound.
+    // The old cap's failure: four tests of 10, 6, 6, 6 seconds need four
+    // slots to reach their 10s floor, and a lone binary must get them all.
     #[test]
-    fn an_unknown_or_degenerate_cost_imposes_no_cap() {
-        assert_eq!(useful_slot_cap(None), None);
-        assert_eq!(useful_slot_cap(cost(10_000, 0)), None);
-        assert_eq!(useful_slot_cap(cost(0, 1_000)), None);
+    fn a_lone_binary_is_not_capped_below_its_test_count() {
+        let h = history(&[("b", &[("a", 10_000), ("b", 6_000), ("c", 6_000), ("d", 6_000)])]);
+        assert_eq!(allocate(&[input("b", &["a", "b", "c", "d"])], Some(&h), 8), vec![(0, 4)]);
     }
 
-    // THE WHOLE ALLOCATION REGRESSION. The earlier helpers passed in
-    // isolation, while their composition starved the small critical-path
-    // binary. Its useful cap is three threads, but count weighting would give
-    // it only one.
+    // An unrecorded name is priced at the plan-wide mean, not its binary's:
+    // `fresh`'s one cheap sample must not price its forty unseen tests cheap.
     #[test]
-    fn allocation_weights_the_slow_small_binary_and_caps_its_claim() {
-        let history = BTreeMap::from([
-            (
-                "slow".into(),
-                BinaryCost {
-                    serial: Duration::from_millis(22_300),
-                    slowest: Duration::from_millis(10_100),
-                },
-            ),
-            (
-                "fast".into(),
-                BinaryCost {
-                    serial: Duration::from_millis(38_000),
-                    slowest: Duration::from_millis(20),
-                },
-            ),
-        ]);
-        let binaries = [("slow".into(), 10), ("fast".into(), 2214)];
-        let allocated = allocate(&binaries, Some(&history), 24);
-        assert_eq!(allocated, vec![("fast".into(), 15), ("slow".into(), 3)]);
-
-        // Under count weighting, ten tests out of 2224 get exactly one slot.
-        let by_count = allocate(&binaries, None, 24);
-        assert_eq!(
-            by_count
-                .iter()
-                .find(|(key, _)| key == "slow")
-                .unwrap()
-                .1,
-            1
-        );
-    }
-
-    // A binary nobody has measured is estimated from its siblings' mean cost
-    // per test, in the same duration unit as recorded costs.
-    #[test]
-    fn allocation_estimates_missing_history_from_known_binaries() {
-        let history = BTreeMap::from([
-            (
-                "a".into(),
-                BinaryCost {
-                    serial: Duration::from_secs(10),
-                    slowest: Duration::from_secs(1),
-                },
-            ),
-            (
-                "b".into(),
-                BinaryCost {
-                    serial: Duration::from_secs(5),
-                    slowest: Duration::from_secs(1),
-                },
-            ),
-        ]);
-        let allocated = allocate(
-            &[("a".into(), 100), ("b".into(), 100), ("new".into(), 40)],
-            Some(&history),
-            18,
-        );
-        assert_eq!(
-            allocated,
-            vec![("a".into(), 10), ("b".into(), 5), ("new".into(), 3)]
-        );
+    fn unseen_names_are_priced_at_the_plan_mean() {
+        let unseen = names("new", 40);
+        let mut fresh: Vec<&str> = unseen.iter().map(String::as_str).collect();
+        fresh.push("cheap");
+        let h = history(&[("old", &[("x", 1_000), ("y", 1_000)]), ("fresh", &[("cheap", 1)])]);
+        let got = allocate(&[input("old", &["x", "y"]), input("fresh", &fresh)], Some(&h), 24);
+        // fresh: 1 + 40 * 667 against old's 2000, so fresh takes the pool.
+        assert_eq!(got, vec![(1, 22), (0, 1)]);
     }
 
     // Every claim remains satisfiable, even if the budget is smaller than the
     // binary count or a caller passes zero.
     #[test]
     fn allocation_claims_are_clamped_to_a_usable_budget() {
-        let binaries: Vec<(String, u32)> = [1_u32, 3, 4, 9, 100, u32::MAX]
+        let pool = names("t", 100);
+        let inputs: Vec<AllocInput<'_>> = [1_usize, 3, 4, 9, 100]
             .into_iter()
             .enumerate()
-            .map(|(index, count)| (index.to_string(), count))
+            .map(|(i, n)| AllocInput {
+                key: i.to_string(),
+                names: pool[..n].iter().map(String::as_str).collect(),
+            })
             .collect();
-        for (key, slots) in allocate(&binaries, None, 4) {
-            let count = binaries
-                .iter()
-                .find(|(candidate, _)| candidate == &key)
-                .unwrap()
-                .1;
-            assert!((1..=4).contains(&slots), "count {count}");
+        for (_, slots) in allocate(&inputs, None, 4) {
+            assert!((1..=4).contains(&slots));
         }
-        assert_eq!(
-            allocate(&[("empty".into(), 0)], None, 0),
-            vec![("empty".into(), 1)]
-        );
+        assert_eq!(allocate(&[input("empty", &[])], None, 0), vec![(0, 1)]);
     }
 
-    // Fat binaries keep room for each other; no one binary claims the pool
-    // merely because it contains at least as many tests as the budget.
+    // Fat binaries keep room for each other.
     #[test]
     fn allocation_leaves_room_for_multiple_large_binaries() {
-        let binaries: Vec<(String, u32)> = (0..8).map(|i| (i.to_string(), 300)).collect();
-        let allocated = allocate(&binaries, None, 24);
+        let pool = names("t", 300);
+        let refs: Vec<&str> = pool.iter().map(String::as_str).collect();
+        let inputs: Vec<AllocInput<'_>> = (0..8).map(|i| input(&i.to_string(), &refs)).collect();
+        let allocated = allocate(&inputs, None, 24);
         assert!(allocated.iter().all(|(_, slots)| *slots == 3));
-        assert_eq!(allocated.iter().map(|(_, slots)| *slots).sum::<u32>(), 24);
+    }
+
+    // Two prepared runs sharing a key are still two runs: the result is by
+    // index, so neither disappears from the plan.
+    #[test]
+    fn same_keyed_inputs_both_get_a_claim() {
+        let got = allocate(&[input("k", &["a"]), input("k", &["a"])], None, 4);
+        assert_eq!(got.len(), 2);
+    }
+
+    fn state(scratch: &str) -> std::path::PathBuf {
+        crate::test_scratch::scratch("binary_timings", scratch)
+    }
+
+    // A run merges per name: what it did not complete keeps its record, what
+    // it did is replaced, and the last sample of a repeated name wins.
+    #[test]
+    fn recording_merges_per_name() {
+        let root = state("timings-merge");
+        let ms = Duration::from_millis;
+        let gate = Observed {
+            key: "k".into(),
+            completed: vec![("slow".into(), ms(9_000)), ("unit".into(), ms(5))],
+        };
+        timings_record(&root, "e", &[gate], 100);
+        let plain = Observed {
+            key: "k".into(),
+            completed: vec![("unit".into(), ms(7)), ("unit".into(), ms(8))],
+        };
+        timings_record(&root, "e", &[plain], 200);
+        let got = &timings_load(&root)["e"]["k"];
+        assert_eq!(got["slow"], TestCost { us: 9_000_000, seen: 100 });
+        assert_eq!(got["unit"], TestCost { us: 8_000, seen: 200 });
+    }
+
+    // Retention: a name unobserved past the window is dropped on the next
+    // write, and a binary left empty goes with it.
+    #[test]
+    fn unobserved_names_expire_on_write() {
+        let root = state("timings-expire");
+        let ms = Duration::from_millis;
+        timings_record(&root, "e", &[Observed { key: "gone".into(), completed: vec![("t".into(), ms(1))] }], 0);
+        let later = RETENTION_SECS + 1;
+        timings_record(&root, "e", &[Observed { key: "live".into(), completed: vec![("t".into(), ms(1))] }], later);
+        let store = timings_load(&root);
+        assert!(!store["e"].contains_key("gone"));
+        assert!(store["e"].contains_key("live"));
     }
 
     #[test]
     fn a_store_round_trips_through_toml() {
         let mut store: Store = Store::new();
-        store.entry("default".into()).or_default().insert(
-            "pkg/some_target".into(),
-            BinaryCost {
-                serial: Duration::from_millis(22_300),
-                slowest: Duration::from_millis(10_100),
-            },
-        );
+        store
+            .entry("default".into())
+            .or_default()
+            .entry("pkg test:t".into())
+            .or_default()
+            .insert("mod::case".into(), TestCost { us: 22_300, seen: 7 });
         let text = toml::to_string(&store).unwrap();
         let back: Store = toml::from_str(&text).unwrap();
-        let got = back["default"]["pkg/some_target"];
-        assert_eq!(got.serial, Duration::from_millis(22_300));
-        assert_eq!(got.slowest, Duration::from_millis(10_100));
-        assert!(text.contains("serial = 22300"));
-        assert!(text.contains("slowest = 10100"));
+        assert_eq!(back["default"]["pkg test:t"]["mod::case"], TestCost { us: 22_300, seen: 7 });
     }
 
-    // A store written with float seconds no longer parses.
-    // That must degrade to "no history" and cost one warm-up run, never fail
-    // the check - the file is advisory in every direction.
+    // Sub-millisecond tests keep their relative costs: a thousand 0.9ms tests
+    // outweigh one.
     #[test]
-    fn a_store_written_with_float_seconds_no_longer_parses() {
-        let old = "[default.\"pkg/some_target\"]\nserial = 22.3\nslowest = 10.1\n";
+    fn sub_millisecond_costs_keep_their_weight() {
+        let many = names("m", 1_000);
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        let mut h = BTreeMap::new();
+        h.insert("many".to_owned(), many.iter().map(|n| (n.clone(), TestCost { us: 900, seen: 0 })).collect());
+        h.insert("one".to_owned(), BTreeMap::from([("x".to_owned(), TestCost { us: 900, seen: 0 })]));
+        let got = allocate(&[input("many", &refs), input("one", &["x"])], Some(&h), 8);
+        assert_eq!(got, vec![(0, 7), (1, 1)]);
+    }
+
+    // The per-binary format an older brokkr wrote no longer parses, which
+    // must read as no history rather than fail the check.
+    #[test]
+    fn the_per_binary_format_no_longer_parses() {
+        let old = "[default.\"pkg/test:t\"]\nserial = 22300\nslowest = 10100\n";
         assert!(toml::from_str::<Store>(old).is_err());
     }
 }

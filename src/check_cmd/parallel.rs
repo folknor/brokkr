@@ -99,9 +99,8 @@ use crate::test_runner::{effective_test_threads, HungTest, LaneVerdict};
 struct BinaryRun {
     /// `<package>/<target>`, the label a failure is reported under.
     label: String,
-    /// `<package>/<kind>:<target>`, the identity used by the timing cache.
-    /// The report label intentionally stays shorter, but cache identity must
-    /// distinguish same-named targets of different kinds.
+    /// The binary's measurement key in the timing store (`binary_timing_key`).
+    /// The report label intentionally stays shorter.
     timing_key: String,
     /// The copy-pasteable cargo line, reprinted on failure.
     command: String,
@@ -123,10 +122,10 @@ struct BinaryRun {
 
 impl BinaryRun {
     /// A binary that reached the front of the queue after the lane was aborted.
-    fn skipped_after_abort(binary: &TestBinary) -> Self {
+    fn skipped_after_abort(resolution: &Option<String>, binary: &TestBinary) -> Self {
         Self {
             label: format!("{}/{}", binary.package, binary.target),
-            timing_key: binary_timing_key(binary),
+            timing_key: binary_timing_key(resolution, binary),
             command: String::new(),
             captured: CapturedOutput {
                 // Never spawned: an exit of 0 would read as a pass; the
@@ -193,11 +192,20 @@ impl Budget {
 // it from that one field, which is what keeps them naming one graph - the
 // property this lane's local helper used to enforce by being the only caller.
 
-/// Stable timing-cache identity for one planning unit. Keep it separate from
-/// the shorter failure label: a package can have a bin target and an
-/// integration-test target with the same name.
-fn binary_timing_key(binary: &TestBinary) -> String {
-    format!("{}/{}", binary.package, binary.label())
+/// The timing store's measurement key for one binary: its resolution, the
+/// full cargo package id (a package name is ambiguous across sources and
+/// versions) and `kind:target` (a package can hold a bin and an integration
+/// test of the same name). Deliberately not the artifact hash, which changes
+/// on every source edit and would cold-start every run of a dev tree. This is
+/// a lookup key only: scheduling identifies a run by its plan index, so two
+/// runs sharing a key both still launch.
+fn binary_timing_key(resolution: &Option<String>, binary: &TestBinary) -> String {
+    format!(
+        "{} {} {}",
+        resolution.as_deref().unwrap_or("-"),
+        binary.package_id,
+        binary.label()
+    )
 }
 
 /// The libtest argv one binary of a parallel sweep is executed with,
@@ -316,7 +324,7 @@ fn run_one_binary(
     let verdict = test_runner::lane_verdict(&finished.outcome);
     Ok(BinaryRun {
         label: format!("{}/{}", binary.package, binary.target),
-        timing_key: binary_timing_key(binary),
+        timing_key: binary_timing_key(run.resolution, binary),
         command: ReproLine::parallel_binary(
             sweep,
             binary,
@@ -389,42 +397,45 @@ fn run_parallel_sweep(
         )));
     }
 
-    // Recorded serial costs (or test counts when there is no history) drive
+    // Recorded per-test costs (or test counts when there is no history) drive
     // the slot claims: a claim of one for every binary would serialize the
     // fan-out down to one test at a time per binary and give up most of the
-    // win. A binary whose filters select nothing never enters the plan.
-    let mut counted: Vec<(PlannedRun<'_>, u32)> = Vec::new();
-    for b in binaries {
-        let count = u32::try_from(b.planned.selected.len()).unwrap_or(u32::MAX);
-        if count == 0 {
-            continue;
-        }
-        counted.push((b, count));
-    }
-    // The pure allocator sees the complete listing and prior serial costs for
-    // this entry. The cache key is the entry name, not the lane-qualified
-    // label, so `default` and `tier1/default` share the same measurements.
+    // win. A binary's inventory is what THIS run executes - its selection less
+    // the ignored names unless the lane lifts `#[ignore]`, plus the benchmark
+    // functions test mode runs once - so its cost and its count follow the
+    // selection rather than whichever selection last recorded it. A binary
+    // whose inventory is empty never enters the plan.
+    let include_ignored = prepared.include_ignored;
+    let counted: Vec<(PlannedRun<'_>, Vec<&str>)> = binaries
+        .into_iter()
+        .map(|b| {
+            let names: Vec<&str> = b
+                .planned
+                .executed(include_ignored)
+                .chain(&b.planned.benchmarks)
+                .map(String::as_str)
+                .collect();
+            (b, names)
+        })
+        .filter(|(_, names)| !names.is_empty())
+        .collect();
+    // The store is keyed by entry name, not the lane-qualified label, so
+    // `default` and `tier1/default` share the same measurements.
     let history = timings_load(state_root);
     let recorded = history.get(&sweep.entry_name);
-    let allocation_inputs: Vec<(String, u32)> = counted
+    let allocation_inputs: Vec<AllocInput<'_>> = counted
         .iter()
-        .map(|(run, count)| (binary_timing_key(&run.planned.binary), *count))
-        .collect();
-    let mut by_key: BTreeMap<String, PlannedRun<'_>> = counted
-        .into_iter()
-        .map(|(run, _)| {
-            (
-                binary_timing_key(&run.planned.binary),
-                PlannedRun {
-                    resolution: run.resolution,
-                    planned: run.planned,
-                },
-            )
+        .map(|(run, names)| AllocInput {
+            key: binary_timing_key(run.resolution, &run.planned.binary),
+            names: names.clone(),
         })
         .collect();
+    // By plan index, never by key: two runs sharing a measurement key are
+    // still two runs to launch.
+    let mut by_index: Vec<Option<PlannedRun<'_>>> = counted.into_iter().map(|(run, _)| Some(run)).collect();
     let planned: Vec<(PlannedRun<'_>, u32)> = allocate(&allocation_inputs, recorded, budget)
         .into_iter()
-        .filter_map(|(key, slots)| by_key.remove(&key).map(|run| (run, slots)))
+        .filter_map(|(index, slots)| by_index.get_mut(index)?.take().map(|run| (run, slots)))
         .collect();
     if planned.is_empty() {
         return Err(DevError::Config(format!(
@@ -504,7 +515,7 @@ fn run_parallel_sweep(
                         Err(error) => Err(error),
                         Ok(()) => {
                             let out = if aborted.load(std::sync::atomic::Ordering::SeqCst) {
-                                Ok(BinaryRun::skipped_after_abort(&run.planned.binary))
+                                Ok(BinaryRun::skipped_after_abort(run.resolution, &run.planned.binary))
                             } else {
                                 let _binary = crate::lockfile::activity::Activity::begin_under(
                                     lane_handle,
@@ -534,10 +545,23 @@ fn run_parallel_sweep(
         }
     });
 
+    // Recorded before reporting, and for a red, aborted or interrupted sweep
+    // too: every test that completed took the time it took. Per test name,
+    // never `r.elapsed` (wall time moves with the grant). A test this run did
+    // not complete - unselected, ignored, never started, hung, or in a binary
+    // an interrupt cut off, which returns no observations - keeps its record.
+    let observed: Vec<Observed> = runs
+        .iter()
+        .filter_map(|r| r.as_ref().ok())
+        .filter(|r| !r.skipped)
+        .map(|r| Observed { key: r.timing_key.clone(), completed: r.completed.clone() })
+        .collect();
+    timings_record(state_root, &sweep.entry_name, &observed, unix_now());
+
     // An interrupt (or the watchdog) killed the in-flight groups and refused
-    // the queued ones: the runs are not a verdict and their timings are
-    // truncated, so neither is reported nor recorded. What they observed is
-    // already journaled; the stop is what explains the rest.
+    // the queued ones: the runs are not a verdict, so they are not reported.
+    // What they observed is already journaled; the stop is what explains the
+    // rest.
     if crate::shutdown::is_shutdown_requested() {
         tap.terminate(TerminationScope::Lane, stop_cause(), None);
         return Err(DevError::Interrupted);
@@ -547,36 +571,6 @@ fn run_parallel_sweep(
     if aborted.load(std::sync::atomic::Ordering::SeqCst) {
         tap.terminate(TerminationScope::Lane, TerminationCause::SiblingTimeout, None);
     }
-
-    // Recorded before reporting, and for a red sweep too: a binary that
-    // failed still took the time it took, and the next run's allocation is
-    // better for knowing it. A sweep whose binaries all failed to spawn
-    // records nothing, since `measured` is then empty.
-    let measured: Vec<(String, BinaryCost)> = runs
-        .iter()
-        .filter_map(|r| r.as_ref().ok())
-        // A queued binary skipped after a sibling timeout has no observation;
-        // do not replace its previous measurement with a fabricated zero.
-        .filter(|r| !r.skipped)
-        .map(|r| {
-            // Serial cost, not `r.elapsed`: the sum of a binary's own tests
-            // does not move when its allocation moves, and wall time does.
-            let serial = r
-                .completed
-                .iter()
-                .map(|(_, duration)| *duration)
-                .fold(Duration::ZERO, |serial, duration| {
-                    serial.saturating_add(duration)
-                });
-            let slowest = r
-                .completed
-                .iter()
-                .map(|(_, duration)| *duration)
-                .fold(Duration::ZERO, Duration::max);
-            (r.timing_key.clone(), BinaryCost { serial, slowest })
-        })
-        .collect();
-    timings_record(state_root, &sweep.entry_name, &measured);
 
     report_runs(project_root, sweep, runs, fanout_started, build_elapsed, timings)
 }

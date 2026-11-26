@@ -233,10 +233,12 @@ reproduces cargo's launch contract for each binary: cwd, loader path,
   `feature_unification = "auto"` still promotes the prebuild to workspace
   unification; an explicit `selected` is honoured.
 
-Each binary claims a share of the budget proportional to its serial cost from
-the last run (`.brokkr/parallel-timings.toml`). The first run of a tree
-weights by test count, and a budget change needs two runs to measure. The
-budget forms:
+Each binary claims a share of the budget proportional to its cost for this
+run: the sum of the recorded durations of the tests it will execute
+(`.brokkr/parallel-timings.toml`). A run that leaves tests out, such as a
+plain check skipping a gate's `#[ignore]`d tests, doesn't overwrite their
+records. A tree with no history weights by test count, so measuring a budget
+change there takes two runs. The budget forms:
 
 - **`parallel = {}`**: the physical cores in one last-level cache domain
   (`brokkr env`'s `l3 domain:` line)
