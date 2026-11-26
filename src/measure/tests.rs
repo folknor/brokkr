@@ -51,60 +51,6 @@ mod persistence {
         assert_eq!(unaliased, "(sidecar.db a1b2c3d4, no results row)");
     }
 
-    // -----------------------------------------------------------------------
-    // fractional elapsed_ms
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn fractional_elapsed_ms_is_kept_as_microseconds() {
-        // The motivating bug: `elapsed_ms=6.847` failed `parse::<i64>()`, so
-        // the timing was treated as absent and the run died on the
-        // "missing elapsed_ms" check - a target reporting more precision
-        // than brokkr asked for was treated as reporting none.
-        let (us, _kv) = parse_kv_lines_us(b"elapsed_ms=6.847\n");
-        assert_eq!(us, Some(6847));
-    }
-
-    #[test]
-    fn whole_elapsed_ms_stays_exact() {
-        // Integer values must not make a round trip through f64.
-        let (us, _kv) = parse_kv_lines_us(b"elapsed_ms=300\n");
-        assert_eq!(us, Some(300_000));
-    }
-
-    #[test]
-    fn total_ms_alias_also_takes_a_fraction() {
-        let (us, _kv) = parse_kv_lines_us(b"total_ms=1.5\n");
-        assert_eq!(us, Some(1500));
-    }
-
-    #[test]
-    fn elapsed_ms_rounds_to_nearest_not_down() {
-        // 6.847 ms is 7 ms, not 6. The rounded value is what every existing
-        // query and historical row sees, so it must not read as faster than
-        // the run was.
-        let (us, _kv) = parse_kv_lines_us(b"elapsed_ms=6.847\n");
-        assert_eq!(us.map(us_to_ms), Some(7));
-    }
-
-    #[test]
-    fn fractional_timing_is_not_also_a_kv_pair() {
-        // The timing line is consumed as timing, never duplicated into kv.
-        let (_us, kv) = parse_kv_lines_us(b"elapsed_ms=6.847\ncold_prepare_us=214\n");
-        assert!(!kv.iter().any(|p| p.key == "elapsed_ms"));
-        assert!(kv.iter().any(|p| p.key == "cold_prepare_us"));
-    }
-
-    #[test]
-    fn nonsense_timing_is_still_absent() {
-        // A garbage value must not silently become 0 ms - the run should
-        // still fail the missing-elapsed_ms check.
-        let (us, _kv) = parse_kv_lines_us(b"elapsed_ms=NaN\n");
-        assert_eq!(us, None);
-        let (us, _kv) = parse_kv_lines_us(b"elapsed_ms=fast\n");
-        assert_eq!(us, None);
-    }
-
     #[test]
     fn best_of_n_compares_on_microseconds() {
         // Both round to 7 ms; only the microsecond reading can tell them
@@ -167,12 +113,6 @@ mod persistence {
         assert_eq!(all_or_none(vec![Some(1), Some(2)]), vec![1, 2]);
         assert!(all_or_none(vec![Some(1), None]).is_empty());
         assert!(all_or_none(Vec::new()).is_empty());
-    }
-
-    #[test]
-    fn us_to_ms_saturates_instead_of_overflowing() {
-        // `elapsed_to_us` saturates at i64::MAX; rounding that must not panic.
-        assert_eq!(us_to_ms(i64::MAX), i64::MAX / 1000);
     }
 
     // -----------------------------------------------------------------------
@@ -248,91 +188,37 @@ mod persistence {
     }
 
     // -----------------------------------------------------------------------
-    // parse_kv_stderr
+    // parse_kv_lines
     // -----------------------------------------------------------------------
 
     #[test]
-    fn parse_kv_stderr_basic_elapsed_ms() {
-        let stderr = b"elapsed_ms=1234\n";
-        let result = parse_kv_stderr(stderr).unwrap();
-        assert_eq!(result.elapsed_ms, 1234);
-        assert!(
-            result.kv.is_empty(),
-            "no extra fields => kv should be empty"
-        );
+    fn parse_kv_timing_lines_stay_out_of_the_counters() {
+        let kv = parse_kv_lines(b"elapsed_ms=6.847\ntotal_ms=9\ncold_prepare_us=214\n");
+        let keys: Vec<&str> = kv.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(keys, ["cold_prepare_us"], "a timing line is not a counter");
     }
 
     #[test]
-    fn parse_kv_stderr_total_ms_alias() {
-        let stderr = b"total_ms=999\n";
-        let result = parse_kv_stderr(stderr).unwrap();
-        assert_eq!(
-            result.elapsed_ms, 999,
-            "total_ms should be accepted as elapsed_ms alias"
-        );
-    }
-
-    #[test]
-    fn parse_kv_stderr_last_timing_value_wins() {
-        // Both present: last one wins (due to overwrite semantics)
-        let stderr = b"total_ms=100\nelapsed_ms=200\n";
-        let result = parse_kv_stderr(stderr).unwrap();
-        assert_eq!(
-            result.elapsed_ms, 200,
-            "elapsed_ms should overwrite earlier total_ms"
-        );
-
-        // Reverse order: total_ms overwrites elapsed_ms
-        let stderr2 = b"elapsed_ms=200\ntotal_ms=100\n";
-        let result2 = parse_kv_stderr(stderr2).unwrap();
-        assert_eq!(result2.elapsed_ms, 100, "last key=value wins");
-    }
-
-    #[test]
-    fn parse_kv_stderr_extra_int_float_string_fields() {
-        let stderr = b"elapsed_ms=500\nrows=42\nrate=3.14\nlabel=fast\n";
-        let result = parse_kv_stderr(stderr).unwrap();
-        assert_eq!(result.elapsed_ms, 500);
-
-        assert_eq!(result.kv.len(), 3);
-        // Check that we have the expected keys and values
-        let find = |k: &str| result.kv.iter().find(|p| p.key == k).unwrap();
+    fn parse_kv_extra_int_float_string_fields() {
+        let kv = parse_kv_lines(b"elapsed_ms=500\nrows=42\nrate=3.14\nlabel=fast\n");
+        assert_eq!(kv.len(), 3);
+        let find = |k: &str| kv.iter().find(|p| p.key == k).unwrap();
         assert!(matches!(find("rows").value, KvValue::Int(42)));
         assert!(matches!(find("rate").value, KvValue::Real(r) if (r - 3.14).abs() < 0.001));
         assert!(matches!(&find("label").value, KvValue::Text(s) if s == "fast"));
     }
 
     #[test]
-    fn parse_kv_stderr_missing_elapsed_ms_error() {
-        let stderr = b"rows=100\nlabel=test\n";
-        match parse_kv_stderr(stderr) {
-            Err(e) => {
-                let msg = format!("{e}");
-                assert!(
-                    msg.contains("missing elapsed_ms"),
-                    "error should mention missing elapsed_ms, got: {msg}"
-                );
-            }
-            Ok(_) => panic!("expected error for missing elapsed_ms, got Ok"),
-        }
+    fn parse_kv_skips_prose_lines() {
+        let kv = parse_kv_lines(b"some random log output\nwarning: something\nrows=7\nmore junk\n");
+        assert_eq!(kv.len(), 1);
     }
 
     #[test]
-    fn parse_kv_stderr_mixed_garbage_lines() {
-        let stderr = b"some random log output\nwarning: something\nelapsed_ms=777\nmore junk\n";
-        let result = parse_kv_stderr(stderr).unwrap();
-        assert_eq!(
-            result.elapsed_ms, 777,
-            "should find elapsed_ms among garbage lines"
-        );
-    }
-
-    #[test]
-    fn parse_kv_stderr_empty_value_treated_as_string() {
+    fn parse_kv_empty_value_treated_as_string() {
         // "tag=" has empty value - not parseable as i64 or f64, so becomes a string
-        let stderr = b"elapsed_ms=100\ntag=\n";
-        let result = parse_kv_stderr(stderr).unwrap();
-        let find = |k: &str| result.kv.iter().find(|p| p.key == k).unwrap();
+        let kv = parse_kv_lines(b"tag=\n");
+        let find = |k: &str| kv.iter().find(|p| p.key == k).unwrap();
         assert!(
             matches!(&find("tag").value, KvValue::Text(s) if s.is_empty()),
             "empty value should become empty string"
@@ -340,35 +226,17 @@ mod persistence {
     }
 
     #[test]
-    fn parse_kv_stderr_whitespace_trimming() {
-        let stderr = b"  elapsed_ms  =  300  \n  count  =  5  \n";
-        let result = parse_kv_stderr(stderr).unwrap();
-        assert_eq!(result.elapsed_ms, 300, "keys and values should be trimmed");
-        let find = |k: &str| result.kv.iter().find(|p| p.key == k).unwrap();
+    fn parse_kv_whitespace_trimming() {
+        let kv = parse_kv_lines(b"  count  =  5  \n");
+        let find = |k: &str| kv.iter().find(|p| p.key == k).unwrap();
         assert!(matches!(find("count").value, KvValue::Int(5)));
     }
 
     #[test]
-    fn parse_kv_stderr_invalid_elapsed_ms_value() {
-        let stderr = b"elapsed_ms=not_a_number\n";
-        match parse_kv_stderr(stderr) {
-            Err(e) => {
-                let msg = format!("{e}");
-                assert!(
-                    msg.contains("missing elapsed_ms"),
-                    "should report missing elapsed_ms for unparseable value, got: {msg}"
-                );
-            }
-            Ok(_) => panic!("expected error for invalid elapsed_ms value, got Ok"),
-        }
-    }
-
-    #[test]
-    fn parse_kv_stderr_nan_float_becomes_string() {
+    fn parse_kv_nan_float_becomes_string() {
         // NaN is not representable in JSON numbers
-        let stderr = b"elapsed_ms=100\nweird=NaN\n";
-        let result = parse_kv_stderr(stderr).unwrap();
-        let find = |k: &str| result.kv.iter().find(|p| p.key == k).unwrap();
+        let kv = parse_kv_lines(b"weird=NaN\n");
+        let find = |k: &str| kv.iter().find(|p| p.key == k).unwrap();
         assert!(
             matches!(&find("weird").value, KvValue::Text(s) if s == "NaN"),
             "NaN should fall through to string"
@@ -381,7 +249,7 @@ mod persistence {
         // counter with a dot (`metadata.x`, `snapshot.meta.x`) still counts.
         let stderr = b"env.FOO=x\nmeta.exit_code=0\nprev.uuid=abc\nthreads.rss_bytes=1\n\
             sidecar.x=1\nprovenance.rustflags=-Cforged\nmetadata.x=1\nsnapshot.meta.x=2\nrows=3\n";
-        let (_, kv) = parse_kv_lines_us(stderr);
+        let kv = parse_kv_lines(stderr);
         let keys: Vec<&str> = kv.iter().map(|p| p.key.as_str()).collect();
         assert_eq!(keys, ["metadata.x", "snapshot.meta.x", "rows"]);
     }
@@ -400,8 +268,7 @@ mod persistence {
             cache.hit-rate=0.5\n\
             label=a=b\n\
             _tag=\n";
-        let (us, kv) = parse_kv_lines_us(stderr);
-        assert_eq!(us, None);
+        let kv = parse_kv_lines(stderr);
         let pairs: Vec<(&str, String)> = kv
             .iter()
             .map(|p| {
@@ -585,7 +452,7 @@ mod persistence {
     #[test]
     fn elapsed_to_ms_rounds_to_nearest_not_down() {
         // Flooring 999us to 0ms read the run as faster than it was - the
-        // one error `us_to_ms` documents as worth avoiding.
+        // one error `elapsed_to_ms` documents as worth avoiding.
         assert_eq!(elapsed_to_ms(&Duration::from_micros(999)), 1);
         assert_eq!(elapsed_to_ms(&Duration::from_micros(1499)), 1);
         assert_eq!(elapsed_to_ms(&Duration::from_micros(1500)), 2);
@@ -593,10 +460,10 @@ mod persistence {
     }
 
     #[test]
-    fn elapsed_to_us_is_exact_and_agrees_with_us_to_ms() {
+    fn elapsed_to_us_is_exact_and_agrees_with_elapsed_to_ms() {
         let d = Duration::from_nanos(6_847_900);
         assert_eq!(elapsed_to_us(&d), 6847);
-        assert_eq!(us_to_ms(elapsed_to_us(&d)), elapsed_to_ms(&d));
+        assert_eq!(elapsed_to_ms(&d), 7);
         assert_eq!(elapsed_to_us(&Duration::from_secs(u64::MAX)), i64::MAX);
     }
 

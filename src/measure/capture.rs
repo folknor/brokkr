@@ -1,7 +1,7 @@
 //! Capture measured children and their hotpath profiles.
 
 use super::execution::Iteration;
-use super::kv::parse_kv_lines_us;
+use super::kv::parse_kv_lines;
 use super::wall::{elapsed_to_ms, elapsed_to_us};
 use super::{BenchHarness, BenchResult};
 use crate::db;
@@ -92,10 +92,10 @@ impl BenchHarness {
                 child::IterationVerdict::Interrupted => Some(DevError::Interrupted),
             }
         };
-        let (reported_us, kv) = if incomplete_output {
-            (None, Vec::new())
+        let kv = if incomplete_output {
+            Vec::new()
         } else {
-            parse_kv_lines_us(&capture.stderr)
+            parse_kv_lines(&capture.stderr)
         };
         Ok(Iteration {
             result: Some(BenchResult {
@@ -108,10 +108,8 @@ impl BenchHarness {
             wall: Some(capture.elapsed),
             ending: Some(ending),
             sidecar: Some(capture.data),
-            stderr: capture.stderr,
             pid: Some(pid),
             error,
-            reported_us,
         })
     }
 

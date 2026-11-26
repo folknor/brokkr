@@ -79,4 +79,3 @@ The sluggrs code is split across these modules:
   store. Snapshot tables live in `.brokkr/sluggrs-visual.db`, and brokkr
   imports existing `snapshot_*` rows from `.brokkr/results.db` on first open,
   through the same one-time import in `src/visual/db.rs`.
-- **`src/sluggrs/hotpath.rs`**: the sluggrs rendering benchmark path.

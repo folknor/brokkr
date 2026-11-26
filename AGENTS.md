@@ -35,7 +35,7 @@ The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bar
 - `reference/clean.md` - clean's ownership rule, disk gate, store maintenance and worktree purge. Read before changing `src/clean.rs` or `src/clean/`.
 - `reference/crit.md` - crit's design decisions and the failure each prevents. Read before changing `src/crit_cmd/`.
 - `reference/deps.md` - deps internals: phase model, metadata graph, ccu shell-out, publish-cycle walk. Read before changing `src/deps/`.
-- `docs/commands/visual.md`, `hotpath.md` - project-specific commands.
+- `docs/commands/visual.md` - project-specific commands.
 - `reference/visual-projects.md`, `reference/mogwai.md` - internals of those projects' commands. Read before changing `src/visual/`, `src/litehtml/`, `src/sluggrs/` or `src/mogwai/`.
 - `docs/projects/*.md` - per-project commands and internals; pbfhogg uses script benches and generic commands.
 
@@ -64,7 +64,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `fstrim [PATH...]` - sync and trim filesystems under the lock, through the installed helper.
 - `sidecar <uuid>` - sidecar profiler data.
 - `fmt` - locked `cargo fmt` wrapper.
-- Project-specific: `mogwai`, `hotpath` - see the project docs.
+- Project-specific: `mogwai` - see the project docs.
 
 ## Conventions
 

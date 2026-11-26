@@ -122,7 +122,6 @@ VisualStatus => ("visual-status", Visibility::Only(&[Project::Litehtml, Project:
 Prepare => ("prepare", Visibility::Only(&[Project::Litehtml]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "node"]),
 HtmlExtract => ("html-extract", Visibility::Only(&[Project::Litehtml]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Outline => ("outline", Visibility::Only(&[Project::Litehtml]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Hotpath => ("hotpath", Visibility::Only(&[Project::Sluggrs]), Required, Blocking, true, crate::measure::MeasureMode::Hotpath { runs: std::num::NonZeroUsize::MIN }, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
 Mogwai => ("mogwai", Visibility::Only(&[Project::Mogwai]), Required, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),}
 
 static INVOCATION: std::sync::OnceLock<CommandId> = std::sync::OnceLock::new();
@@ -211,8 +210,7 @@ impl CommandSpec {
             WorktreePolicy::None => Ok(false),
             WorktreePolicy::Mode => {
                 let mode = match command {
-                    super::Command::Hotpath(super::HotpathCmd { mode, .. })
-                    | super::Command::Mogwai(super::MogwaiCmd { mode, .. }) => Some(mode),
+                    super::Command::Mogwai(super::MogwaiCmd { mode, .. }) => Some(mode),
                     _ => None,
                 };
                 mode.map(|mode| mode.commit.is_some()).ok_or_else(|| {

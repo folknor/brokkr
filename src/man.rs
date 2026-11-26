@@ -188,12 +188,6 @@ const TOPICS: &[Topic] = &[
         commands: &[CommandId::Visual],
     },
     Topic {
-        name: "hotpath",
-        summary: "sluggrs rendering bench: modes, --target naming, --commit",
-        content: include_str!("../docs/commands/hotpath.md"),
-        commands: &[CommandId::Hotpath],
-    },
-    Topic {
         name: "litehtml",
         summary: "litehtml config: the visual store, fixtures, Node runtime, test runner",
         content: include_str!("../docs/projects/litehtml.md"),
@@ -203,7 +197,7 @@ const TOPICS: &[Topic] = &[
         name: "sluggrs",
         summary: "sluggrs config, snapshot outputs and the snapshot store",
         content: include_str!("../docs/projects/sluggrs.md"),
-        commands: &[CommandId::Hotpath],
+        commands: &[CommandId::Visual],
     },
     Topic {
         name: "mogwai",

@@ -13,7 +13,7 @@ cargo install --path ~/Programs/brokkr
 
 ## How it works
 
-Run `brokkr` from any project root. It reads `./brokkr.toml` to detect the project and resolve datasets, paths, and host-specific configuration. Project-specific commands are gated by that detected project, so a sluggrs command such as `hotpath` from pbfhogg's root produces a clear error. Shared Rust tooling such as `check` also works in any Rust+git repo, with or without `brokkr.toml`.
+Run `brokkr` from any project root. It reads `./brokkr.toml` to detect the project and resolve datasets, paths, and host-specific configuration. Project-specific commands are gated by that detected project, so a litehtml command such as `prepare` from pbfhogg's root produces a clear error. Shared Rust tooling such as `check` also works in any Rust+git repo, with or without `brokkr.toml`.
 
 ```
 cd ~/Programs/pbfhogg

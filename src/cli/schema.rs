@@ -558,24 +558,6 @@ Examples:
     #[command(display_order = 51)]
     Outline(OutlineCmd),
 
-    // ----- sluggrs-only commands (display_order = 55) -----
-    /// Rendering hotpath (defaults to --hotpath 1, use --alloc for allocation tracking)
-    ///
-    /// Builds a cargo example target and runs it through the bench harness.
-    /// `--target hotpath` (the default) builds the `hotpath` example and files
-    /// rows under the command name `render`; any other `--target NAME` builds
-    /// the `NAME_bench` example and files under `NAME`.
-    ///
-    /// The mode selects the build: `--hotpath` adds the `hotpath` feature,
-    /// `--alloc` adds `hotpath-alloc`, and `--bench` builds the example bare -
-    /// the uninstrumented walls, the ones worth comparing across commits. With
-    /// no mode flag this stays `--hotpath 1`, which is what a bare
-    /// `brokkr hotpath` has always meant.
-    ///
-    /// In depth: `brokkr man hotpath`.
-    #[command(name = "hotpath", display_order = 55)]
-    Hotpath(HotpathCmd),
-
     // ----- mogwai-only commands (display_order = 58) -----
     /// Benchmark a mogwai surface (CLI invocation or harness target)
     ///
@@ -1577,17 +1559,6 @@ pub(crate) struct OutlineCmd {
     /// Print suggested CSS selectors for top-level sections
     #[arg(long)]
     pub(crate) selectors: bool,
-}
-
-// `brokkr hotpath`'s arguments; see `Command::Hotpath`.
-#[derive(Args)]
-pub(crate) struct HotpathCmd {
-    #[command(flatten)]
-    pub(crate) mode: ModeArgs,
-
-    /// Example binary to build and run (default: hotpath)
-    #[arg(long, default_value = "hotpath")]
-    pub(crate) target: String,
 }
 
 // `brokkr mogwai`'s arguments; see `Command::Mogwai`.

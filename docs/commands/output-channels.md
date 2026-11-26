@@ -124,18 +124,9 @@ These names are special on every scraping path:
   `threads.`, `sidecar.`, `provenance.`) is dropped, with one warning per
   key. Those keys record what brokkr observed, so a child can't write them.
 
-On the self-reported paths an `elapsed_ms=` line, or its alias `total_ms=`,
-is **mandatory**: its absence errors the whole run. If both appear, the last
-valid timing line wins. This is the subprocess's self-reported timing, not
-brokkr's wall clock. The external wall-clock path (`brokkr mogwai`) uses
-external best-of-N wall clock instead and ignores the reserved names.
-
-The timing value may be fractional (`elapsed_ms=6.847`). brokkr keeps it as
-exact microseconds in the `elapsed_us` column, and `elapsed_ms` holds it
-rounded to nearest for every existing query and view. Best-of-N and
-`--compare`'s delta use the microsecond reading when both sides have one.
-Without it, a single-digit-millisecond workload's 100 to 200 us deltas round
-away to nothing.
+A child's own timing line is never the recorded wall: every measured path
+times the child itself, best-of-N on brokkr's wall clock, and skips the
+reserved names.
 
 Every other field's value is type-inferred in order: `i64`, then finite
 `f64`, then text. A non-finite float like `NaN` or `inf` falls back to text.
@@ -197,7 +188,6 @@ what each keeps:
 |---|---|---|---|
 | run mode, no `--bench` | shown | no | no FIFO |
 | `brokkr mogwai` | dropped | counters only | yes |
-| sluggrs `hotpath --bench` | dropped | yes | yes |
 | `--hotpath`, `--alloc` | captured | see below | yes |
 
 The columns read as follows:
@@ -207,23 +197,19 @@ The columns read as follows:
   every project, keep stderr counters and a JSON profile.
 - **FIFO**: whether markers and counters reach sidecar.db.
 
-The two external paths, `brokkr mogwai` and sluggrs `hotpath --bench`,
-differ in exactly one thing: which clock the recorded `elapsed_ms` comes
-from. `brokkr mogwai` measures the child from outside. sluggrs
-`hotpath --bench` believes the target's own `elapsed_ms=` and discards the
-external wall. Both record microseconds in `elapsed_us`, the external path
-from its exact duration, and `elapsed_ms` is that value rounded to nearest.
+The external path, `brokkr mogwai`, measures the child from outside. It
+records the exact duration in microseconds in `elapsed_us`, and
+`elapsed_ms` is that value rounded to nearest.
 
 Missing or invalid hotpath JSON fails the iteration and preserves its
 sidecar under `dirty`, rather than recording a profile mode without a
 profile.
 
-Both external paths scrape non-timing stderr `key=value` pairs for counters,
+The external path scrapes non-timing stderr `key=value` pairs for counters,
 because stderr is captured either way and the scrape is free. A wall on its
 own can't distinguish "the code got faster" from "the code did less". The
 counters answer that, and they drive `--compare`'s `counters:` line. The
-reserved `elapsed_ms` and `total_ms` keys are omitted from the external
-path's counters; on the self-reported path they supply the recorded wall.
+reserved `elapsed_ms` and `total_ms` keys are omitted from the counters.
 
 Two consequences follow:
 
@@ -242,9 +228,7 @@ Pick the channel by where you want the metric to show up:
   key a field name with nothing before it (see "stderr kv"). On the external
   wall-clock path (`brokkr mogwai`), it's scraped into `kv` as a counter and
   feeds `--compare`'s `counters:` line. There, `elapsed_ms` and `total_ms`
-  are reserved and ignored, and the wall stays brokkr's own. On the
-  self-reported path (sluggrs `hotpath --bench`), a mandatory `elapsed_ms=`
-  or `total_ms=` line also supplies the recorded timing.
+  are reserved and ignored, and the wall stays brokkr's own.
 - **In `brokkr sidecar`**: emit an `@NAME=VALUE` counter to
   `BROKKR_MARKER_FIFO`. This works on any path that spawns the sidecar, in
   bench, hotpath and alloc modes.

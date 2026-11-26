@@ -81,7 +81,7 @@ bench-lock: every measurement refuses while any serve is outstanding, because
 a serving process perturbs what is measured. A measurement is any of:
 
 - a measured command with `--bench`, `--hotpath` or `--alloc`, or one whose
-  default mode measures (sluggrs `hotpath`), unless `--dry-run`
+  default mode measures, unless `--dry-run`
 - `brokkr bench NAME` (not `--dry-run` or `--test`), refused before its
   preflight launches anything
 - `brokkr crit TARGET` sampling into a baseline (`--compare` and

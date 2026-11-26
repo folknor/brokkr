@@ -15,7 +15,7 @@ The harness is spread over these modules:
   `run_hotpath` and `run_external*` entry points.
 - `src/measure/execution.rs`: `MeasurementLoop` and `measure`, the iteration
   collection.
-- `src/measure/wall.rs`: `WallSource`.
+- `src/measure/wall.rs`: wall conversions and best-of-N ranking.
 - `src/measure/capture.rs`: child capture, `capture_hotpath` included.
 - `src/measure/record.rs`: `record`, row and sidecar persistence.
 - `src/output/child.rs`: the shared child supervisor.
@@ -49,34 +49,30 @@ line's `mode=` and the sidecar provenance can't disagree.
 
 ## Measurement loop
 
-`measure(config, program, source, sidecar, closure)` collects a
-`Measurement` through one `MeasurementLoop`. Its `WallSource` is fixed for
-the whole run:
-
-- external wall, timed by brokkr
-- self-reported stderr timing (`elapsed_ms=`)
+`measure(config, program, sidecar, closure)` collects a `Measurement`
+through one `MeasurementLoop`, timing every iteration on the wall brokkr
+observed.
 
 Every iteration keeps its streams, typed ending, optional sidecar data and
 observer failures. Best-of-N picks on `elapsed_us` where the loop has it;
 ties keep the first run. The loop stamps its own start, which is what
 `prev.gap_seconds` measures to.
 
-A self-reported wall replaces only the iteration's elapsed fields. Its
-counters, an answer's `meta.exit_code`, an observer's additions and a
-hotpath profile stay.
+The wall replaces only the iteration's elapsed fields. Its counters, an
+answer's `meta.exit_code`, an observer's additions and a hotpath profile
+stay.
 
 The entry points over the loop:
 
-- `run_hotpath(config, program, source, closure)` runs the loop with a FIFO
-  and the caller's wall source, so the profile is the one attached to the
+- `run_hotpath(config, program, closure)` runs the loop with a FIFO, ranking
+  on the observed wall, so the profile is the one attached to the
   best-ranked iteration. `capture_hotpath` receives that FIFO and uses the
   session's held lock and stop marker.
-- `run_external(config, invocation, cwd)` and its `run_external_ok`,
-  `run_external_prepared` and `run_external_with_kv` variants time a
-  subprocess.
+- `run_external(config, invocation, cwd)` and its `run_external_ok` and
+  `run_external_prepared` variants time a subprocess.
 
-`Measurement` (`src/measure/execution.rs`) keeps stderr for every captured
-iteration, so a caller can inspect it before recording; storage uses the
+`Measurement` (`src/measure/execution.rs`) keeps every captured iteration's
+evidence, so a caller can inspect it before recording; storage uses the
 winner's metrics.
 
 ## Capture by mode
@@ -89,27 +85,24 @@ which channels are kept (the channels are described in
 |---|---|---|---|---|
 | `run_passthrough_timed` | inherited | no | no | run mode, no `--bench` |
 | `run_external_ok` | dropped | counters only | yes | `brokkr mogwai` |
-| `run_external_with_kv` | dropped | yes | yes | sluggrs `hotpath --bench` |
 | `capture_hotpath` | captured | counters, JSON | yes | `--hotpath`, `--alloc` |
 
 `run_passthrough_timed` lives in `src/output/child.rs`; the others are in
 `src/measure.rs`, except `capture_hotpath` in `src/measure/capture.rs`.
 
-The two external paths differ only in which clock supplies the recorded
-`elapsed_ms`: `run_external_ok` measures the child from outside, and
-`run_external_with_kv` takes the child's own `elapsed_ms=` and discards the
-external wall. Both scrape non-timing stderr pairs as counters
-unconditionally. Don't reintroduce scraping as an option: a separate path
-that made it one differed from `run_external_ok` only by a bool the shared
-body already took.
+Every recorded wall is brokkr's own: `run_external_ok` measures the child
+from outside, and a child's `elapsed_ms=` line is never read as timing. The
+external path scrapes non-timing stderr pairs as counters unconditionally.
+Don't reintroduce scraping as an option: a separate path that made it one
+differed from `run_external_ok` only by a bool the shared body already took.
 
 ## Parsers
 
 These functions turn a child's output into stored values:
 
-- **`parse_kv_lines_us`** (`src/measure/kv.rs`): the stderr `key=value`
-  scrape, with the field-name grammar, the reserved timing names, the
-  brokkr-namespace drop and the microsecond timing reading.
+- **`parse_kv_lines`** (`src/measure/kv.rs`): the stderr `key=value`
+  scrape, with the field-name grammar, the reserved timing names and the
+  brokkr-namespace drop.
 - **`SidecarFifo::drain`** (`src/sidecar.rs`): see "Sidecar FIFO".
 - **`format_result_line`** (`src/measure/record.rs`): renders the `[result]`
   line and computes the derived `read_mbs` and `write_mbs` fields.
@@ -160,8 +153,6 @@ copies the value and overrides fields:
 
 - `sample_interval`: the sampling cadence, 100 ms
 - `sidecar_backup_copies`: backup rotation depth, 3
-- `stderr_preview_chars`: stderr characters quoted when a self-reporting
-  child printed no `elapsed_ms=`, 500
 - `hotpath_report_filename`: the typed capture's report, `hotpath-report.json`
 - `max_samples`, `max_markers`, `max_counters`: capture budgets across every
   run of one measurement

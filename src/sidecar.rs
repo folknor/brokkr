@@ -94,7 +94,6 @@ pub(crate) const MARKER_FIFO_ENV: &str = "BROKKR_MARKER_FIFO";
 pub(crate) struct MeasurementTunables {
     pub sample_interval: Duration,
     pub sidecar_backup_copies: usize,
-    pub stderr_preview_chars: usize,
     pub hotpath_report_filename: &'static str,
     /// Maximum profile samples retained across every run in one measurement.
     pub max_samples: usize,
@@ -110,7 +109,6 @@ pub(crate) const DEFAULT_MEASUREMENT_TUNABLES: MeasurementTunables = Measurement
     sample_interval: Duration::from_micros(100_000),
     // A bounded recovery history: the current snapshot plus two prior copies.
     sidecar_backup_copies: 3,
-    stderr_preview_chars: 500,
     hotpath_report_filename: "hotpath-report.json",
     max_samples: 100_000,
     max_markers: 10_000,

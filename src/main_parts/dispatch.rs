@@ -852,11 +852,5 @@ fn run_project(
             full,
             selectors,
         }) => litehtml::cmd::outline(project_root, &input, depth, full, selectors),
-        // ----- sluggrs-only commands -----
-        Command::Hotpath(cli::HotpathCmd { mode, target }) => {
-            run_measured(&mode, detection, invocation, |req| {
-                sluggrs::hotpath::cmd(req, &target)
-            })
-        }
     }
 }

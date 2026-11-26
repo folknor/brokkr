@@ -30,8 +30,7 @@ The modes are:
   benchmark one phase in isolation. The SIGKILL exit counts as success.
 
 `--bench`, `--hotpath` and `--alloc` refuse while a `brokkr serve` server is
-live, since a serving process perturbs the measurement. So does a command
-whose default mode measures, such as sluggrs `hotpath`. The refusal comes
+live, since a serving process perturbs the measurement. The refusal comes
 when the measured session starts, under its hold, after any build, and
 `--dry-run` is exempt. See `brokkr man serve`.
 
@@ -43,7 +42,7 @@ also gitignored.
 
 ## Measurable commands
 
-The typed measurable commands are mogwai's `mogwai` and sluggrs' `hotpath`.
+The typed measurable command is mogwai's `mogwai`.
 Every other project measures through script benches (`brokkr bench NAME`),
 which any project can declare.
 
@@ -58,10 +57,8 @@ measurement loop:
   re-entrant: a command that
   invokes another locked command shares its hold.
 - **SQLite result storage** with git commit, hostname and env snapshot.
-- **One wall source per run**: brokkr's own external wall, or a
-  self-reported `elapsed_ms=` line on the child's stderr. A self-reporting
-  child that prints no timing fails the sample. The two are never ranked
-  together, and ties keep the first run.
+- **brokkr's own wall**: every iteration is timed by brokkr, never by a
+  line the child prints. Ties keep the first run.
 - **Evidence kept on failure.** A failed measurement, postprocessing step or
   row insert keeps what was captured under the `dirty` alias.
 - **Hotpath profiles** come from the iteration the wall ranks best. Missing
@@ -221,9 +218,7 @@ elapsed  592200.412 ms (best of 3: 592200.412 / 611400.090 / 634100.733 ms)
 ```
 
 `elapsed_us` is NULL unless the loop measured every iteration in
-microseconds. That happens on the external paths, the self-reported one
-included (from the target's `elapsed_ms=`, the same clock its row records),
-and on hotpath runs when each iteration's result had an `elapsed_us`. The
+microseconds. That happens on the external paths and on hotpath runs when each iteration's result had an `elapsed_us`. The
 walls are kept until the row and sidecar are written together. A list with a
 gap isn't stored at all rather than stored in part, since a partial list
 can't stay aligned with the execution order. Rows without microseconds render
@@ -1102,7 +1097,6 @@ included, are under "Refusals" in `brokkr man hygiene`.
 | `a --MODE run refuses while 1 serve is outstanding - a serving process perturbs measurements:` | A `brokkr serve` server is live; the line lists each one (see "Modes"). A script bench and a criterion run refuse the same way. | Stop each listed serve with `brokkr serve --stop NAME`, then rerun. |
 | `a --MODE run refuses inside a served program (this process carries BROKKR_SERVE)` | The measurement was started from inside a program `brokkr serve` runs. | Run the measurement from outside the served program. |
 | `preflight failed:` then `dirty tree - commit or stash changes before benchmarking` | A stored mode found uncommitted changes in the build root (see "Dirty trees"). | Commit or stash, measure a `--commit REF`, or pass `--force` to run without storing. |
-| `config: subprocess stderr missing elapsed_ms=NNN. stderr was:` | A child measured by its self-reported wall printed no timing line (see "Harness"). | Make the child print `elapsed_ms=` on stderr; the error quotes what it printed instead. |
 | `config: uuid prefix 'PREFIX' is ambiguous - it matches N runs:` | The prefix names several sessions, typed or script bench (see "Sidecar queries"). | Pass a longer prefix from the listed candidates. |
 | `config: empty uuid prefix would match every row - give at least one character` | The UUID argument was empty or blank. | Pass at least one character of the run id. |
 | `script-bench run ID belongs to project NAME` | The prefix names only another project's bench run. | Run `brokkr sidecar` from that project. |

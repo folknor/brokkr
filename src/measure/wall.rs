@@ -12,9 +12,9 @@ pub(super) fn result_wall(elapsed_ms: i64, elapsed_us: Option<i64>) -> Wall {
 
 /// Convert a `Duration` to milliseconds as `i64`, rounded to nearest.
 ///
-/// Nearest, not floored, for the reason [`us_to_ms`] gives: flooring reads
-/// every run as up to a whole millisecond faster than it was. Saturates at
-/// `i64::MAX`.
+/// Nearest, not floored: flooring reads every run as up to a whole
+/// millisecond faster than it was, the one error worth avoiding in a value
+/// every query and historical row sees. Saturates at `i64::MAX`.
 pub fn elapsed_to_ms(duration: &Duration) -> i64 {
     i64::try_from(duration.as_micros().saturating_add(500) / 1000).unwrap_or(i64::MAX)
 }
@@ -48,18 +48,6 @@ pub(super) fn bench_ordering_key(result: &BenchResult) -> i64 {
         .unwrap_or_else(|| result.elapsed_ms.saturating_mul(1000))
 }
 
-/// Round microseconds to the nearest millisecond.
-///
-/// Nearest, not truncating: a 6.847 ms region is 7 ms, not 6. `elapsed_ms`
-/// is a display and back-compat value once `elapsed_us` exists, so being off
-/// by a whole millisecond in the direction of "faster than it was" is the
-/// one error worth avoiding.
-pub(crate) fn us_to_ms(us: i64) -> i64 {
-    // Saturating: `elapsed_to_us` saturates at `i64::MAX`, and the plain
-    // addition would then overflow.
-    us.saturating_add(500) / 1000
-}
-
 /// Per-iteration microsecond walls, kept only when every iteration had one.
 ///
 /// A list with gaps cannot stay index-aligned with the millisecond walls, and
@@ -70,11 +58,4 @@ pub(super) fn all_or_none(walls_us: Vec<Option<i64>>) -> Vec<i64> {
         .into_iter()
         .collect::<Option<Vec<i64>>>()
         .unwrap_or_default()
-}
-
-/// A fixed timing policy for every iteration in one measurement.
-#[derive(Clone, Copy)]
-pub enum WallSource {
-    External,
-    SelfReported,
 }

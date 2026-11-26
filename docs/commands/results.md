@@ -50,7 +50,8 @@ Every row has an integer `elapsed_ms`. Most rows also have `elapsed_us`, the
 exact wall in microseconds, from one of these sources:
 
 - the external and hotpath paths, which time it themselves
-- the stderr-kv path, from a fractional `elapsed_ms=` line
+- on older rows, the retired self-reported path, from a fractional
+  `elapsed_ms=` line
 - the stored distribution rows of the retired nidhogg `api` bench, which
   hold their fastest sample
 

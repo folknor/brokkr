@@ -11,7 +11,6 @@ use std::path::Path;
 
 use self::execution::{Iteration, Measurement};
 use self::record::format_storage_notes;
-use self::wall::WallSource;
 use crate::config;
 use crate::db::{HotpathData, KvPair, ResultsDb};
 use crate::error::DevError;
@@ -229,11 +228,10 @@ pub struct BenchResult {
     /// Exact wall in microseconds, when the harness path knows it.
     ///
     /// `elapsed_ms` is an integer and always will be - every query, format
-    /// and historical row depends on it. But sluggrs' measured regions are
-    /// single-digit milliseconds and the deltas worth seeing there are
-    /// 100-200us, which integer milliseconds flatten to nothing. Filled by
-    /// the stderr-kv path (from a fractional `elapsed_ms=6.847` line) and by
-    /// the paths brokkr times itself from an exact `Duration`
+    /// and historical row depends on it. But a measured region can be
+    /// single-digit milliseconds with deltas worth seeing of 100-200us, which
+    /// integer milliseconds flatten to nothing. Filled by the paths brokkr
+    /// times itself from an exact `Duration`
     /// (`run_external`/`run_external_ok`, `BenchHarness::capture_hotpath`).
     /// `run_internal` carries whatever its
     /// closure returned; a closure that only had milliseconds leaves it
@@ -476,19 +474,18 @@ impl BenchHarness {
     }
 
     /// Collect captured profiling iterations, including their failure evidence.
-    /// `source` names the wall a row records and the best-of-N ranks on; the
+    /// The observed wall is what a row records and the best-of-N ranks on; the
     /// profile stays attached to the iteration it ranks.
     pub fn run_hotpath<F>(
         &self,
         config: &BenchConfig,
         program: &Path,
-        source: WallSource,
         f: F,
     ) -> Result<BenchResult, DevError>
     where
         F: Fn(usize, &mut crate::sidecar::SidecarFifo) -> Result<Iteration, DevError>,
     {
-        let mut measurement = self.measure(config, Some(program), source, true, |i, fifo| {
+        let mut measurement = self.measure(config, Some(program), true, |i, fifo| {
             let fifo =
                 fifo.ok_or_else(|| DevError::Internal("profiled loop owns a FIFO".to_owned()))?;
             f(i, fifo)
@@ -533,32 +530,8 @@ impl BenchHarness {
     where
         F: Fn() -> Result<(), DevError>,
     {
-        self.run_invocation_timed(
-            config,
-            invocation,
-            cwd,
-            exits,
-            WallSource::External,
-            prepare,
-        )
-    }
-
-    /// Each iteration one launch of `invocation`, timed by `source`.
-    pub(crate) fn run_invocation_timed<F>(
-        &self,
-        config: &BenchConfig,
-        invocation: &Invocation<'_>,
-        cwd: &Path,
-        exits: crate::output::child::Exits,
-        source: WallSource,
-        prepare: F,
-    ) -> Result<BenchResult, DevError>
-    where
-        F: Fn() -> Result<(), DevError>,
-    {
         let config = config_for(config, invocation);
-        let mut measurement =
-            self.measure_invocation(&config, invocation, cwd, exits, source, prepare)?;
+        let mut measurement = self.measure_invocation(&config, invocation, cwd, exits, prepare)?;
         self.record(&config, &mut measurement, |_, _| Ok(()))
     }
 
@@ -570,14 +543,13 @@ impl BenchHarness {
         invocation: &Invocation<'_>,
         cwd: &Path,
         exits: crate::output::child::Exits,
-        source: WallSource,
         prepare: F,
     ) -> Result<Measurement, DevError>
     where
         F: Fn() -> Result<(), DevError>,
     {
         let program = invocation.program();
-        self.measure(config, Some(program), source, true, |i, fifo| {
+        self.measure(config, Some(program), true, |i, fifo| {
             prepare()?;
             let fifo =
                 fifo.ok_or_else(|| DevError::Internal("external loop owns a FIFO".to_owned()))?;
@@ -593,22 +565,6 @@ impl BenchHarness {
             )?;
             Ok(iteration)
         })
-    }
-
-    pub(crate) fn run_external_with_kv(
-        &self,
-        config: &BenchConfig,
-        invocation: &Invocation<'_>,
-        cwd: &Path,
-    ) -> Result<BenchResult, DevError> {
-        self.run_invocation_timed(
-            config,
-            invocation,
-            cwd,
-            crate::output::child::Exits::SUCCESS,
-            WallSource::SelfReported,
-            || Ok(()),
-        )
     }
 }
 

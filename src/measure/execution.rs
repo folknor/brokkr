@@ -1,7 +1,6 @@
 //! Iteration scheduling and execution evidence.
 
-use super::kv::reported_timing;
-use super::wall::{WallSource, elapsed_to_ms, elapsed_to_us, us_to_ms, winning_index};
+use super::wall::{elapsed_to_ms, elapsed_to_us, winning_index};
 use super::{BenchConfig, BenchHarness, BenchResult};
 use crate::error::DevError;
 use crate::output::{child, console};
@@ -36,17 +35,12 @@ pub(super) fn wall_clock_epoch() -> i64 {
 pub struct Iteration {
     /// Transferred to the returned aggregate when this iteration wins recording.
     pub result: Option<BenchResult>,
-    /// Observed process wall; the fixed source writes the ranking wall on `result`.
+    /// Observed process wall; the loop writes it as the ranking wall on `result`.
     pub wall: Option<Duration>,
     pub ending: Option<child::Ending>,
     pub sidecar: Option<crate::sidecar::SidecarData>,
-    pub stderr: Vec<u8>,
     pub pid: Option<u32>,
     pub error: Option<DevError>,
-    /// The `elapsed_ms`/`total_ms` the child printed, in microseconds, from
-    /// capture's one parse of its stderr. Read only by
-    /// [`WallSource::SelfReported`].
-    pub reported_us: Option<i64>,
 }
 
 impl Iteration {
@@ -57,10 +51,8 @@ impl Iteration {
             wall: None,
             ending: None,
             sidecar: None,
-            stderr: Vec::new(),
             pid: None,
             error: None,
-            reported_us: None,
         }
     }
 
@@ -83,11 +75,10 @@ pub struct Measurement {
     pub(super) recorded: bool,
 }
 
-/// Owns iteration count, timing policy, FIFO, progress and winner selection.
+/// Owns iteration count, timing, FIFO, progress and winner selection.
 struct MeasurementLoop<'a> {
     harness: &'a BenchHarness,
     runs: std::num::NonZeroUsize,
-    source: WallSource,
     fifo: Option<crate::sidecar::SidecarFifo>,
 }
 
@@ -142,7 +133,7 @@ impl MeasurementLoop<'_> {
                 }
             };
             if iteration.error.is_none() {
-                if let Err(error) = apply_wall_source(self.source, &mut iteration) {
+                if let Err(error) = apply_wall(&mut iteration) {
                     iteration.fail(error);
                 }
                 if iteration.result.is_none() && iteration.error.is_none() {
@@ -173,32 +164,19 @@ impl MeasurementLoop<'_> {
     }
 }
 
-/// Fill the iteration's measured result from the timing source the loop was
-/// configured with.
-fn apply_wall_source(source: WallSource, iteration: &mut Iteration) -> Result<(), DevError> {
-    match source {
-        WallSource::External => match iteration.wall {
-            Some(wall) => {
-                if let Some(result) = &mut iteration.result {
-                    result.elapsed_us = Some(elapsed_to_us(&wall));
-                    result.elapsed_ms = elapsed_to_ms(&wall);
-                }
-                Ok(())
-            }
-            None => Err(DevError::Config(
-                "external timing requires a captured wall".into(),
-            )),
-        },
-        // The elapsed fields only: the counters capture parsed, an answer's
-        // exit code, an observer's additions and a hotpath profile all stay.
-        WallSource::SelfReported => {
-            let us = reported_timing(iteration.reported_us, &iteration.stderr)?;
+/// Fill the iteration's measured result from the wall brokkr observed.
+fn apply_wall(iteration: &mut Iteration) -> Result<(), DevError> {
+    match iteration.wall {
+        Some(wall) => {
             if let Some(result) = &mut iteration.result {
-                result.elapsed_us = Some(us);
-                result.elapsed_ms = us_to_ms(us);
+                result.elapsed_us = Some(elapsed_to_us(&wall));
+                result.elapsed_ms = elapsed_to_ms(&wall);
             }
             Ok(())
         }
+        None => Err(DevError::Config(
+            "external timing requires a captured wall".into(),
+        )),
     }
 }
 
@@ -209,7 +187,6 @@ impl BenchHarness {
         &self,
         config: &BenchConfig,
         program: Option<&Path>,
-        source: WallSource,
         sidecar: bool,
         f: F,
     ) -> Result<Measurement, DevError>
@@ -229,7 +206,6 @@ impl BenchHarness {
         Ok(MeasurementLoop {
             harness: self,
             runs,
-            source,
             fifo,
         }
         .run(program, f))
@@ -242,7 +218,7 @@ mod tests {
     use super::*;
     use crate::db::KvPair;
 
-    fn captured(reported_us: Option<i64>) -> Iteration {
+    fn captured(wall: Option<Duration>) -> Iteration {
         let mut iteration = Iteration::from_result(BenchResult {
             elapsed_ms: 9_000,
             elapsed_us: Some(9_000_000),
@@ -254,29 +230,27 @@ mod tests {
                 thread_summary: vec![KvPair::int("threads", 4)],
             }),
         });
-        iteration.stderr = b"elapsed_ms=1.5\nblocks=42\n".to_vec();
-        iteration.reported_us = reported_us;
+        iteration.wall = wall;
         iteration
     }
 
-    /// A self-reported wall sets the elapsed fields and nothing else, so a
+    /// The observed wall sets the elapsed fields and nothing else, so a
     /// profiled cell keeps its profile, counters and exit code.
     #[test]
-    fn a_self_reported_wall_replaces_only_the_elapsed_fields() {
-        let mut iteration = captured(Some(1_500));
-        apply_wall_source(WallSource::SelfReported, &mut iteration).unwrap();
+    fn the_wall_replaces_only_the_elapsed_fields() {
+        let mut iteration = captured(Some(Duration::from_micros(1_500)));
+        apply_wall(&mut iteration).unwrap();
         let result = iteration.result.unwrap();
         assert_eq!((result.elapsed_ms, result.elapsed_us), (2, Some(1_500)));
         assert_eq!(result.kv.len(), 2);
         assert!(result.hotpath.is_some());
     }
 
-    /// A child that printed no timing fails the sample rather than fall back
-    /// to another wall.
+    /// An iteration with no captured wall fails the sample.
     #[test]
-    fn a_missing_self_reported_wall_fails_the_sample() {
+    fn a_missing_wall_fails_the_sample() {
         let mut iteration = captured(None);
-        let error = apply_wall_source(WallSource::SelfReported, &mut iteration).unwrap_err();
-        assert!(error.to_string().contains("missing elapsed_ms"), "{error}");
+        let error = apply_wall(&mut iteration).unwrap_err();
+        assert!(error.to_string().contains("captured wall"), "{error}");
     }
 }
