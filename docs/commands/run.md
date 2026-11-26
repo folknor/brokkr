@@ -476,8 +476,13 @@ warns that the bins have no stamp. Outside a git checkout the bins have none
 either, which brokkr says in one line. A stamp brokkr should write and
 can't fails the install, naming the bin: it is installed but unstamped.
 
-`brokkr --version` prints brokkr's own stamp and protocol. It then asks the
-user-wide `results_server` once, for a few seconds at most, and prints its
+`brokkr --version` prints brokkr's own stamp and protocol. A line per helper
+follows: `brokkr-rustc-guard` and `brokkr-results-server` beside the running
+brokkr, and `brokkr-fstrim` at its fixed root-owned path. Each line gives
+the helper's stamped commit as a short hash, `-dirty` for an unclean tree.
+The stamp is read from the file, never by running it. The line notes a helper built
+from a different commit, or a helper that isn't installed or is unstamped.
+It then asks the user-wide `results_server` once, for a few seconds at most, and prints its
 stamp and protocol, noting a protocol or commit that differs from this
 brokkr's. An unconfigured or unreachable server is reported as such, and
 the command still exits 0. brokkr reads stamps itself, so the check after

@@ -129,7 +129,13 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
 /// stamping), an error when the section is unreadable or not exactly one
 /// well-formed line.
 pub(crate) fn own_stamp(section: &str) -> Result<Option<String>, String> {
-    let found = read_sections(Path::new("/proc/self/exe"), section)?;
+    file_stamp(Path::new("/proc/self/exe"), section)
+}
+
+/// [`own_stamp`] for any file: read, never executed, so it is safe on a
+/// privileged helper such as `brokkr-fstrim`.
+pub(crate) fn file_stamp(path: &Path, section: &str) -> Result<Option<String>, String> {
+    let found = read_sections(path, section)?;
     match found.as_slice() {
         [] => Ok(None),
         [one] => {
