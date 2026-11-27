@@ -5,6 +5,11 @@
 
 use super::*;
 
+static PROGRAM: std::sync::LazyLock<Program> = std::sync::LazyLock::new(|| Program {
+    path: "/bin/sh".into(),
+    env: crate::launch::probed::test_env(),
+});
+
 static NO_ARGS: std::sync::LazyLock<lua::Args> = std::sync::LazyLock::new(lua::Args::default);
 
 fn setup<'a>(script: &'a lua::Script, root: &'a Path, container: &'a Path) -> IterationSetup<'a> {
@@ -13,7 +18,7 @@ fn setup<'a>(script: &'a lua::Script, root: &'a Path, container: &'a Path) -> It
         args: &NO_ARGS,
         inputs: &[],
         config: Arc::new(lua::Value::Table(Vec::new())),
-        program: Path::new("/bin/sh"),
+        program: &PROGRAM,
         cwd: root,
         state_root: root,
         container,

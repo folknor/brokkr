@@ -54,7 +54,8 @@ struct BuildKey {
 
 /// A build made once, which every cell of it runs.
 struct Built {
-    program: PathBuf,
+    /// The snapshot and the environment cargo computed for it.
+    program: crate::launch::probed::Program,
     build: store::Build,
     dirty: bool,
 }

@@ -16,8 +16,8 @@
 //!    request (`shutdown::never_escalate`), and only then publish its own
 //!    identity: a stopper that read the identity always finds the handler.
 //! 3. Spawn the server as its own process-group leader, dying with the
-//!    supervisor (parent-death SIGKILL), carrying `BROKKR_SERVE=<token>` and
-//!    none of brokkr's hold variables, its streams on the generation log.
+//!    supervisor (parent-death SIGKILL), with the stored launch environment
+//!    and its streams on the generation log.
 //! 4. Supervise it until it exits or a stop arrives; either way its group is
 //!    SIGKILLed while the leader is still an unreaped child
 //!    (`output::child::supervise_group_leader`).
@@ -102,36 +102,7 @@ fn run(entry: &Path, fd: RawFd) -> Result<(), String> {
     }
 
     // 3. The server.
-    let shown = crate::output::path(&intent.log);
-    let log = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&intent.log)
-        .map_err(|e| format!("cannot open the log {shown}: {e}"))?;
-    let log_err = log
-        .try_clone()
-        .map_err(|e| format!("cannot share the log: {e}"))?;
-    let mut cmd = crate::process::spawn::ChildPolicy::plain_command(&intent.program);
-    cmd.args(&intent.args)
-        .current_dir(&intent.cwd)
-        .stdin(Stdio::null())
-        .stdout(log)
-        .stderr(log_err);
-    for name in crate::process::spawn::HOLD_BOUND_ENV {
-        cmd.env_remove(name);
-    }
-    cmd.env(super::carriers::SERVE_ENV, token.as_str());
-    match &intent.with {
-        Some(with) => cmd.env(super::WITH_EXE_ENV, with),
-        None => cmd.env_remove(super::WITH_EXE_ENV),
-    };
-    {
-        use std::os::unix::process::CommandExt as _;
-        cmd.process_group(0);
-    }
-    crate::process::spawn::ChildPolicy::plain().apply_runtime_policy(&mut cmd);
-    crate::shutdown::die_with_parent(&mut cmd);
-    let child = crate::process::spawn::spawn(cmd, None).map_err(|e| e.to_string())?;
+    let child = spawn_server(&intent, &guard).map_err(|e| e.to_string())?;
     let server_pid = crate::process::Pid::new(child.id());
     state.server = server_pid
         .and_then(|pid| crate::process::ProcStat::read(pid).ok())
@@ -184,4 +155,29 @@ fn describe(ending: &crate::output::child::Ending) -> String {
         Ending::WaitFailed(why) => format!("wait failed: {why}"),
         Ending::StopMarker(_) | Ending::Deadline(_) => format!("{ending:?}"),
     }
+}
+
+fn spawn_server(
+    intent: &registry::Intent,
+    guard: &crate::shutdown::SigtermGuard,
+) -> Result<std::process::Child, crate::error::DevError> {
+    let env = crate::launch::probed::load_env(&intent.generation.join(super::LAUNCH_ENV_FILE))?;
+    let log = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&intent.log)
+        .map_err(super::io("cannot open the serve log"))?;
+    let err = log
+        .try_clone()
+        .map_err(super::io("cannot share the serve log"))?;
+    let args: Vec<&str> = intent.args.iter().map(String::as_str).collect();
+    let mut cmd = crate::process::spawn::ChildPolicy::full_env(
+        &intent.program,
+        &args,
+        Some(&intent.cwd),
+        &env,
+        crate::shutdown::ChildIsolation::ProcessGroup(guard),
+    );
+    cmd.inner.stdin(Stdio::null()).stdout(log).stderr(err);
+    crate::shutdown::die_with_parent(&mut cmd.inner);
+    crate::process::spawn::spawn_full_env(cmd, None)
 }

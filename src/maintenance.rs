@@ -53,6 +53,14 @@ fn leftovers(state_root: Option<&Path>) -> Vec<PathBuf> {
     if let Some(harness) = crate::user_dirs::harness_dir() {
         found.extend(children(&harness, crate::test_runner::is_session_dir_name));
     }
+    // A launch's plan, receipt and probe record live only while the locked
+    // command that wrote them runs; under a fresh hold every one is a killed
+    // command's, and a probe record holds a recorded environment.
+    if let Some(launch) = crate::user_dirs::launch_dir() {
+        for store in ["plans", "probes"] {
+            found.extend(children(&launch.join(store), |_| true));
+        }
+    }
     if let Some(root) = state_root {
         let state = ProjectState::new(root);
         for base in [state.nextest_synth_file(), state.nextest_sweep_env_file()] {
@@ -64,6 +72,19 @@ fn leftovers(state_root: Option<&Path>) -> Vec<PathBuf> {
             &state.artifacts_dir(),
             crate::runnables::is_staging_copy_name,
         ));
+        // A foreground `run --with` peer launcher, beside its snapshot. A
+        // served peer's lives in its serve generation, never here.
+        if let Ok(snapshots) = std::fs::read_dir(state.artifacts_dir()) {
+            for snapshot in snapshots.flatten() {
+                // Directories only: a snapshot whose binary is itself named
+                // `.brokkr-launch` is a file, and is why `.brokkr-peer` exists.
+                found.extend(
+                    children(&snapshot.path(), |name| name == ".brokkr-launch" || name == ".brokkr-peer")
+                        .into_iter()
+                        .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())),
+                );
+            }
+        }
     }
     found
 }

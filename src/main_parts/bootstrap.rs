@@ -336,47 +336,14 @@ pub(super) fn run_program(
     args: &[String],
     detection: Option<&project::Detection>,
 ) -> Result<(), DevError> {
-    // The `--with` target is built and snapshotted first, its worktree stage
-    // (if any) finished before the program's begins, so the program's build
-    // can neither replace it nor evict anything it still needs.
-    let with_exe = match with {
-        Some(w) => Some(build_snapshot(
-            Some(w.name),
-            choice.cloned(),
-            &w.feat,
-            w.commit,
-            detection,
-        )?),
-        None => None,
-    };
-    let with_env: Vec<(&str, String)> = with_exe
-        .iter()
-        .map(|p| (WITH_EXE_VAR, p.display().to_string()))
-        .collect();
-    let env: Vec<(&str, &str)> = with_env.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    // Build in `build_root`, run in `run_dir`. Without `--with`, cargo
-    // launches the program through brokkr-launch, so the commit's own cargo
-    // config shapes the launch under `--commit` too. With `--with` it is
-    // built and executed directly, so the path is in the program's
-    // environment only, never in cargo's or a build script's.
+    if let Some(with) = with {
+        return run_with(with, name, choice, feat, commit, args, detection);
+    }
     let launch = |build_root: &std::path::Path,
                   run_dir: &std::path::Path,
                   bin_cfg: Option<&crate::config::BinConfig>|
      -> Result<(), DevError> {
         let lock = context::reenter_command_lock()?;
-        if with.is_some() {
-            return runnables::cmd_run_built(
-                build_root,
-                run_dir,
-                bin_cfg,
-                name,
-                choice.cloned(),
-                feat,
-                args,
-                &env,
-                &lock,
-            );
-        }
         runnables::cmd_run(
             build_root,
             run_dir,
@@ -433,7 +400,28 @@ pub(super) fn run_program(
     )
 }
 
-const WITH_EXE_VAR: &str = runnables::WITH_EXE_ENV;
+fn run_with(
+    with: &WithTarget<'_>,
+    name: Option<&str>,
+    choice: Option<&crate::build::RustProfile>,
+    feat: &runnables::FeatureArgs<'_>,
+    commit: Option<&str>,
+    args: &[String],
+    detection: Option<&project::Detection>,
+) -> Result<(), DevError> {
+    let fallback = project::detect_roots()?;
+    let trees = ProgramTrees::resolve(detection, &fallback)?;
+    let _interrupts = crate::shutdown::SigtermGuard::install();
+    trees.with_build_roots(commit, Some(with), |outer_root, peer_root| {
+        let lock = context::reenter_command_lock()?;
+        let peer = trees.build_peer(peer_root, with, choice.cloned())?;
+        let outer = trees.build_probed(outer_root, name, choice.cloned(), feat)?;
+        match outer {
+            Some(outer) => runnables::cmd_run_built(peer, outer, trees.live.as_path(), args, &lock),
+            None => Ok(()),
+        }
+    })
+}
 
 /// `brokkr serve TARGET`: what dispatch parsed.
 pub(super) struct ServeRequest<'a> {
@@ -450,59 +438,150 @@ pub(super) struct ServeRequest<'a> {
     pub(super) detection: Option<&'a project::Detection>,
 }
 
-/// `brokkr serve TARGET`: build the program and any `--with` target as
-/// `brokkr build` does - snapshots, each worktree stage finished before the
-/// next begins, the `--with` target first as for `run` - then hand them to
-/// `crate::serve::start`, all under the dispatch hold.
+/// Build and probe the server and any peer under the dispatch hold, then
+/// hand their snapshots and recorded environments to the serve supervisor.
 pub(super) fn run_serve(req: &ServeRequest<'_>) -> Result<(), DevError> {
     crate::serve::refuse_nested_start()?;
-    let with = match req.with {
-        Some(w) => Some(build_snapshot(
-            Some(w.name),
-            req.choice.clone(),
-            &w.feat,
-            w.commit,
-            req.detection,
-        )?),
-        None => None,
-    };
-    let program = build_snapshot(
-        Some(req.target),
-        req.choice.clone(),
-        req.feat,
-        req.commit,
-        req.detection,
-    )?;
-    let fallback = match req.detection {
-        Some(_) => None,
-        None => Some(project::detect_roots()?),
-    };
-    let (project, root, cwd) = match (req.detection, fallback.as_ref()) {
-        (Some(d), _) => (
-            d.project.name().to_owned(),
-            d.project_root.as_path(),
-            d.build_root.as_path(),
-        ),
-        (None, Some((root, build))) => ("brokkr".to_owned(), root.as_path(), build.as_path()),
-        (None, None) => {
-            return Err(DevError::Internal(
-                "serve roots were not resolved for an unconfigured tree".into(),
-            ));
-        }
-    };
-    crate::serve::start(&crate::serve::StartRequest {
-        project: &project,
-        configured: req.detection.is_some(),
-        root,
-        cwd,
-        name: req.name,
-        program,
-        with,
-        args: req.args,
-        grace: req.grace,
-        ready: req.ready,
-        ready_timeout: req.ready_timeout,
+    let fallback = project::detect_roots()?;
+    let trees = ProgramTrees::resolve(req.detection, &fallback)?;
+    let _interrupts = crate::shutdown::SigtermGuard::install();
+    trees.with_build_roots(req.commit, req.with, |outer_root, peer_root| {
+        let with = req
+            .with
+            .map(|with| trees.build_peer(peer_root, with, req.choice.clone()))
+            .transpose()?;
+        let program = trees
+            .build_probed(outer_root, Some(req.target), req.choice.clone(), req.feat)?
+            .ok_or_else(|| DevError::Internal("serve did not resolve its target".into()))?;
+        let with = with.map(runnables::PendingLaunch::probe).transpose()?;
+        let program = program.probe()?;
+        let project = trees.project.map_or("brokkr", Project::name);
+        crate::serve::start(crate::serve::StartRequest {
+            project,
+            configured: req.detection.is_some(),
+            root: trees.state.as_path(),
+            cwd: trees.live.as_path(),
+            name: req.name,
+            program,
+            with,
+            args: req.args,
+            grace: req.grace,
+            ready: req.ready,
+            ready_timeout: req.ready_timeout,
+        })
     })
+}
+
+/// Both build roots stay active until both probes finish. Two refs naming
+/// the same commit share one worktree activation.
+struct ProgramTrees<'a> {
+    project: Option<&'a Project>,
+    bin: Option<&'a config::BinConfig>,
+    state: &'a project::ProjectRoot,
+    live: &'a project::BuildRoot,
+    tree: crate::tree_policy::TreePolicy,
+    keep: usize,
+}
+
+impl<'a> ProgramTrees<'a> {
+    fn resolve(
+        detection: Option<&'a project::Detection>,
+        fallback: &'a (project::ProjectRoot, project::BuildRoot),
+    ) -> Result<Self, DevError> {
+        Ok(match detection {
+            Some(d) => Self {
+                project: Some(&d.project),
+                bin: d.config.bin.as_ref(),
+                state: &d.project_root,
+                live: &d.build_root,
+                tree: crate::tree_policy::TreePolicy::of(&d.config),
+                keep: context::worktree_keep(&d.config)?,
+            },
+            None => Self {
+                project: None,
+                bin: None,
+                state: &fallback.0,
+                live: &fallback.1,
+                tree: crate::tree_policy::TreePolicy::default(),
+                keep: crate::worktree_record::DEFAULT_KEEP,
+            },
+        })
+    }
+
+    fn with_root<T>(
+        &self,
+        commit: Option<&str>,
+        f: impl FnOnce(&std::path::Path) -> Result<T, DevError>,
+    ) -> Result<T, DevError> {
+        context::with_worktree(
+            self.project,
+            self.state,
+            self.live,
+            commit,
+            false,
+            &self.tree,
+            self.keep,
+            |root| f(root.as_path()),
+        )
+    }
+
+    fn with_build_roots(
+        &self,
+        outer: Option<&str>,
+        peer: Option<&WithTarget<'_>>,
+        f: impl FnOnce(&std::path::Path, Option<&std::path::Path>) -> Result<(), DevError>,
+    ) -> Result<(), DevError> {
+        let Some(peer) = peer else {
+            return self.with_root(outer, |root| f(root, None));
+        };
+        let resolve = |commit: Option<&str>| {
+            commit
+                .map(|r| crate::git::resolve_commit(self.live.as_path(), r))
+                .transpose()
+        };
+        let (peer_commit, outer_commit) = (resolve(peer.commit)?, resolve(outer)?);
+        self.with_root(
+            peer_commit.as_ref().map(crate::git::Commit::as_str),
+            |peer_root| {
+                if peer_commit == outer_commit {
+                    return f(peer_root, Some(peer_root));
+                }
+                self.with_root(
+                    outer_commit.as_ref().map(crate::git::Commit::as_str),
+                    |outer_root| f(outer_root, Some(peer_root)),
+                )
+            },
+        )
+    }
+
+    fn build_probed(
+        &self,
+        root: &std::path::Path,
+        name: Option<&str>,
+        choice: Option<crate::build::RustProfile>,
+        feat: &runnables::FeatureArgs<'_>,
+    ) -> Result<Option<runnables::PendingLaunch>, DevError> {
+        runnables::cmd_build_probed(
+            root,
+            &self.state.state().artifacts_dir(),
+            self.bin,
+            name,
+            choice,
+            feat,
+        )
+    }
+
+    fn build_peer(
+        &self,
+        root: Option<&std::path::Path>,
+        with: &WithTarget<'_>,
+        choice: Option<crate::build::RustProfile>,
+    ) -> Result<runnables::PendingLaunch, DevError> {
+        let root =
+            root.ok_or_else(|| DevError::Internal("a peer must have a build root".into()))?;
+        self.build_probed(root, Some(with.name), choice, &with.feat)?
+            .ok_or_else(|| DevError::Internal("the launch did not resolve its peer target".into()))
+    }
 }
 
 /// `run --with TARGET`: the second target, built as `brokkr build` builds it,
@@ -530,8 +609,7 @@ pub(super) fn run_build(
 }
 
 /// `build`'s work without the stdout line: build the live tree or a
-/// `--commit` worktree and return the snapshot's path. `run --with` builds
-/// its second target through this too.
+/// `--commit` worktree and return the snapshot's path.
 fn build_snapshot(
     name: Option<&str>,
     choice: Option<crate::build::RustProfile>,

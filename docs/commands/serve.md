@@ -31,17 +31,28 @@ from the serving stage, which doesn't.
 - `--debug`, `--release` and `--profile`
 - `--features`, `--all-features` and `--no-default-features`
 - `--commit REF`
-- the `--with TARGET` family, which hands the program a second built
-  executable in `BROKKR_WITH_EXE` (see `brokkr man run`)
+- the `--with TARGET` family, which passes the peer launcher in
+  `BROKKR_WITH_EXE` and its raw snapshot in `BROKKR_WITH_ARTIFACT` (see
+  `brokkr man run`)
 
-brokkr builds both executables as `brokkr build` does, into snapshots, and
-links them into the serve's own generation directory. A later build never
-changes what runs, and `brokkr clean` removing `.brokkr/artifacts/` never
-takes a served file away. Everything after `--` goes to the program.
+brokkr snapshots the executables and probes their launch environments
+before it starts the serve (see How a program is launched in
+`brokkr man run`). With a peer, brokkr builds the peer first, then the
+server, then probes each in the same order. The generation directory holds
+the executable links and the private launch files. A later build or removal
+of the snapshot store leaves those executable links usable. The saved
+environment doesn't freeze the files it points at: its library search path
+names cargo's build output directories, as under `cargo run`. A server that
+loads a library from there after a later build changed it, or after a
+`--commit` worktree was evicted, gets what is there then, or nothing.
 
-brokkr then starts the program detached, under a brokkr supervisor in its own
-session. The program's working directory is the build root, as for `run`;
-stdin is closed, and stdout and stderr go to the generation's log. brokkr
+The detached supervisor starts the server directly with the saved
+environment. It carries none of the probe's ties to the lock: no compile
+capability and no launch cohort, since the server outlives the hold it was
+started under. brokkr adds the generation's `BROKKR_SERVE` token to both the
+server and the peer, plus the peer paths to the server when given.
+Everything after `--` goes to the server. It runs from the live build root
+with stdin closed and both output streams on the generation's log. brokkr
 prints the server's PID and the log's path, releases the lock and returns.
 The serve lives until it is stopped or exits.
 
@@ -179,9 +190,9 @@ A serve keeps its state in two places:
   `TOKEN.state` holds what the supervisor published about itself and the
   server.
 - `.brokkr/serve/NAME.TOKEN/` under the state root: the generation
-  directory, holding the served executables' links (`program/`, `with/`)
-  and `log`. When a serve ends, its links go and its log stays, so you can
-  read a crash. The next start of the same name removes the ended
+  directory, holding the served executables' links (`program/`, `with/`),
+  private launch files and `log`. Retirement removes the links and launch
+  files and keeps the log so you can read a crash. The next start of the same name removes the ended
   generations of that name, and `brokkr clean` removes every ended one.
 
 ## Exit statuses

@@ -169,6 +169,7 @@ pub(crate) struct CargoProbe {
     root: PathBuf,
     chain: Vec<String>,
     env: Vec<(String, String)>,
+    full_env: Option<crate::process::spawn::FullEnv>,
 }
 
 impl CargoProbe {
@@ -203,6 +204,11 @@ impl CargoProbe {
         Self {
             root: root.to_path_buf(),
             chain,
+            full_env: env.full_env().map(|base| {
+                let mut full = base.clone();
+                full.extend(pairs.iter().map(|(k, v)| (k.into(), v.into())));
+                full
+            }),
             env: pairs,
         }
     }
@@ -215,11 +221,21 @@ impl CargoProbe {
         let mut all: Vec<&str> = prefix.iter().map(String::as_str).collect();
         all.extend_from_slice(args);
         let refs: Vec<(&str, &str)> = self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        probe(&self.root, EffectiveEnv::new(&refs), program, &all)
+        let captured = match &self.full_env {
+            Some(env) => capture_full(&self.root, program, &all, env)?,
+            None => output::run_captured_with_env(program, &all, &self.root, &refs)?,
+        };
+        probe_output(program, &all, &captured)
     }
 
     /// The host triple the chain reports.
     pub(crate) fn host_triple(&self) -> Result<String, DevError> {
+        if let Some(env) = &self.full_env {
+            let info = crate::cargo::rustc::query_chain(&self.chain, |program, args| {
+                capture_full(&self.root, program, args, env)
+            })?;
+            return Ok(info.host);
+        }
         let refs: Vec<(&str, &str)> = self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         Ok(crate::cargo::rustc::load_chain(&self.root, &self.chain, &refs)?
             .host
@@ -508,6 +524,26 @@ fn probe(
     args: &[&str],
 ) -> Result<String, DevError> {
     let captured = output::run_captured_with_env(program, args, root, env.pairs())?;
+    probe_output(program, args, &captured)
+}
+
+fn capture_full(
+    root: &Path,
+    program: &str,
+    args: &[&str],
+    env: &crate::process::spawn::FullEnv,
+) -> Result<output::CapturedOutput, DevError> {
+    let isolation = crate::shutdown::ChildIsolation::Inherit;
+    let cmd =
+        crate::process::spawn::ChildPolicy::full_env(program, args, Some(root), env, isolation);
+    output::child::run_captured_full_env(cmd, None, isolation, output::child::ChildOptions::DEFAULT)
+}
+
+fn probe_output(
+    program: &str,
+    args: &[&str],
+    captured: &output::CapturedOutput,
+) -> Result<String, DevError> {
     if !captured.success() {
         return Err(DevError::Build(format!(
             "`{program} {}` failed: {}",

@@ -21,6 +21,7 @@
 
 use std::io::{Read as _, Write as _};
 use std::os::fd::AsRawFd as _;
+use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -94,7 +95,6 @@ impl Intent {
     }
 
     fn render(&self) -> String {
-        let path = |p: &Path| escape_value(&p.to_string_lossy());
         let mut out = String::new();
         let mut line = |key: &str, value: String| {
             out.push_str(key);
@@ -105,14 +105,16 @@ impl Intent {
         line("token", self.token.as_str().to_owned());
         line("project", escape_value(&self.project));
         line("configured", u8::from(self.configured).to_string());
-        line("root", path(&self.root));
+        render_path("root", &self.root, &mut line);
         line("name", escape_value(&self.name));
         line("target", escape_value(&self.target));
-        line("generation", path(&self.generation));
-        line("program", path(&self.program));
-        line("with", self.with.as_deref().map(path).unwrap_or_default());
-        line("cwd", path(&self.cwd));
-        line("log", path(&self.log));
+        render_path("generation", &self.generation, &mut line);
+        render_path("program", &self.program, &mut line);
+        if let Some(with) = &self.with {
+            render_path("with", with, &mut line);
+        }
+        render_path("cwd", &self.cwd, &mut line);
+        render_path("log", &self.log, &mut line);
         line("grace_ms", self.grace.as_millis().to_string());
         line("boot_id", escape_value(&self.boot_id));
         line("pid_ns", escape_value(&self.pid_ns));
@@ -140,19 +142,26 @@ impl Intent {
             }
         }
         let take = |key: &str| fields.get(key).cloned();
-        let with = take("with").filter(|w| !w.is_empty()).map(PathBuf::from);
+        let path = |key: &str| {
+            if let Some(bytes) = take(&format!("{key}_bytes")) {
+                return decode_path(&bytes);
+            }
+            take(key)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        };
         Some(Self {
             token: RunToken::parse(&take("token")?)?,
             project: take("project")?,
             configured: take("configured").as_deref() != Some("0"),
-            root: PathBuf::from(take("root")?),
+            root: path("root")?,
             name: take("name").filter(|n| !n.is_empty())?,
             target: take("target")?,
-            generation: PathBuf::from(take("generation")?),
-            program: PathBuf::from(take("program")?),
-            with,
-            cwd: PathBuf::from(take("cwd")?),
-            log: PathBuf::from(take("log")?),
+            generation: path("generation")?,
+            program: path("program")?,
+            with: path("with"),
+            cwd: path("cwd")?,
+            log: path("log")?,
             grace: Duration::from_millis(take("grace_ms")?.parse().ok()?),
             boot_id: take("boot_id")?,
             pid_ns: take("pid_ns")?,
@@ -161,6 +170,39 @@ impl Intent {
             args,
         })
     }
+}
+
+// Keep UTF-8 paths in their existing fields. Use a separate field for
+// native bytes so a literal name in an existing record is never redecoded.
+fn render_path(key: &str, path: &Path, line: &mut impl FnMut(&str, String)) {
+    if let Some(path) = path.to_str() {
+        line(key, escape_value(path));
+    } else {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let raw = path.as_os_str().as_bytes();
+        let mut hex = String::with_capacity(raw.len() * 2);
+        for &byte in raw {
+            hex.push(char::from(HEX[usize::from(byte >> 4)]));
+            hex.push(char::from(HEX[usize::from(byte & 15)]));
+        }
+        line(&format!("{key}_bytes"), hex);
+    }
+}
+
+fn decode_path(hex: &str) -> Option<PathBuf> {
+    if hex.is_empty() || !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let (pairs, _) = hex.as_bytes().as_chunks::<2>();
+    let raw = pairs
+        .iter()
+        .map(|pair| {
+            let digits = std::str::from_utf8(pair).ok()?;
+            let byte = u8::from_str_radix(digits, 16).ok()?;
+            (byte != 0).then_some(byte)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(std::ffi::OsString::from_vec(raw).into())
 }
 
 /// The listed short form of a token.
@@ -406,8 +448,8 @@ pub(crate) fn read_entry(dir: &Path, token: &RunToken) -> std::io::Result<Option
 }
 
 /// Retire an entry whose flock is free: remove its state and its record, and
-/// the served executables' links from its generation directory, keeping the
-/// log for a later look. Refuses (`Ok(false)`) an entry whose flock is held.
+/// the served executables and environment from its generation directory,
+/// keeping the log for a later look. Refuses (`Ok(false)`) an entry whose flock is held.
 pub(super) fn retire(
     dir: &Path,
     token: &RunToken,
@@ -424,6 +466,11 @@ pub(super) fn retire(
         return Ok(false);
     }
     if let Some(intent) = intent {
+        match std::fs::remove_file(intent.generation.join(super::LAUNCH_ENV_FILE)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
         for slot in [super::PROGRAM_SLOT, super::WITH_SLOT] {
             match std::fs::remove_dir_all(intent.generation.join(slot)) {
                 Ok(()) => {}
@@ -539,6 +586,46 @@ mod tests {
             ..s
         };
         assert_eq!(State::parse(&s.render()), Some(s));
+    }
+
+    #[test]
+    fn a_generation_round_trips_non_utf8_paths() {
+        let path = PathBuf::from(std::ffi::OsString::from_vec(b"/root/\xff%0A".to_vec()));
+        let i = Intent {
+            program: path.join("program/srv"),
+            with: Some(path.join("with/peer")),
+            log: path.join("log"),
+            generation: path.clone(),
+            cwd: path,
+            ..intent("srv")
+        };
+        assert_eq!(Intent::parse(&i.render()), Some(i));
+    }
+
+    #[test]
+    fn retiring_a_generation_removes_its_environment_and_peer_plan() {
+        let dir = crate::test_scratch::scratch("serve", "retire-launch-files");
+        let generation = dir.join("generation");
+        let launch = generation
+            .join(super::super::WITH_SLOT)
+            .join(".brokkr-launch");
+        std::fs::create_dir_all(&launch).unwrap();
+        let plan = launch.join("peer.brokkr-plan");
+        let env = generation.join(super::super::LAUNCH_ENV_FILE);
+        let log = generation.join("log");
+        for path in [&env, &plan, &log] {
+            std::fs::write(path, b"data").unwrap();
+        }
+        let i = Intent {
+            generation,
+            log: log.clone(),
+            ..intent("srv")
+        };
+        drop(publish(&dir, &i).unwrap());
+        assert!(retire(&dir, &i.token, Some(&i)).unwrap());
+        assert!(!env.exists());
+        assert!(!plan.exists());
+        assert!(log.exists());
     }
 
     /// A published entry reads as held while its flock lives, as free once

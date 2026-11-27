@@ -15,10 +15,6 @@ use crate::config::BinConfig;
 use crate::error::DevError;
 use crate::output;
 
-/// The environment variable `run --with` and `serve --with` hand the program
-/// the `--with` target's executable path in.
-pub(crate) const WITH_EXE_ENV: &str = "BROKKR_WITH_EXE";
-
 /// `run`'s cargo feature selection, forwarded verbatim.
 ///
 /// Brokkr stays out of feature resolution: the value of `--features` goes to
@@ -366,8 +362,8 @@ fn prepare_launch(
             // path exactly as cargo hands it over.
             let plan = crate::launch::Plan {
                 cwd: (build_root != run_dir).then(|| run_dir.to_path_buf()),
-                sets: Vec::new(),
                 runner,
+                ..crate::launch::Plan::default()
             };
             crate::launch::Prepared::new(&plan, &triple, string).map(Some)
         }
@@ -430,65 +426,72 @@ fn report_runtime(name: &str, ended: &Result<(i32, std::time::Duration), DevErro
     }
 }
 
-/// `brokkr run --with TARGET [--commit REF] [NAME]`: build the program in
-/// `worktree` (the commit's, or the live tree), then execute the artifact
-/// directly from `run_dir`, the directory `brokkr run` was invoked from.
-///
-/// Executed directly rather than through cargo so that `env`, the `--with`
-/// path, reaches the program alone and never cargo or a build script. The
-/// program therefore gets none of cargo's launch environment.
-///
-/// Targets are discovered in `worktree`: the commit may predate a target, or
-/// carry one the live tree has since dropped.
-#[allow(clippy::too_many_arguments)]
-pub fn cmd_run_built(
-    worktree: &Path,
-    run_dir: &Path,
+/// A snapshot with its build recipe still available for a launch probe.
+pub(crate) struct PendingLaunch {
+    path: PathBuf,
+    built: crate::build::BuiltArtifact,
+}
+
+impl PendingLaunch {
+    pub(crate) fn probe(self) -> Result<crate::launch::probed::Program, DevError> {
+        let env = self.built.probe(&self.path)?;
+        Ok(crate::launch::probed::Program {
+            path: self.path,
+            env,
+        })
+    }
+}
+
+/// Build and snapshot a target that will be launched directly.
+pub(crate) fn cmd_build_probed(
+    build_root: &Path,
+    store: &Path,
     cfg: Option<&BinConfig>,
     name: Option<&str>,
     choice: Option<crate::build::RustProfile>,
     feat: &FeatureArgs<'_>,
+) -> Result<Option<PendingLaunch>, DevError> {
+    let discovered = discover(build_root)?;
+    let Some(target) = resolve_target(&discovered, cfg, name)? else {
+        return Ok(None);
+    };
+    let config = build_config(target, resolve_profile(cfg, choice), feat);
+    let built = crate::build::cargo_build_probed(&config, build_root, None)?;
+    let (path, _) = snapshot_executable(&build_root.join(&built.path), store)?;
+    let path = std::path::absolute(path)?;
+    Ok(Some(PendingLaunch { path, built }))
+}
+
+/// Probe the peer, probe the outer program, and run the outer snapshot
+/// from the live invocation directory.
+pub(crate) fn cmd_run_built(
+    peer: PendingLaunch,
+    outer: PendingLaunch,
+    run_dir: &Path,
     args: &[String],
-    env: &[(&str, &str)],
     lock: &crate::lockfile::LockGuard,
 ) -> Result<(), DevError> {
-    let discovered = discover(worktree)?;
-    let Some(target) = resolve_target(&discovered, cfg, name)? else {
-        return Ok(());
-    };
-    let build = crate::build::BuildConfig {
-        package: Some(target.package.clone()),
-        bin: (!target.example).then(|| target.name.clone()),
-        example: target.example.then(|| target.name.clone()),
-        features: feat.features.to_vec(),
-        default_features: !feat.no_default,
-        all_features: feat.all,
-        profile: resolve_profile(cfg, choice),
-    };
-    // Held across the build-to-exec handoff, as in `cmd_run`.
-    let _interrupts = crate::shutdown::SigtermGuard::install();
-    let exe = crate::build::cargo_build(&build, worktree)?;
-    if crate::shutdown::is_shutdown_requested() {
-        return Err(DevError::Interrupted);
-    }
+    use crate::launch::probed::{PeerLauncher, peer_additions};
+
+    let name = outer.built.target.clone();
+    let peer = peer.probe()?;
+    let outer = outer.probe()?;
+    let launcher = PeerLauncher::new(&peer)?;
+    let env = outer
+        .env
+        .with_additions(peer_additions(&launcher.path, &peer.path));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let ended = output::run_passthrough_in(
-        &exe.path,
-        &arg_refs,
-        Some(run_dir),
-        env,
-        output::SpawnProfile::Plain,
-        Some(lock),
-    )
-    .map(|out| {
-        (
-            out.failed_code(crate::output::child::Exits::SUCCESS)
-                .unwrap_or(0),
-            out.elapsed,
-        )
-    });
-    report_runtime(&target.name, &ended);
-    // Same contract as `cmd_run`: the program's code, silently.
+    let ended =
+        output::child::run_passthrough_full_env(&outer.path, &arg_refs, run_dir, &env, lock).map(
+            |out| {
+                (
+                    out.failed_code(crate::output::child::Exits::SUCCESS)
+                        .unwrap_or(0),
+                    out.elapsed,
+                )
+            },
+        );
+    report_runtime(&name, &ended);
     match ended?.0 {
         0 => Ok(()),
         code => Err(DevError::ExitCode(code)),
@@ -517,17 +520,25 @@ pub fn cmd_build(
             "no target chosen: name one (`brokkr build <name>`) or set [bin] default".into(),
         ));
     };
-    let build = crate::build::BuildConfig {
+    let build = build_config(target, resolve_profile(cfg, choice), feat);
+    let exe = crate::build::cargo_build(&build, build_root)?;
+    snapshot_executable(&exe.path, store).map(|(path, _)| path)
+}
+
+fn build_config(
+    target: &Runnable,
+    profile: crate::build::RustProfile,
+    feat: &FeatureArgs<'_>,
+) -> crate::build::BuildConfig {
+    crate::build::BuildConfig {
         package: Some(target.package.clone()),
         bin: (!target.example).then(|| target.name.clone()),
         example: target.example.then(|| target.name.clone()),
         features: feat.features.to_vec(),
         default_features: !feat.no_default,
         all_features: feat.all,
-        profile: resolve_profile(cfg, choice),
-    };
-    let exe = crate::build::cargo_build(&build, build_root)?;
-    snapshot_executable(&exe.path, store).map(|(path, _)| path)
+        profile,
+    }
 }
 
 /// A script bench's build target, resolved as `brokkr build` resolves NAME

@@ -329,16 +329,34 @@ pub(crate) fn cfg_args(rustflags: &[String]) -> Vec<String> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EffectiveEnv<'a> {
     overrides: &'a [(&'a str, &'a str)],
+    full: Option<&'a crate::process::spawn::FullEnv>,
 }
 
 impl<'a> EffectiveEnv<'a> {
     pub(crate) fn new(overrides: &'a [(&'a str, &'a str)]) -> Self {
-        Self { overrides }
+        Self {
+            overrides,
+            full: None,
+        }
+    }
+
+    pub(crate) fn full(env: &'a crate::process::spawn::FullEnv) -> Self {
+        Self {
+            overrides: &[],
+            full: Some(env),
+        }
+    }
+
+    pub(crate) fn full_env(self) -> Option<&'a crate::process::spawn::FullEnv> {
+        self.full
     }
 
     /// The final value Cargo sees. The last explicit pair wins, followed by
     /// the process environment when no pair sets this key.
     pub(crate) fn get_os(self, key: &str) -> Option<std::ffi::OsString> {
+        if let Some(env) = self.full {
+            return env.get(std::ffi::OsStr::new(key)).cloned();
+        }
         self.overrides
             .iter()
             .rev()

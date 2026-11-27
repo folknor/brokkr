@@ -718,7 +718,11 @@ too, keeps its own cache, and none disturbs the plain build. `--hotpath`
 and `--alloc` builds take the same recipe.
 
 brokkr snapshots the built executable into `.brokkr/artifacts/XXH128/NAME`
-as `brokkr build` does, and every child runs that snapshot. The run records:
+as `brokkr build` does. Once per arm, it probes the build with `cargo run`
+to record the launch environment (see How a program is launched in
+`brokkr man run`). A rebuild during the probe, an executable mismatch or a configured
+runner fails the arm before any iteration.
+The run records:
 
 - what was asked for
 - the bin and the features cargo resolved for it
@@ -726,20 +730,21 @@ as `brokkr build` does, and every child runs that snapshot. The run records:
 - for a bench with `rustflags`, the resolved tokens and how they were
   injected
 
-A `program` call (see binary_with) runs another executable in the
-snapshot's place.
+Calls run the snapshot directly with the arm's recorded environment and
+the additions for that call. A `program` call runs another executable
+with the inherited environment and the call's additions (see binary_with).
 
-Once the build and its snapshot have succeeded, brokkr checks the tree built
-again, the worktree under `--commit`, unless a stop is already pending; the
-arm is then interrupted with no iteration. If the tree's HEAD is no longer
+Once the build, snapshot and probe have succeeded, brokkr checks the tree
+built again, the worktree under `--commit`. A pending stop interrupts the
+arm before any iteration. If the tree's HEAD is no longer
 the commit resolved for the invocation, the build may have read either
 tree, so the arm fails there, stored with what it built and no iteration.
 Otherwise, without `--commit`, brokkr reads the live tree's state again,
 and the run is dirty if the tree was dirty before the build or is now (see
 Stored runs).
 
-An arm whose build or snapshot fails gets neither second reading. The check
-compares two observations, so it doesn't see a change present at neither,
+An arm whose build, snapshot or probe fails gets neither second reading.
+The check compares two observations, so it doesn't see a change present at neither,
 such as a checkout moved and moved back, or an edit undone before the
 check.
 
@@ -877,11 +882,12 @@ Lua's formatting.
 local r = binary("cat", input, { jobs = 4, output = output("out.pbf") })
 ```
 
-The child runs in the live project root, under `--commit` too. Its stdin is
-empty unless `binary_with` gives one. Its stdout and stderr are each written
-in full to a spool in the iteration directory. brokkr wires in the marker
-FIFO (`BROKKR_MARKER_FIFO`) and the sidecar, one FIFO per child. The result
-is a table:
+The child runs in the live project root, under `--commit` too. brokkr adds
+the marker FIFO (`BROKKR_MARKER_FIFO`), reservation marker and any hotpath
+settings to the recorded environment. A `binary_with` call's `env` entries
+apply last, key by key. Stdin is empty unless `binary_with` gives one.
+Stdout and stderr are each written in full to a spool in the iteration
+directory. The result is a table:
 
 - **`exit`**: the exit code, or nil when a signal ended it.
 - **`signal`**: that signal.

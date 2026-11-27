@@ -27,6 +27,7 @@ use crate::bench::policy::{Calls, Declared};
 use crate::bench::resources::{self, Handle, Resources};
 use crate::bench::store;
 use crate::error::DevError;
+use crate::launch::probed::Program;
 use crate::output::child::Ending;
 
 /// `since()`'s answers for one run: the commit under test, the live repo
@@ -86,7 +87,7 @@ pub(super) struct IterationSetup<'a> {
     /// `config()`'s table.
     pub(super) config: Arc<lua::Value>,
     /// The snapshot every child runs.
-    pub(super) program: &'a Path,
+    pub(super) program: &'a Program,
     /// The live project root, every child's working directory.
     pub(super) cwd: &'a Path,
     /// Where the children's marker FIFOs are made.
@@ -408,7 +409,7 @@ pub(super) fn run_iteration(
         resources: Some(resources),
         calls,
         config: setup.config,
-        program: setup.program.to_path_buf(),
+        program: setup.program.clone(),
         cwd: setup.cwd.to_path_buf(),
         state_root: setup.state_root.to_path_buf(),
         block_start: None,
@@ -491,7 +492,11 @@ impl TraceStart {
     /// After `bench()`: stop sampling, read the end, release the
     /// iteration's directory, read again and record this cell's end. Returns
     /// the trace, when it validates, and whether the release completed.
-    fn finish(self, host: &mut IterationHost, index: usize) -> (Option<store::HostTrace>, bool) {
+    fn finish(
+        self,
+        host: &mut IterationHost,
+        index: usize,
+    ) -> (Option<store::HostTrace>, bool) {
         let (readings, capped) = self.sampler.finish();
         let end = host_trace::read(self.device.as_ref());
         host.budget.host_readings = host.budget.host_readings.saturating_sub(readings.len());
@@ -648,7 +653,9 @@ struct IterationHost {
     /// Every handle given out, and the call policy's state.
     calls: Calls,
     config: Arc<lua::Value>,
-    program: PathBuf,
+    /// The snapshot and the environment cargo computed for it, owned: the
+    /// VM's host must not borrow from the arm.
+    program: Program,
     cwd: PathBuf,
     state_root: PathBuf,
     block_start: Option<Instant>,
@@ -750,7 +757,7 @@ impl IterationHost {
     /// that executable as observed.
     fn target(&self, call: &Declared) -> Result<(PathBuf, Option<store::Executable>), Abort> {
         match &call.program {
-            None => Ok((self.program.clone(), None)),
+            None => Ok((self.program.path.clone(), None)),
             Some(name) => external_program(name, &self.cwd, &call.env).map(|(p, e)| (p, Some(e))),
         }
     }
@@ -765,7 +772,7 @@ impl IterationHost {
         // launch it would refuse.
         let hold = launch_hold()?;
         let (program, executable) = self.target(call)?;
-        let program_str = program.display().to_string();
+        let program_str = program.to_string_lossy().into_owned();
         let short = program
             .file_name()
             .map_or_else(|| program_str.clone(), |n| n.to_string_lossy().into_owned());
@@ -783,10 +790,12 @@ impl IterationHost {
         let (call_stdout, call_stderr, stderr_spool) = child_streams(&mut admitted)?;
         let report = admitted.report().map(Path::to_path_buf);
         let report_str = report.as_deref().map(utf8_report).transpose()?;
-        let mut env: Vec<(&str, &str)> =
-            vec![(crate::sidecar::MARKER_FIFO_ENV, fifo_path.as_str())];
-        env.extend(call.env.iter().map(|(n, v)| (n.as_str(), v.as_str())));
-        env.extend(report_str.as_deref().map(hotpath_env).into_iter().flatten());
+        let env = call_environment(
+            call,
+            &fifo_path,
+            report_str.as_deref(),
+            executable.is_some(),
+        );
         let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         // Prepared after admission and before the launch instant, so its
         // cost is inside the block but outside the child's wall.
@@ -814,12 +823,12 @@ impl IterationHost {
         let guard = crate::shutdown::SigtermGuard::install();
         let child = spawn_child(
             &Launch {
-                program: &program_str,
+                program: &program,
                 args: &arg_refs,
                 cwd: &self.cwd,
                 env: &env,
                 guard: &guard,
-                external: executable.is_some(),
+                frozen: executable.is_none().then_some(&self.program.env),
             },
             stdin.map_or_else(std::process::Stdio::null, std::process::Stdio::from),
             std::process::Stdio::from(call_stdout),
@@ -1176,15 +1185,35 @@ fn child_streams(
     Ok((stdout, stderr, spool))
 }
 
+fn call_environment<'a>(
+    call: &'a Declared,
+    fifo: &'a str,
+    report: Option<&'a str>,
+    external: bool,
+) -> Vec<(&'a str, &'a str)> {
+    let mut env = vec![(crate::sidecar::MARKER_FIFO_ENV, fifo)];
+    let overrides = call
+        .env
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()));
+    let hotpath = report.map(hotpath_env).into_iter().flatten();
+    if external {
+        env.extend(overrides.chain(hotpath));
+    } else {
+        env.extend(hotpath.chain(overrides));
+    }
+    env
+}
+
 /// One call's child as it is launched.
 struct Launch<'a> {
-    program: &'a str,
+    program: &'a Path,
     args: &'a [&'a str],
     cwd: &'a Path,
     env: &'a [(&'a str, &'a str)],
     guard: &'a crate::shutdown::SigtermGuard,
-    /// An external program, run exactly as resolved and recorded.
-    external: bool,
+    /// A built snapshot has a cargo record. An external program inherits.
+    frozen: Option<&'a crate::launch::probed::FrozenEnv>,
 }
 
 /// Spawn a call's child in its own process group, stdout and stderr each to
@@ -1200,18 +1229,33 @@ fn spawn_child(
     let policy = crate::process::spawn::ChildPolicy::plain();
     let isolation = crate::shutdown::ChildIsolation::ProcessGroup(launch.guard);
     let cwd = Some(launch.cwd);
-    if !launch.external {
-        let mut command =
-            policy.command(launch.program, launch.args, cwd, launch.env, isolation)?;
-        command.stdin(stdin).stdout(stdout).stderr(stderr);
-        return crate::process::spawn::spawn(command, None);
+    if let Some(frozen) = launch.frozen {
+        // The reservation's orphan marker is an explicit call addition,
+        // applied before the call's own keys.
+        let env = frozen.with_additions(
+            crate::test_orphans::child_env()
+                .into_iter()
+                .chain(launch.env.iter().copied()),
+        );
+        let mut command = crate::process::spawn::ChildPolicy::full_env(
+            launch.program,
+            launch.args,
+            cwd,
+            &env,
+            isolation,
+        );
+        command.inner.stdin(stdin).stdout(stdout).stderr(stderr);
+        return crate::process::spawn::spawn_full_env(command, None);
     }
-    let mut command = policy.exact(launch.program, launch.args, cwd, launch.env, isolation)?;
+    let program = launch.program.to_str().ok_or_else(|| {
+        DevError::Refused("the resolved external program path is not UTF-8".into())
+    })?;
+    let mut command = policy.exact(program, launch.args, cwd, launch.env, isolation)?;
     command.stdin(stdin).stdout(stdout).stderr(stderr);
     crate::process::spawn::spawn_exact(command).map_err(|error| match error {
         crate::process::spawn::ExactSpawnError::Setup(error) => error,
         crate::process::spawn::ExactSpawnError::Exec(error) => DevError::Spawn {
-            program: format!("{} (execute)", launch.program),
+            program: format!("{program} (execute)"),
             error,
         },
     })

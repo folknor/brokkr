@@ -20,6 +20,8 @@
 //! committed stop, so a launch after one could never do its work, and the
 //! unwind restores state through filesystem operations, not subprocesses.
 
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -41,6 +43,14 @@ enum ChildKind {
 pub(crate) struct ChildPolicy {
     cargo: CargoProfile,
     kind: ChildKind,
+}
+
+pub(crate) type FullEnv = BTreeMap<OsString, OsString>;
+
+/// A command whose environment is supplied in full, including any brokkr
+/// variables its caller explicitly adds.
+pub(crate) struct FullEnvCommand {
+    pub(crate) inner: Command,
 }
 
 impl ChildPolicy {
@@ -153,6 +163,28 @@ impl ChildPolicy {
             .map(|inner| ExactCommand { inner })
     }
 
+    /// Clear inheritance and keep the plain child's non-environment policy.
+    pub(crate) fn full_env(
+        program: impl AsRef<OsStr>,
+        args: &[&str],
+        cwd: Option<&Path>,
+        env: &FullEnv,
+        isolation: ChildIsolation<'_>,
+    ) -> FullEnvCommand {
+        use std::os::unix::process::CommandExt as _;
+
+        let mut inner = Command::new(program);
+        inner.args(args).env_clear().envs(env);
+        if let Some(cwd) = cwd {
+            inner.current_dir(cwd);
+        }
+        if isolation.is_process_group() {
+            inner.process_group(0);
+        }
+        crate::oom::protect_child(&mut inner);
+        FullEnvCommand { inner }
+    }
+
     /// Apply capability and lifecycle policy after the caller finishes its
     /// command environment. Cargo evaluation remains in `command`.
     pub(crate) fn apply_runtime_policy(self, cmd: &mut Command) {
@@ -200,8 +232,23 @@ pub(crate) fn spawn(
     mut command: Command,
     on_spawn: Option<&dyn Fn(u32)>,
 ) -> Result<std::process::Child, DevError> {
-    let program = command.get_program().to_string_lossy().into_owned();
     stamp(&mut command);
+    spawn_command(command, on_spawn)
+}
+
+pub(crate) fn spawn_full_env(
+    mut command: FullEnvCommand,
+    on_spawn: Option<&dyn Fn(u32)>,
+) -> Result<std::process::Child, DevError> {
+    inherit_reservation(&mut command.inner);
+    spawn_command(command.inner, on_spawn)
+}
+
+fn spawn_command(
+    mut command: Command,
+    on_spawn: Option<&dyn Fn(u32)>,
+) -> Result<std::process::Child, DevError> {
+    let program = command.get_program().to_string_lossy().into_owned();
     let gate = LaunchGuard::arm(&mut command, &program)?;
     let child = command
         .spawn()
@@ -419,8 +466,8 @@ pub(crate) fn spawn_detached(
     Ok(child)
 }
 
-/// What the spawn choke point adds to every command at the last moment.
-fn stamp(command: &mut Command) {
+/// Transfer an armed reservation without changing the command environment.
+fn inherit_reservation(command: &mut Command) -> bool {
     // A reserved launch (`crate::reservations`): this child, and only this
     // one, inherits the lease, dies with its parent where the kernel allows,
     // and carries the orphan token, so a brokkr SIGKILLed under it leaves an
@@ -428,8 +475,19 @@ fn stamp(command: &mut Command) {
     if let Some(fd) = crate::reservations::take_armed(command.get_program()) {
         crate::reservations::inherit_in_child(command, fd);
         crate::shutdown::die_with_parent(command);
+        return true;
+    }
+    false
+}
+
+fn stamp(command: &mut Command) {
+    if inherit_reservation(command) {
         crate::test_orphans::stamp(command);
     }
+    stamp_launch_context(command);
+}
+
+fn stamp_launch_context(command: &mut Command) {
     if let Some(launch) = crate::lockfile::activity::launch_context(&launch_label(command)) {
         command.env(EXEC_ENV, launch.exec);
         match launch.capability {
@@ -437,6 +495,22 @@ fn stamp(command: &mut Command) {
             None => command.env_remove(crate::hold::CAPABILITY_ENV),
         };
     }
+}
+
+/// Retain all inputs of a prepared Cargo command, including policy stamps
+/// and explicit unsets, so its build and probe spawn from the same value.
+pub(crate) fn freeze_env(mut command: Command) -> FullEnv {
+    crate::hold::stamp(&mut command);
+    stamp_launch_context(&mut command);
+    let mut env: FullEnv = std::env::vars_os().collect();
+    for (name, value) in command.get_envs() {
+        if let Some(value) = value {
+            env.insert(name.to_owned(), value.to_owned());
+        } else {
+            env.remove(name);
+        }
+    }
+    env
 }
 
 /// Why [`spawn_exact`] started nothing.

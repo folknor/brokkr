@@ -117,11 +117,11 @@ Settled by spar with codex. The earlier direction below it, brokkr
 constructing the environment itself, is rejected; the reasons follow the
 design.
 
-Status: the cargo-launched class is built (`src/launch/`, documented in
-`docs/commands/run.md` "How a program is launched"). The probed class
-(benches, `serve`, `--with`) is not: `--with` still executes directly with
-no cargo launch environment. The helper already has its `--probe` and peer
-modes for it.
+Status: both launch classes are implemented in `src/launch/` and documented
+in `docs/commands/run.md` under "How a program is launched". Plain `run` and
+`run --commit` let cargo launch through the helper. Script benches, `serve`
+and both sides of `--with` probe the build recipe once and launch a
+verified snapshot with the recorded environment.
 
 ### The design
 
@@ -152,8 +152,11 @@ then time the same thing.
 both sides of `--with`). After the build, one `cargo run --message-format=json`
 of the same recipe, with `brokkr-launch --probe` as the runner, records
 cargo's full launch environment. brokkr refuses the probe if any artifact
-reports `fresh: false`, or if the executable path or digest in the probe's
-argv differs from the build it recorded. Launches then exec the snapshot
+reports `fresh: false`, if the executable path in the probe's argv is not
+the build's, or if that file's bytes, read after cargo returns, differ from
+the snapshot's. The record holds a path, not a digest, so an outside writer
+racing the probe is outside the guarantee, as for bench inputs. Launches
+then exec the snapshot
 directly, with that environment and the caller's per-call additions
 (`BROKKR_WITH_EXE`, a bench call's `env`) applied last, key by key, the loader
 variable included. That last rule is brokkr's stated contract. It claims no
@@ -179,12 +182,12 @@ program's own changes don't reach the peer; arguments are its channel.
   Residual: an `[env]` or `rustc-env` assignment to one of those names doesn't
   reach a frozen launch.
 - Preflight runs before any cargo, and refuses when brokkr can't prove the
-  probe override wins. Three configurations defeat it: an exact-target runner
-  from config or env (cargo concatenates runner arrays, so the probe can't come
-  first), `target-applies-to-host = false`, or two matching `cfg()` runners
-  (cargo's own error, which the override would mask). Plain `run` then falls
-  back to plain `cargo run`; every other form refuses. A missing nonce on the
-  handshake is a hard error, a backstop behind the preflight.
+  probe override wins. Cargo never merges `target.*.runner` values: the
+  `--config` override replaces a user's exact-target runner from a config
+  file, and brokkr runs that runner itself. The refusals and how the runner
+  is resolved are in `docs/commands/run.md` ("How a program is launched").
+  Plain `run` then falls back to plain `cargo run`; every other form refuses.
+  A missing receipt is a hard error unless cargo exited 101.
 - Runners: the cargo-launched class honors the user's runner. The probed
   class refuses one, because timing, the marker FIFO, the published PID and
   leader-exit escalation can't hold through an arbitrary wrapper.

@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::error::DevError;
+use crate::launch::probed::{self, Program};
 use crate::lockfile::RunToken;
 use crate::output;
 
@@ -58,8 +59,8 @@ const PROGRAM_SLOT: &str = "program";
 const WITH_SLOT: &str = "with";
 /// The generation directory's log: the server's and the supervisor's output.
 const LOG_FILE: &str = "log";
-/// The variable `--with` hands the program its second executable in.
-const WITH_EXE_ENV: &str = crate::runnables::WITH_EXE_ENV;
+/// A private file with the complete environment for this generation.
+const LAUNCH_ENV_FILE: &str = "launch.env";
 
 /// The default SIGTERM grace a server gets before its group is SIGKILLed.
 pub(crate) const DEFAULT_GRACE: Duration = Duration::from_secs(5);
@@ -590,10 +591,9 @@ pub(crate) struct StartRequest<'a> {
     pub(crate) cwd: &'a Path,
     /// `--name`; the target's name when absent.
     pub(crate) name: Option<&'a str>,
-    /// The program's snapshot (`brokkr build`'s store).
-    pub(crate) program: PathBuf,
-    /// The `--with` target's snapshot.
-    pub(crate) with: Option<PathBuf>,
+    /// Snapshots in the artifact store, with their validated cargo records.
+    pub(crate) program: Program,
+    pub(crate) with: Option<Program>,
     pub(crate) args: &'a [String],
     pub(crate) grace: Duration,
     pub(crate) ready: Option<&'a str>,
@@ -623,13 +623,14 @@ fn valid_name(name: &str) -> bool {
 
 /// Start a generation, replacing one of the same identity. Runs under the
 /// dispatch hold, which it needs: a generation is published only under it.
-pub(crate) fn start(req: &StartRequest<'_>) -> Result<(), DevError> {
+pub(crate) fn start(mut req: StartRequest<'_>) -> Result<(), DevError> {
     refuse_nested_start()?;
     crate::lockfile::require_hold(|| {
         DevError::Internal("a serve started without holding the brokkr lock".into())
     })?;
     let target = req
         .program
+        .path
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| DevError::Internal("the served snapshot has no file name".into()))?
@@ -660,14 +661,6 @@ pub(crate) fn start(req: &StartRequest<'_>) -> Result<(), DevError> {
     let token = RunToken::mint()
         .ok_or_else(|| DevError::Internal("no entropy for a serve token".into()))?;
     let generation = state.serve_dir().join(format!("{name}.{}", token.as_str()));
-    let program = place(&req.program, &generation.join(PROGRAM_SLOT))?;
-    let with = req
-        .with
-        .as_deref()
-        .map(|w| place(w, &generation.join(WITH_SLOT)))
-        .transpose()?;
-    let log = generation.join(LOG_FILE);
-    std::fs::write(&log, b"").map_err(io("cannot create the serve log"))?;
     let (boot_id, pid_ns, time_ns) = registry::local_scope().ok_or_else(|| {
         DevError::Refused(
             "this host's boot id or this process's PID or time namespace cannot be read, so a \
@@ -675,6 +668,10 @@ pub(crate) fn start(req: &StartRequest<'_>) -> Result<(), DevError> {
                 .into(),
         )
     })?;
+    let mut pending = UnpublishedGeneration::new(&generation)?;
+    let (program, with) = prepare_generation(&generation, &token, &mut req)?;
+    let log = generation.join(LOG_FILE);
+    std::fs::write(&log, b"").map_err(io("cannot create the serve log"))?;
     let intent = Intent {
         token: token.clone(),
         project: req.project.to_owned(),
@@ -699,6 +696,7 @@ pub(crate) fn start(req: &StartRequest<'_>) -> Result<(), DevError> {
     // rather than killing this process and leaving the supervisor running.
     let _interrupts = crate::shutdown::SigtermGuard::install();
     let flock = registry::publish(&dir, &intent).map_err(io("cannot publish the serve"))?;
+    pending.published = true;
     let spawned = spawn_supervisor(&dir, &token, &flock, &log);
     // From here the supervisor, if it was spawned, holds the flock alone.
     drop(flock);
@@ -708,7 +706,7 @@ pub(crate) fn start(req: &StartRequest<'_>) -> Result<(), DevError> {
     }
 
     match wait_started(&dir, &intent)
-        .and_then(|server| wait_ready(&dir, &intent, req).map(|()| server))
+        .and_then(|server| wait_ready(&dir, &intent, &req).map(|()| server))
     {
         Ok(server) => {
             output::serve_msg(&format!(
@@ -731,6 +729,62 @@ pub(crate) fn start(req: &StartRequest<'_>) -> Result<(), DevError> {
             Err(e)
         }
     }
+}
+
+/// Until the intent is published, the launcher owns setup and cleanup.
+struct UnpublishedGeneration<'a> {
+    path: &'a Path,
+    published: bool,
+}
+
+impl<'a> UnpublishedGeneration<'a> {
+    fn new(path: &'a Path) -> Result<Self, DevError> {
+        let parent = path.parent().ok_or_else(|| {
+            DevError::Internal("the serve generation has no parent directory".into())
+        })?;
+        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir(path)?;
+        Ok(Self {
+            path,
+            published: false,
+        })
+    }
+}
+
+impl Drop for UnpublishedGeneration<'_> {
+    fn drop(&mut self) {
+        if !self.published
+            && let Err(error) = std::fs::remove_dir_all(self.path)
+        {
+            output::warn(&format!(
+                "could not remove unpublished serve generation: {error}"
+            ));
+        }
+    }
+}
+
+fn prepare_generation(
+    generation: &Path,
+    token: &RunToken,
+    req: &mut StartRequest<'_>,
+) -> Result<(PathBuf, Option<PathBuf>), DevError> {
+    let program = place(&req.program.path, &generation.join(PROGRAM_SLOT))?;
+    // Both outlive the hold the probes ran under.
+    req.program.env.detach();
+    let mut additions = vec![(SERVE_ENV.into(), token.as_str().into())];
+    let with = if let Some(mut peer) = req.with.take() {
+        peer.path = place(&peer.path, &generation.join(WITH_SLOT))?;
+        peer.env.detach();
+        peer.env.set(SERVE_ENV, token.as_str());
+        let launcher = probed::place_peer(&peer, &probed::peer_directory(&peer.path)?)?;
+        additions.extend(probed::peer_additions(&launcher, &peer.path));
+        Some(peer.path)
+    } else {
+        None
+    };
+    let env = req.program.env.with_additions(additions);
+    probed::save_env(&generation.join(LAUNCH_ENV_FILE), &env)?;
+    Ok((program, with))
 }
 
 /// Link `exe` into `slot` (a copy where a hard link is refused), so the

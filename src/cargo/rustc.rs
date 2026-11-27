@@ -117,7 +117,26 @@ fn load_uncached(root: &Path) -> Result<RustcInfo, DevError> {
     parse_captured("rustc", &captured)
 }
 
-fn parse_captured(program: &str, captured: &output::CapturedOutput) -> Result<RustcInfo, DevError> {
+/// The `-vV` report of `chain` (the compiler last), spawned by `spawn` with
+/// its program and arguments: for a caller that must launch it its own way,
+/// such as under a complete environment. Not cached.
+pub(crate) fn query_chain(
+    chain: &[String],
+    spawn: impl FnOnce(&str, &[&str]) -> Result<output::CapturedOutput, DevError>,
+) -> Result<RustcInfo, DevError> {
+    let Some((program, prefix)) = chain.split_first() else {
+        return Err(DevError::Internal("empty compiler chain".into()));
+    };
+    let mut args: Vec<&str> = prefix.iter().map(String::as_str).collect();
+    args.push("-vV");
+    let captured = spawn(program, &args)?;
+    parse_captured(program, &captured)
+}
+
+pub(crate) fn parse_captured(
+    program: &str,
+    captured: &output::CapturedOutput,
+) -> Result<RustcInfo, DevError> {
     if !captured.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(DevError::Build(format!("{program} -vV failed: {stderr}")));

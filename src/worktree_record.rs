@@ -193,7 +193,7 @@ impl Store {
 /// read-modify-write of `worktrees.toml` both race a concurrent brokkr
 /// otherwise.
 ///
-/// Never evicts a worktree with uncommitted work. That is a correctness rule,
+/// Never evicts a worktree in the active hold or one with uncommitted work. That is a correctness rule,
 /// not a courtesy: a dirty worktree is the one place where removal destroys
 /// something unrecoverable, so it is skipped regardless of whether git would
 /// have succeeded. Any other failure is skipped too, and reported - the
@@ -235,6 +235,7 @@ pub fn enforce(
 
     let mut over = existing.len() - allowed;
     let mut skipped: Vec<String> = Vec::new();
+    let active = crate::lockfile::current_hold_tree_dirs().unwrap_or_default();
     for name in store.lru_order(&existing) {
         if over == 0 {
             break;
@@ -246,7 +247,12 @@ pub fn enforce(
             continue;
         };
 
-        if crate::worktree::is_dirty(&crate::worktree::checkout_in(git_root, slot)) {
+        let checkout = crate::worktree::checkout_in(git_root, slot);
+        if active.contains(&checkout) {
+            skipped.push(format!("{name} (in use)"));
+            continue;
+        }
+        if crate::worktree::is_dirty(&checkout) {
             skipped.push(format!("{name} (uncommitted work)"));
             continue;
         }

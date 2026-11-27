@@ -550,8 +550,10 @@ invocation. Each entry names a variable and a shell command:
 BA_SOURCE_IDENTITY = "python3 scripts/source_identity.py"
 ```
 
-Before every cargo brokkr launches, brokkr runs every command and sets its
-trimmed stdout on that cargo as the variable. The table is for a build script
+Before a cargo invocation that can run a build script, brokkr runs each
+applicable command and sets its trimmed stdout on cargo as the variable. A launch
+probe reuses the environment from its build (see How a program is launched
+in `brokkr man run`). The table is for a build script
 whose real input cargo can't watch through mtimes, such as a content-exact
 source identity. The build script declares
 `cargo::rerun-if-env-changed=NAME` instead of rerunning on every build. A
@@ -562,11 +564,11 @@ so such a build script should keep rerunning when it is absent.
 
 The rules for entries:
 
-- **Per invocation, never cached.** An edit between two cargo invocations of
-  one run changes what the second gets. Each evaluation is a point-in-time
-  reading: detecting an edit during the build itself is the command's job.
-- **What counts.** Every cargo brokkr launches itself, except invocations
-  that run no build script: `metadata`, `clean`, `tree`, `locate-project`,
+- **Per build invocation.** Each evaluation reads the inputs at that
+  point in time. An edit between builds changes what the second gets.
+  Detecting an edit during a build is the command's job.
+- **What counts.** Every cargo brokkr launches itself that may build code,
+  except a launch probe. Commands that run no build script include `metadata`, `clean`, `tree`, `locate-project`,
   `pkgid`, `version`, `help`, `fmt`, and cargo's own `--version` and
   `--help`. A cargo run by a script check, a test or a build script is
   outside it. A `brokkr check` lane that runs its prepared binaries without

@@ -89,6 +89,11 @@ them:
   nextest-lane read
 - `.brokkr/artifacts/.staging-PID-NAME`, a `brokkr build` snapshot's partial
   copy
+- `~/.brokkr/launch/plans/` and `~/.brokkr/launch/probes/` entries, a
+  launch's plan, receipt and probe record (`brokkr man run`). A probe record
+  holds the environment cargo recorded.
+- `.brokkr/artifacts/DIGEST/.brokkr-launch/`, the launcher `run --with`
+  places beside its peer's snapshot
 
 Store maintenance removes these the next time dispatch takes a fresh hold
 for a command whose spec locks, before that command does anything. Those

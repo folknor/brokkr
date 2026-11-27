@@ -96,8 +96,8 @@ path:
 - A failed captured build exits 1 after its diagnostics.
 - A rebuild that the launching `cargo run` itself fails passes cargo's code
   through, as the program's would be.
-- A launch helper that can't change directory or execute the program says
-  why and exits 1.
+- A helper failure during a cargo-launched run makes brokkr exit 1.
+- A failed probe makes `run --with` exit 1 before either program runs.
 - brokkr reports a target killed by a signal that didn't come from brokkr's
   stop, and exits 1. On Unix cargo execs the launch helper in its own place
   and the helper execs the program, or a configured runner, so brokkr sees
@@ -141,10 +141,11 @@ binaries as configured and has no feature surface (see Locked by default).
 
 ## How a program is launched
 
-Plain `run` and `run --commit` let cargo launch the program, so it gets
-exactly what cargo sets up for it under `cargo run`:
+brokkr either lets cargo launch the program or records the environment
+cargo computes for a direct launch. Plain `run` and `run --commit` let
+cargo launch the program with its full setup:
 
-- a configured `cfg()` runner
+- a configured runner
 - the dynamic library search path
 - cargo config `[env]`
 - the `CARGO_*` runtime variables and build-script `rustc-env` values
@@ -203,8 +204,29 @@ With one of them, plain `run` says so and launches with plain `cargo run`,
 which still gives the program cargo's full launch setup. `run --commit`
 refuses, naming the configuration.
 
-The receipt says only that cargo reached the helper. It doesn't prove the
-program ran. With a runner, the runner decides that.
+The receipt says only that cargo reached the helper. With a runner, the
+runner decides whether to execute the program.
+
+`run --with`, script benches and `serve` launch snapshots directly. After
+building, brokkr asks `cargo run` to invoke the helper in probe mode. The
+probe uses the build's directory, selection and environment, including
+the values already computed by `[cargo_env]`. The helper records the
+executable, working directory and full launch environment under
+`~/.brokkr/launch/probes/`, then exits. brokkr removes the record after
+use.
+
+A direct launch refuses if cargo selects a runner or if brokkr can't prove
+its probe override applies. A build that injects rustflags through
+`--config` can refuse if a configured `cfg()` runner needs those flags
+to resolve. It also refuses if the record is missing,
+any compiler artifact reports a value other than `fresh: true`, or the
+recorded executable differs from the build's file or the snapshot's bytes.
+
+The program starts with the recorded environment. brokkr replaces
+`MAKEFLAGS`, `MFLAGS` and `CARGO_MAKEFLAGS` with its own live values where
+present. Each explicit launch addition wins for its key, including an
+addition that sets the library search path. Runtime libraries remain in
+cargo's output directories. The snapshot stores only the executable.
 
 ## --commit
 
@@ -267,17 +289,18 @@ Without `--commit` you would hand-roll the A/B with a second
 `CARGO_TARGET_DIR` or a tarball of the old source, and those leftovers pile
 up in the tree, unknown to `clean`.
 
-Under `--commit`, both the captured build and the launching `cargo run` run
-in the worktree, so the commit's cargo config shapes the launch too. The
+For `run --commit` without `--with`, the captured build and the launching
+`cargo run` both run in the worktree. The commit's cargo config shapes the
+launch too. The
 launch helper then changes to the live tree before it executes the program.
 The flags mean the same as on the plain path: the profile, `--features`,
 `--all-features`, `--no-default-features` and the target name all apply.
 brokkr discovers targets in the worktree, since the commit may predate a
 target or have one the live tree dropped.
 
-Where brokkr runs what `cargo build` produced itself (`--with`, `build` and
-script benches), the executable is the one cargo reported for that package
-and target, bin or example, by name, and there must be exactly one. A build
+For direct launches and `brokkr build`, brokkr selects the executable cargo
+reported for the requested package and target, bin or example. Exactly one
+has to match. A build
 that compiles the target more than once fails rather than guess, as when
 cargo config lists several `build.target`s or an artifact dependency names
 it. Plain `run` and `--commit` leave the choice to the launching `cargo
@@ -295,11 +318,19 @@ brokkr run --with pbfhogg --with-commit a5cc1f8 \
     --with-features zlib-ng pbfhogg-verify -- all denmark
 ```
 
-Such a program can't build the other binary itself, since a locked brokkr
-beneath `run` refuses. `--with TARGET` builds `TARGET` exactly as `brokkr
-build TARGET` would, snapshot included. brokkr then builds and runs the
-program with the snapshot's absolute path in `BROKKR_WITH_EXE`. One
-invocation holds the lock across both builds and the run.
+`--with TARGET` builds and snapshots `TARGET` as `brokkr build TARGET` does.
+brokkr holds the lock across both builds, both probes and the run. The
+program receives two absolute paths:
+
+- `BROKKR_WITH_EXE` names a launcher that executes the peer snapshot with
+  its recorded environment.
+- `BROKKR_WITH_ARTIFACT` names the raw peer snapshot, for inspecting its
+  bytes or launching it with an environment you supply yourself.
+
+The peer launcher forwards its arguments and keeps the caller's working
+directory. It takes the live jobserver variables from its caller and uses
+the peer's recorded values for the rest. The launcher is available for
+the lifetime of the run.
 
 The program's own flags keep applying to the program: `--commit`,
 `--features`, `--all-features` and `--no-default-features` choose what the
@@ -311,19 +342,14 @@ without `--with`:
 - `--with-all-features`
 - `--with-no-default-features`
 
-The profile is shared: one `--debug`, `--release` or `--profile`, or the
-`[bin]` default, builds both. brokkr builds the `--with` target first and
-finishes its worktree stage before the program's build begins. Its path is
-the snapshot, so nothing the program's build does can change what it runs.
+The profile is shared. One `--debug`, `--release` or `--profile`, or the
+`[bin]` default, builds both. brokkr builds the peer first and the outer
+program second. It then probes the peer and the outer program in that
+order. Any worktree stays active through its probe.
 
-With `--with`, brokkr builds the program with `cargo build` and executes it
-directly, never through `cargo run`. `BROKKR_WITH_EXE` then reaches the
-program alone and is never a build input of the program. An `env!` or a
-build script reading it would otherwise see it on a live run and not on a
-`--commit` one. The program therefore gets none of cargo's launch
-environment, and runs from the directory you invoked `brokkr run` in. brokkr sets the variable only for execution; one
-already exported in your shell is inherited by builds like any other
-variable.
+brokkr launches the outer snapshot from the directory where you invoked
+`brokkr run`. It adds the two peer paths only to that launch. Values for
+those names that you already exported remain ordinary build inputs.
 
 ## Target discovery
 
@@ -382,8 +408,10 @@ another with `--project NAME` or `--all` (`brokkr man hygiene`).
 During `run`, brokkr forwards SIGTERM to its direct child and waits up to
 1.5 seconds for that child to exit before sending it SIGKILL:
 
-- With `--with`, the child is the program itself, so a program that handles
-  SIGTERM has that window to shut down and print its summary.
+- With `--with`, the child is the outer snapshot. A SIGTERM handler in
+  that program has the grace period to shut down and print its summary.
+  If the outer program starts the peer, the peer launcher replaces itself
+  with the peer under the same PID.
 - Plain `run` and `run --commit` launch `cargo run`, which on Unix execs the
   launch helper in its own place, and the helper execs the program, or your
   runner, in turn. The signal reaches that process. A runner must forward it

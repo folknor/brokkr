@@ -54,6 +54,14 @@ pub(crate) enum Preflight {
 /// Decide for a cargo invocation run in `build_root` with the environment
 /// `env` adds to brokkr's own.
 pub(crate) fn preflight(build_root: &Path, env: EffectiveEnv<'_>) -> Result<Preflight, DevError> {
+    preflight_with_rustflags_config(build_root, env, false)
+}
+
+pub(super) fn preflight_with_rustflags_config(
+    build_root: &Path,
+    env: EffectiveEnv<'_>,
+    inline_rustflags: bool,
+) -> Result<Preflight, DevError> {
     let files = rustflags::read_config_files_under(build_root, env)?;
     let config_env = rustflags::CargoLaunchConfig::discover(build_root, env)?.env;
     let probe = crate::target_platform::CargoProbe::new(build_root, env, &files, &config_env);
@@ -61,6 +69,9 @@ pub(crate) fn preflight(build_root: &Path, env: EffectiveEnv<'_>) -> Result<Pref
     // The cfg probe runs only when a cfg() runner needs it: it costs a
     // compiler spawn, and its flags must be readable.
     let mut facts = || -> Result<TargetFacts, String> {
+        if inline_rustflags {
+            return Err("the build injects rustflags through cargo's --config".into());
+        }
         // Cargo resolves cfg()-selected rustflags against a probe of its own
         // and probes again with them; brokkr's resolver matches them on its
         // own host facts instead, so with any it cannot claim cargo's cfg.

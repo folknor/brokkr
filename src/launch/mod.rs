@@ -8,8 +8,8 @@
 //! rustup proxy's variables, a live jobserver) and execs the helper in its
 //! place. The helper changes to the plan's directory, adds the plan's
 //! `BROKKR_*` keys, writes a receipt and execs the user's runner, if any, then
-//! the program, under the same PID. brokkr never reconstructs or replays an
-//! environment. Every reconstruction tried got a concrete case wrong.
+//! the program, under the same PID. Direct launches use cargo's recorded
+//! environment, with explicit additions (see [`probed`]).
 //!
 //! - [`helper`]: the embedded static helper and its copy on disk.
 //! - [`runner`]: the preflight that proves the runner override wins.
@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use crate::error::DevError;
 
 pub(crate) mod helper;
+pub(crate) mod probed;
 pub(crate) mod runner;
 
 /// What one launch through the helper does after cargo hands over.
@@ -31,11 +32,14 @@ pub(crate) mod runner;
 pub(crate) struct Plan {
     /// The directory the program runs in; `None` keeps cargo's.
     pub(crate) cwd: Option<PathBuf>,
-    /// `BROKKR_*` keys added over cargo's environment, never a key cargo
-    /// itself sets: adding a key cargo leaves alone needs no reconstruction.
+    /// Keys added over cargo's environment, or all the peer's frozen keys
+    /// when the plan replaces the environment.
     pub(crate) sets: Vec<(OsString, OsString)>,
     /// The user's runner argv, program first; empty when none applies.
     pub(crate) runner: Vec<OsString>,
+    /// A peer's absolute snapshot. Peer plans replace the environment and
+    /// preserve only the live jobserver variables.
+    pub(crate) peer: Option<PathBuf>,
 }
 
 /// One prepared launch: the plan on disk, where its receipt will appear, and
@@ -78,7 +82,7 @@ impl Prepared {
         let plan_path = base.join(format!("{stem}.plan"));
         // The helper's own rule: the receipt sits beside the plan.
         let receipt = base.join(format!("{stem}.plan.receipt"));
-        let config_arg = runner_config(triple, &helper, &plan_path, string)?;
+        let config_arg = runner_config(triple, &helper, "--plan", &plan_path, string)?;
         std::fs::write(&plan_path, encode(plan)?)?;
         Ok(Self {
             plan: plan_path,
@@ -106,15 +110,19 @@ impl Prepared {
 impl Drop for Prepared {
     fn drop(&mut self) {
         for path in [&self.plan, &self.receipt] {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => crate::output::warn(&format!(
-                    "could not remove launch file {}: {e}",
-                    crate::output::path(path)
-                )),
-            }
+            remove_launch_file(path);
         }
+    }
+}
+
+fn remove_launch_file(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => crate::output::warn(&format!(
+            "could not remove launch file {}: {e}",
+            crate::output::path(path)
+        )),
     }
 }
 
@@ -155,6 +163,16 @@ fn encode(plan: &Plan) -> Result<Vec<u8>, DevError> {
     if let Some(cwd) = &plan.cwd {
         push("cwd", cwd.as_os_str())?;
     }
+    if let Some(exe) = &plan.peer {
+        if !exe.is_absolute() || plan.cwd.is_some() || !plan.runner.is_empty() {
+            return Err(DevError::Internal("invalid peer launch plan".into()));
+        }
+        push("exe", exe.as_os_str())?;
+        push("env", OsStr::new("replace"))?;
+        for key in probed::JOBSERVER_KEYS {
+            push("keep", OsStr::new(key))?;
+        }
+    }
     for (key, value) in &plan.sets {
         if key.is_empty() || key.as_bytes().contains(&b'=') {
             return Err(DevError::Internal(format!(
@@ -172,12 +190,18 @@ fn encode(plan: &Plan) -> Result<Vec<u8>, DevError> {
     Ok(out)
 }
 
-/// `target.TRIPLE.runner=[HELPER, "--plan", PLAN]` as one `--config` value,
+/// `target.TRIPLE.runner=[HELPER, MODE, FILE]` as one `--config` value,
 /// or with `string` the same words as one space-separated string, which cargo
 /// splits on whitespace. TOML carries only UTF-8, so a helper or plan path
 /// that is not refuses, as does whitespace in one under the string form;
 /// both live under the per-user launch directory.
-fn runner_config(triple: &str, helper: &Path, plan: &Path, string: bool) -> Result<String, DevError> {
+fn runner_config(
+    triple: &str,
+    helper: &Path,
+    mode: &str,
+    file: &Path,
+    string: bool,
+) -> Result<String, DevError> {
     let text = |p: &Path| -> Result<String, DevError> {
         let s = p.to_str().ok_or_else(|| {
             DevError::Config(format!(
@@ -193,14 +217,14 @@ fn runner_config(triple: &str, helper: &Path, plan: &Path, string: bool) -> Resu
         }
         Ok(s.to_owned())
     };
-    let (helper, plan) = (text(helper)?, text(plan)?);
+    let (helper, file) = (text(helper)?, text(file)?);
     let value = if string {
-        toml::Value::String(format!("{helper} --plan {plan}"))
+        toml::Value::String(format!("{helper} {mode} {file}"))
     } else {
         toml::Value::Array(vec![
             toml::Value::String(helper),
-            toml::Value::String("--plan".into()),
-            toml::Value::String(plan),
+            toml::Value::String(mode.into()),
+            toml::Value::String(file),
         ])
     };
     Ok(format!("target.{triple}.runner={value}"))
@@ -217,6 +241,7 @@ mod tests {
             cwd: Some("/live tree".into()),
             sets: vec![("BROKKR_WITH_EXE".into(), "/a=b".into())],
             runner: vec!["/usr/bin/valgrind".into(), "-q".into()],
+            ..Plan::default()
         };
         let bytes = encode(&plan).unwrap();
         assert_eq!(
@@ -249,8 +274,14 @@ mod tests {
     #[test]
     fn the_runner_override_takes_the_form_it_replaces() {
         let triple = "x86_64-unknown-linux-gnu";
-        let list = runner_config(triple, Path::new("/h/brokkr-launch"), Path::new("/p/\"x\".plan"), false)
-            .unwrap();
+        let list = runner_config(
+            triple,
+            Path::new("/h/brokkr-launch"),
+            "--plan",
+            Path::new("/p/\"x\".plan"),
+            false,
+        )
+        .unwrap();
         let argv: Vec<String> = parsed(&list)
             .as_array()
             .unwrap()
@@ -259,9 +290,40 @@ mod tests {
             .collect();
         assert_eq!(argv, ["/h/brokkr-launch", "--plan", "/p/\"x\".plan"]);
 
-        let string = runner_config(triple, Path::new("/h/brokkr-launch"), Path::new("/p/x.plan"), true).unwrap();
-        assert_eq!(parsed(&string).as_str(), Some("/h/brokkr-launch --plan /p/x.plan"));
-        assert!(runner_config(triple, Path::new("/h/a b"), Path::new("/p/x.plan"), true).is_err());
+        let string = runner_config(
+            triple,
+            Path::new("/h/brokkr-launch"),
+            "--plan",
+            Path::new("/p/x.plan"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed(&string).as_str(),
+            Some("/h/brokkr-launch --plan /p/x.plan")
+        );
+        assert!(
+            runner_config(
+                triple,
+                Path::new("/h/a b"),
+                "--plan",
+                Path::new("/p/x.plan"),
+                true
+            )
+            .is_err()
+        );
+        let probe = runner_config(
+            triple,
+            Path::new("/h/brokkr-launch"),
+            "--probe",
+            Path::new("/p/out"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed(&probe).as_str(),
+            Some("/h/brokkr-launch --probe /p/out")
+        );
     }
 
     use std::os::unix::ffi::OsStringExt;

@@ -1288,15 +1288,15 @@ impl Attempt<'_> {
     /// The worktree when the attempt has a commit, then the build into
     /// `document`: the snapshot every child runs, or `None` with the
     /// document's outcome decided. The iterations run after the worktree is
-    /// released: they run the snapshot from the live project root and read
-    /// nothing of the worktree.
+    /// released: they run the snapshot from the live project root with the
+    /// environment recorded before the worktree stage ends.
     fn build_into(
         &self,
         commit: &crate::git::Commit,
         tree: &crate::tree_policy::TreePolicy,
         keep: usize,
         document: &mut store::RunDocument,
-    ) -> Option<PathBuf> {
+    ) -> Option<crate::launch::probed::Program> {
         let mut program = None;
         let worktree = crate::context::with_worktree(
             Some(&self.detection.project),
@@ -1431,7 +1431,7 @@ impl Attempt<'_> {
         build_root: &Path,
         commit: &crate::git::Commit,
         document: &mut store::RunDocument,
-    ) -> Option<PathBuf> {
+    ) -> Option<crate::launch::probed::Program> {
         let profile = self.profile();
         let features = document.build.features.clone();
         let program = match self.build(build_root, &profile, &features, document) {
@@ -1528,7 +1528,7 @@ impl Attempt<'_> {
         profile: &crate::build::RustProfile,
         features: &[String],
         document: &mut store::RunDocument,
-    ) -> Result<PathBuf, DevError> {
+    ) -> Result<crate::launch::probed::Program, DevError> {
         let config = &self.detection.config;
         let (package, target, example) = crate::runnables::resolve_build_target(
             build_root,
@@ -1545,7 +1545,7 @@ impl Attempt<'_> {
             profile: profile.clone(),
         };
         let built = match document.build.rustflags.as_mut() {
-            None => crate::build::cargo_build(&build, build_root)?,
+            None => crate::build::cargo_build_probed(&build, build_root, None)?,
             Some(recipe) => {
                 let injection =
                     crate::build::RustflagsInjection::place(build_root, &recipe.additions)?;
@@ -1559,7 +1559,7 @@ impl Attempt<'_> {
                         store::Placement::Config { args: args.clone() }
                     }
                 });
-                crate::build::cargo_build_with_rustflags(&build, build_root, &injection)?
+                crate::build::cargo_build_probed(&build, build_root, Some(&injection))?
             }
         };
         // The bytes cargo built against, read once it succeeded: a seed may
@@ -1606,9 +1606,11 @@ impl Attempt<'_> {
         let artifacts =
             crate::clean::layout::ProjectState::new(self.detection.project_root.as_path())
                 .artifacts_dir();
-        let (program, digest) = crate::runnables::snapshot_executable(&built.path, &artifacts)?;
+        let (program, digest) =
+            crate::runnables::snapshot_executable(&build_root.join(&built.path), &artifacts)?;
         document.build.artifact = Some(digest);
-        Ok(program)
+        let env = built.probe(&program)?;
+        Ok(crate::launch::probed::Program { path: program, env })
     }
 
     /// Every iteration, stopping at the first that does not complete, and
@@ -1631,7 +1633,7 @@ impl Attempt<'_> {
     /// invocation share one set of answers.
     fn iterate(
         &self,
-        program: &Path,
+        program: &crate::launch::probed::Program,
         document: &mut store::RunDocument,
         modules: &mut BTreeSet<String>,
         mut since: host::Since,

@@ -1573,9 +1573,8 @@ pub(crate) struct ProgramArgs {
     #[arg(long, value_name = "REF")]
     pub(crate) commit: Option<String>,
 
-    /// Also build this target, as `brokkr build` does, and hand the
-    /// program its path in `BROKKR_WITH_EXE`. The program is then built and
-    /// executed directly, as under `--commit`.
+    /// Also build this target. Hand the program its launcher in
+    /// `BROKKR_WITH_EXE` and its raw snapshot in `BROKKR_WITH_ARTIFACT`.
     #[arg(long, value_name = "TARGET")]
     pub(crate) with: Option<String>,
 

@@ -257,6 +257,29 @@ pub fn run_captured_observed(
     captured_without_incomplete_output(program, dc, ChildOptions::CARGO)
 }
 
+/// Capture a command with an already prepared, complete environment.
+pub(crate) fn run_captured_full_env(
+    mut command: crate::process::spawn::FullEnvCommand,
+    on_spawn: Option<&dyn Fn(u32)>,
+    isolation: ChildIsolation<'_>,
+    options: ChildOptions,
+) -> Result<CapturedOutput, DevError> {
+    let program = command.inner.get_program().to_string_lossy().into_owned();
+    let start = Instant::now();
+    crate::process::spawn::capture_stdio(&mut command.inner);
+    let child = crate::process::spawn::spawn_full_env(command, on_spawn)?;
+    let dc = collect_captured(
+        child,
+        &program,
+        start,
+        ChildLimit::Wall(Duration::MAX),
+        isolation,
+        options,
+        false,
+    )?;
+    captured_without_incomplete_output(&program, dc, options)
+}
+
 /// Run a subprocess with extra environment variables, capturing stdout and stderr.
 ///
 /// Variables are added on top of the inherited environment. A plain child;
@@ -933,6 +956,26 @@ fn run_captured_limited_unsetting(
     }
     crate::process::spawn::capture_stdio(&mut cmd);
     let child = crate::process::spawn::spawn(cmd, on_spawn)?;
+    collect_captured(
+        child,
+        program,
+        start,
+        limit,
+        isolation,
+        options,
+        allow_capture_truncation,
+    )
+}
+
+fn collect_captured(
+    child: std::process::Child,
+    program: &str,
+    start: Instant,
+    limit: ChildLimit,
+    isolation: ChildIsolation<'_>,
+    options: ChildOptions,
+    allow_capture_truncation: bool,
+) -> Result<DeadlineCapture, DevError> {
     let run = supervise_child_capped(child, program, start, limit, isolation, options, |_| None);
     let classification = verdict(&run.ending, program, &run.stderr, Exits::SUCCESS);
     match (&run.ending, classification) {
@@ -1332,6 +1375,34 @@ pub fn run_passthrough_in(
     let _guard = crate::shutdown::SigtermGuard::install();
     let policy = crate::process::spawn::ChildPolicy::from_cargo_profile(profile);
     let cmd = policy.command(program, args, dir, env, ChildIsolation::Inherit)?;
+    passthrough(label, lock, || crate::process::spawn::spawn(cmd, None))
+}
+
+pub(crate) fn run_passthrough_full_env(
+    program: &Path,
+    args: &[&str],
+    dir: &Path,
+    env: &crate::process::spawn::FullEnv,
+    lock: &crate::lockfile::LockGuard,
+) -> Result<PassthroughOutput, DevError> {
+    let _guard = crate::shutdown::SigtermGuard::install();
+    let cmd = crate::process::spawn::ChildPolicy::full_env(
+        program,
+        args,
+        Some(dir),
+        env,
+        ChildIsolation::Inherit,
+    );
+    passthrough(&program.to_string_lossy(), Some(lock), || {
+        crate::process::spawn::spawn_full_env(cmd, None)
+    })
+}
+
+fn passthrough(
+    label: &str,
+    lock: Option<&crate::lockfile::LockGuard>,
+    spawn: impl FnOnce() -> Result<std::process::Child, DevError>,
+) -> Result<PassthroughOutput, DevError> {
     // A stop that landed while the command was prepared launches nothing: the
     // supervisor would kill the child at its first poll, but not before it
     // had started doing whatever it does.
@@ -1350,7 +1421,7 @@ pub fn run_passthrough_in(
     // ctrl-C) reaches the child. The child stays in brokkr's process group -
     // not isolated - so a terminal SIGINT still hits it directly, and the guard
     // covers the `brokkr kill` case where only brokkr's PID is signalled.
-    let child = crate::process::spawn::spawn(cmd, None)?;
+    let child = spawn()?;
     // Publish the child PID into the lockfile so `brokkr kill --hard` (which
     // reads child_pid from the lock file rather than holding the Child handle)
     // can SIGKILL it, and `brokkr lock` can show it. Cleared on every exit path
@@ -1478,6 +1549,29 @@ mod tests {
 
     fn cwd() -> &'static Path {
         Path::new(".")
+    }
+
+    #[test]
+    fn a_full_environment_clears_inheritance_and_preserves_os_bytes() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let _serial = crate::test_scratch::process_global_lock();
+        let env = crate::process::spawn::FullEnv::from([(
+            "RECORDED".into(),
+            std::ffi::OsStr::from_bytes(b"value\xff").to_owned(),
+        )]);
+        let isolation = ChildIsolation::Inherit;
+        let command = crate::process::spawn::ChildPolicy::full_env(
+            "/usr/bin/env",
+            &["-0"],
+            None,
+            &env,
+            isolation,
+        );
+        let captured =
+            run_captured_full_env(command, None, isolation, ChildOptions::DEFAULT).unwrap();
+        assert!(captured.success());
+        assert_eq!(captured.stdout, b"RECORDED=value\xff\0");
     }
 
     /// An unset name is removed from what the child inherits, unless the

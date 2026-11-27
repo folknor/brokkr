@@ -3,7 +3,7 @@
 //!
 //! `cargo_build` returns the executable and the profile cargo resolved, the
 //! executable picked by [`crate::executable_artifact`] from the build's own
-//! selection. `cargo_build_with_rustflags` applies a script bench's
+//! selection. `cargo_build_probed` applies a script bench's
 //! `rustflags`: [`RustflagsInjection::place`] puts them through
 //! [`crate::rustflags::place`], refuses an uncertain placement, and builds
 //! with target and build dir both in a per-recipe `rustflags-HASH` under the
@@ -238,18 +238,17 @@ impl BuildKind {
 pub struct UnknownCargoProfile(pub String);
 
 /// The executable Cargo actually produced for a build request, together with
-/// the build settings needed to describe that artifact on a measurement row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// what describes it on a measurement row and, for a probed build, the
+/// recipe its launch probe repeats.
+#[derive(Debug)]
 pub struct BuiltArtifact {
     pub path: PathBuf,
-    pub profile: RustProfile,
-    /// Explicit feature requests passed to this Cargo invocation.
-    pub features: Vec<String>,
     /// Cargo target name reported with the executable artifact.
     pub target: String,
     /// The features cargo resolved for the executable's unit, from its
     /// compiler-artifact record, in cargo's order.
     pub unit_features: Vec<String>,
+    probe_recipe: Option<ProbedRecipe>,
 }
 
 // ---------------------------------------------------------------------------
@@ -486,8 +485,8 @@ impl RustflagsInjection {
                 None => Injected::Config { args: placed.args },
             }
         };
-        let base = match cargo_target_dir_override(build_root) {
-            Some(dir) => PathBuf::from(dir),
+        let base = match crate::worktree::isolated_target_dir(build_root) {
+            Some(dir) => dir,
             None => project_info(Some(build_root))?.target_dir,
         };
         Ok(Self {
@@ -521,22 +520,204 @@ fn recipe_key(additions: &[String]) -> String {
     format!("{hash:016x}")
 }
 
-/// [`cargo_build`] with a bench's `rustflags` injected and its target dir
-/// isolated.
-pub fn cargo_build_with_rustflags(
+/// Build a target that will be snapshotted and launched with a cargo probe.
+pub(crate) fn cargo_build_probed(
     config: &BuildConfig,
     project_root: &Path,
-    injection: &RustflagsInjection,
+    injection: Option<&RustflagsInjection>,
 ) -> Result<BuiltArtifact, DevError> {
     with_published_cargo(None, |publish| {
-        cargo_build_inner(
-            config,
-            project_root,
+        let recipe = BuildRecipe::new(config, project_root, injection)?.prepare_probe()?;
+        let args = recipe.build.args("build");
+        let (captured, elapsed) = recipe.build.capture(
+            &args,
+            Some(&recipe.env),
             publish,
             crate::shutdown::ChildIsolation::Inherit,
-            Some(injection),
-        )
+        )?;
+        finish_build(&captured, elapsed, config, Some(recipe))
     })
+}
+
+impl BuiltArtifact {
+    pub(crate) fn probe(
+        &self,
+        snapshot: &Path,
+    ) -> Result<crate::launch::probed::FrozenEnv, DevError> {
+        let recipe = self.probe_recipe.as_ref().ok_or_else(|| {
+            DevError::Internal("a launch probe needs the recipe of its build".into())
+        })?;
+        // Callers keep their worktree and stop guard across the build and
+        // probe, including the other build when launching a pair.
+        with_published_cargo(None, |publish| {
+            let mut args = recipe.build.args("run");
+            args.extend(recipe.probe.config_args());
+            let (captured, _) = recipe.build.capture(
+                &args,
+                Some(&recipe.env),
+                publish,
+                crate::shutdown::ChildIsolation::Inherit,
+            )?;
+            if !captured.success() {
+                dump_compiler_messages(&captured.stdout);
+                dump_build_stderr(&captured.stderr);
+                return Err(DevError::Reported("cargo launch probe failed".into()));
+            }
+            recipe.probe.finish(
+                &captured.stdout,
+                &recipe.build.root.join(&self.path),
+                snapshot,
+            )
+        })
+    }
+}
+
+/// A build and its probe share their selection, working directory and Cargo
+/// inputs. A probed build evaluates `[cargo_env]` once and retains the exact
+/// environment of the Cargo command it spawned, including unsets.
+#[derive(Debug)]
+struct BuildRecipe {
+    root: PathBuf,
+    selection: Vec<String>,
+    overrides: crate::process::spawn::FullEnv,
+    inline_rustflags: bool,
+}
+
+#[derive(Debug)]
+struct ProbedRecipe {
+    build: BuildRecipe,
+    env: crate::process::spawn::FullEnv,
+    probe: crate::launch::probed::Probe,
+}
+
+impl BuildRecipe {
+    fn new(
+        config: &BuildConfig,
+        root: &Path,
+        injection: Option<&RustflagsInjection>,
+    ) -> Result<Self, DevError> {
+        let mut selection = build_selection(config)?;
+        let mut overrides = crate::process::spawn::FullEnv::new();
+        let mut inline_rustflags = false;
+        if let Some(injection) = injection {
+            let dir = &injection.target_dir;
+            output::detail_or_console(&format!(
+                "bench rustflags build target dir -> {}",
+                output::path(dir)
+            ));
+            for key in ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
+                overrides.insert(key.into(), dir.as_os_str().to_owned());
+            }
+            match &injection.placement {
+                Injected::Config { args } => {
+                    inline_rustflags = !args.is_empty();
+                    selection.splice(..0, args.iter().cloned());
+                }
+                Injected::Env { key, value } => {
+                    overrides.insert(key.into(), value.into());
+                }
+                Injected::None => {}
+            }
+        } else if let Some(dir) = crate::worktree::isolated_target_dir(root) {
+            output::detail_or_console(&format!(
+                "isolating worktree build target dir -> {}",
+                output::path(&dir)
+            ));
+            overrides.insert("CARGO_TARGET_DIR".into(), dir.into_os_string());
+        }
+        Ok(Self {
+            root: root.to_owned(),
+            selection,
+            overrides,
+            inline_rustflags,
+        })
+    }
+
+    fn args(&self, verb: &str) -> Vec<String> {
+        let mut args = vec![verb.into(), "--message-format=json".into()];
+        if verb == "run" {
+            args.push("--color=never".into());
+        }
+        args.extend(self.selection.iter().cloned());
+        args
+    }
+
+    fn env_pairs(&self) -> Result<Vec<(&str, &str)>, DevError> {
+        self.overrides
+            .iter()
+            .map(|(key, value)| {
+                key.to_str().zip(value.to_str()).ok_or_else(|| {
+                    DevError::Config(format!(
+                        "the Cargo build override {key:?} needs a UTF-8 value"
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    fn prepare_probe(self) -> Result<ProbedRecipe, DevError> {
+        use crate::output::SpawnProfile;
+        use crate::process::spawn::{self, ChildPolicy};
+
+        let args = self.args("build");
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut cmd = ChildPolicy::plain_command("cargo");
+        cmd.args(&refs)
+            .current_dir(&self.root)
+            .envs(&self.overrides);
+        crate::cargo_env::apply(
+            &mut cmd,
+            SpawnProfile::Cargo { phase: None },
+            &refs,
+            Some(&self.root),
+            &self.env_pairs()?,
+        )?;
+        let env = spawn::freeze_env(cmd);
+        let probe = crate::launch::probed::Probe::prepare(&self.root, &env, self.inline_rustflags)?;
+        Ok(ProbedRecipe {
+            build: self,
+            env,
+            probe,
+        })
+    }
+
+    fn capture(
+        &self,
+        args: &[String],
+        full_env: Option<&crate::process::spawn::FullEnv>,
+        publish: &dyn Fn(u32),
+        isolation: crate::shutdown::ChildIsolation<'_>,
+    ) -> Result<(output::CapturedOutput, std::time::Duration), DevError> {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        output::build_msg(&format!("cargo {}", refs.join(" ")));
+        let start = Instant::now();
+        let captured = if let Some(env) = full_env {
+            let cmd = crate::process::spawn::ChildPolicy::full_env(
+                "cargo",
+                &refs,
+                Some(&self.root),
+                env,
+                isolation,
+            );
+            output::child::run_captured_full_env(
+                cmd,
+                Some(publish),
+                isolation,
+                output::child::ChildOptions::CARGO,
+            )?
+        } else {
+            output::run_captured_observed(
+                "cargo",
+                &refs,
+                &self.root,
+                &self.env_pairs()?,
+                Some(publish),
+                isolation,
+                output::SpawnProfile::Cargo { phase: None },
+            )?
+        };
+        Ok((captured, start.elapsed()))
+    }
 }
 
 /// Body of [`cargo_build_observed`], run once the hold is established.
@@ -546,86 +727,22 @@ fn cargo_build_locked(
     on_spawn: &dyn Fn(u32),
     isolation: crate::shutdown::ChildIsolation<'_>,
 ) -> Result<BuiltArtifact, DevError> {
-    cargo_build_inner(config, project_root, on_spawn, isolation, None)
+    let recipe = BuildRecipe::new(config, project_root, None)?;
+    let (captured, elapsed) = recipe.capture(&recipe.args("build"), None, on_spawn, isolation)?;
+    finish_build(&captured, elapsed, config, None)
 }
 
-fn cargo_build_inner(
+fn finish_build(
+    captured: &output::CapturedOutput,
+    elapsed: std::time::Duration,
     config: &BuildConfig,
-    project_root: &Path,
-    on_spawn: &dyn Fn(u32),
-    isolation: crate::shutdown::ChildIsolation<'_>,
-    injection: Option<&RustflagsInjection>,
+    probe_recipe: Option<ProbedRecipe>,
 ) -> Result<BuiltArtifact, DevError> {
-    let profile = config.profile.clone();
-    let on_spawn = Some(on_spawn);
-    let mut args = build_args(config)?;
-    if let Some(Injected::Config { args: extra }) = injection.map(|i| &i.placement) {
-        // `--config` belongs after the subcommand, as any cargo option.
-        args.splice(1..1, extra.iter().cloned());
-    }
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-
-    output::build_msg(&format!("cargo {}", arg_refs.join(" ")));
-
-    // Isolate worktree builds into their own target dir. On hosts that point
-    // every checkout at a shared cargo target dir (e.g. a parent
-    // `.cargo/config.toml` with `build.target-dir`), a `--commit` worktree
-    // build would otherwise write its artifacts and fingerprints into the SAME
-    // target the main tree reads from. Because the worktree's fingerprints
-    // post-date the main tree's source mtimes, a later main-tree build then
-    // judges everything "up to date" and re-links the stale worktree binary -
-    // benchmarking old code under the new commit's hash. Pinning
-    // `CARGO_TARGET_DIR` to a per-worktree dir keeps the two builds' target
-    // trees apart; the env var overrides any inherited `build.target-dir`.
-    // That dir sits under the live project's target, on its disk (`worktree`'s
-    // module doc).
-    let target_override = cargo_target_dir_override(project_root);
-    let mut owned: Vec<(String, String)> = Vec::new();
-    match injection {
-        Some(injection) => {
-            // The recipe's own dir, intermediates too: an inherited absolute
-            // `build.build-dir` would otherwise share fingerprints across
-            // checkouts and recipes.
-            let dir = injection.target_dir.display().to_string();
-            output::detail_or_console(&format!("bench rustflags build target dir -> {dir}"));
-            owned.push(("CARGO_TARGET_DIR".into(), dir.clone()));
-            owned.push(("CARGO_BUILD_BUILD_DIR".into(), dir));
-            if let Injected::Env { key, value } = &injection.placement {
-                owned.push((key.clone(), value.clone()));
-            }
-        }
-        None => {
-            if let Some(dir) = &target_override {
-                output::detail_or_console(&format!("isolating worktree build target dir -> {dir}"));
-                owned.push(("CARGO_TARGET_DIR".into(), dir.clone()));
-            }
-        }
-    }
-    let env: Vec<(&str, &str)> = owned
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-
-    let start = Instant::now();
-    let captured = output::run_captured_observed(
-        "cargo",
-        &arg_refs,
-        project_root,
-        &env,
-        on_spawn,
-        isolation,
-        output::SpawnProfile::Cargo { phase: None },
-    )?;
-    let elapsed = start.elapsed();
-
     if !captured.success() {
-        // Everything cargo had to say is printed here, once; the error
-        // returned is a bare label so `main` does not print it a second time.
         dump_compiler_messages(&captured.stdout);
         dump_build_stderr(&captured.stderr);
         return Err(DevError::Reported("cargo build failed".into()));
     }
-
     let executable = crate::executable_artifact::find(
         &captured.stdout,
         &crate::executable_artifact::Selector {
@@ -636,18 +753,15 @@ fn cargo_build_inner(
     )?;
     let built = BuiltArtifact {
         path: executable.path,
-        profile,
-        features: config.features.clone(),
         target: executable.target,
         unit_features: executable.features,
+        probe_recipe,
     };
-
     output::build_msg(&format!(
         "done in {} -> {}",
         output::format_duration(elapsed),
         crate::output::path(&built.path),
     ));
-
     Ok(built)
 }
 
@@ -866,8 +980,8 @@ pub fn resolve_existing_binary(
     Ok(path)
 }
 
-/// Assemble the argument list for `cargo build`.
-fn build_args(config: &BuildConfig) -> Result<Vec<String>, DevError> {
+/// The build selection shared by `cargo build` and its launch probe.
+fn build_selection(config: &BuildConfig) -> Result<Vec<String>, DevError> {
     let purpose = crate::build_purpose::Purpose::Build;
     let profile = crate::build_purpose::profile(
         purpose,
@@ -903,11 +1017,7 @@ fn build_args(config: &BuildConfig) -> Result<Vec<String>, DevError> {
         env: Vec::new(),
         build_root: None,
     });
-    let mut args = vec!["build".into()];
-    args.extend(shape.args);
-    args.push("--message-format=json".into());
-
-    Ok(args)
+    Ok(shape.args)
 }
 
 /// The bin `--no-build` means, by the selection the build would make: with
@@ -1215,6 +1325,75 @@ mod profile_tests {
         }
         // A name reserved today still decodes from a row written before.
         assert!(BuildKind::from_db("cargo:tmp").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod probe_recipe_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn build_and_probe_share_selection_and_rustflags_inputs() {
+        let root = Path::new("/build");
+        let config = BuildConfig {
+            package: Some("workspace-member".into()),
+            bin: None,
+            example: Some("sample".into()),
+            features: vec!["extra".into()],
+            all_features: false,
+            default_features: false,
+            profile: RustProfile::Release,
+        };
+        let injected = RustflagsInjection {
+            placement: Injected::Config {
+                args: vec![
+                    "--config".into(),
+                    "build.rustflags=['-Copt-level=1']".into(),
+                ],
+            },
+            target_dir: "/target/rustflags-recipe".into(),
+        };
+        let recipe = BuildRecipe::new(&config, root, Some(&injected)).unwrap();
+        let build = recipe.args("build");
+        let run = recipe.args("run");
+        assert_eq!(&build[..2], &["build", "--message-format=json"]);
+        assert_eq!(
+            &run[..3],
+            &["run", "--message-format=json", "--color=never"]
+        );
+        assert_eq!(build[2..], run[3..]);
+        assert_eq!(
+            &run[3..5],
+            &["--config", "build.rustflags=['-Copt-level=1']"]
+        );
+        assert_eq!(recipe.root, root);
+        assert!(recipe.inline_rustflags);
+        for key in ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
+            assert_eq!(
+                recipe
+                    .overrides
+                    .get(std::ffi::OsStr::new(key))
+                    .map(std::ffi::OsString::as_os_str),
+                Some(injected.target_dir.as_os_str()),
+            );
+        }
+
+        let injected = RustflagsInjection {
+            placement: Injected::Env {
+                key: "RUSTFLAGS".into(),
+                value: "-Copt-level=1".into(),
+            },
+            ..injected
+        };
+        let recipe = BuildRecipe::new(&config, root, Some(&injected)).unwrap();
+        assert!(!recipe.inline_rustflags);
+        assert!(
+            recipe
+                .env_pairs()
+                .unwrap()
+                .contains(&("RUSTFLAGS", "-Copt-level=1"))
+        );
     }
 }
 
