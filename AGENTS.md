@@ -47,6 +47,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `src/check_cmd/`, `src/test_runner/`, `src/test_cmd/`, `src/build_purpose/` - the check/test/clippy pipeline.
 - `src/config.rs`, `src/config_parts/` - config schema, composition, project sections.
 - `src/output/` - console and child-process runners; every spawn goes through `process/spawn.rs`'s `ChildPolicy`.
+- `src/launch/` - how `run` launches a program: cargo runs it through the embedded static `brokkr-launch` helper (`helper_main.rs`, compiled by `build.rs`, not a cargo target).
 - `src/lock/`, `src/hold.rs`, `src/guard.rs`, `src/stray.rs`, `src/test_orphans.rs` - the global lock, compile capability, rustc guard and reapers.
 - `src/db/`, `src/sidecar.rs` - the sidecar profiler and the read-only typed result stores; `src/bench/store/` is the per-user store of script-bench runs, served over HTTP by `src/bin/results_server/` and reached by `src/bench/remote.rs`.
 - `src/bench/` - script benches: `runner/` runs `brokkr bench NAME`, `lua.rs` is the only seam to the dellingr VM.

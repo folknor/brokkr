@@ -43,8 +43,8 @@ pub(crate) fn load(root: &Path) -> Result<Arc<RustcInfo>, DevError> {
 }
 
 /// What a compiler selection is keyed by: the directory it runs in, the
-/// program, and the env it runs under.
-type SelectedKey = (PathBuf, String, Vec<(String, String)>);
+/// command (a wrapper chain, the compiler last), and the env it runs under.
+type SelectedKey = (PathBuf, Vec<String>, Vec<(String, String)>);
 
 static SELECTED: OnceLock<Mutex<HashMap<SelectedKey, CachedLoad>>> = OnceLock::new();
 
@@ -56,9 +56,22 @@ pub(crate) fn load_selected(
     program: &str,
     env: &[(&str, &str)],
 ) -> Result<Arc<RustcInfo>, DevError> {
+    load_chain(root, &[program.to_owned()], env)
+}
+
+/// As [`load_selected`], through a wrapper chain as cargo runs it: `chain`'s
+/// first word is spawned with the rest, then `-vV`, as arguments.
+pub(crate) fn load_chain(
+    root: &Path,
+    chain: &[String],
+    env: &[(&str, &str)],
+) -> Result<Arc<RustcInfo>, DevError> {
+    let Some((program, prefix)) = chain.split_first() else {
+        return Err(DevError::Internal("empty compiler chain".into()));
+    };
     let key: SelectedKey = (
         root.to_owned(),
-        program.to_owned(),
+        chain.to_vec(),
         env.iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect(),
@@ -73,7 +86,9 @@ pub(crate) fn load_selected(
             Err(error) => Err(clone_error(error)),
         };
     }
-    let result = output::run_captured_with_env(program, &["-vV"], root, env)
+    let mut args: Vec<&str> = prefix.iter().map(String::as_str).collect();
+    args.push("-vV");
+    let result = output::run_captured_with_env(program, &args, root, env)
         .and_then(|captured| parse_captured(program, &captured))
         .map(Arc::new);
     let cached_result = match &result {

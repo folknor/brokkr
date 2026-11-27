@@ -374,6 +374,14 @@ fn furnish(git_root: &Path, slot: &Path, checkout: &Path) -> Result<(), DevError
         let dir = base.join(TARGET_SUBDIR).join(key).join(short);
         std::fs::create_dir_all(&dir)?;
         std::os::unix::fs::symlink(&dir, &target_link)?;
+    } else if let Ok(dest) = std::fs::read_link(&target_link)
+        && !target_link.is_dir()
+    {
+        // A reused slot whose isolated target dir was removed (a target-dir
+        // wipe, a cargo clean): the link dangles and cargo cannot create a
+        // directory through it. Recreate what it names, so the slot keeps its
+        // own target rather than failing every later build.
+        std::fs::create_dir_all(&dest)?;
     }
 
     let live_parent = git_root

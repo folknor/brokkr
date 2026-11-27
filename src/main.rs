@@ -49,6 +49,7 @@ mod host;
 mod hotpath_fmt;
 mod install_step;
 mod invalidate_cmd;
+mod launch;
 mod lex;
 mod litehtml;
 mod lock_cmd;

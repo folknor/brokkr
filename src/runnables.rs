@@ -45,7 +45,7 @@ struct Runnable {
     example: bool,
 }
 
-/// The profile `run --commit` builds: the CLI choice > `[bin] profile` >
+/// The profile `run --with` and `build` build: the CLI choice > `[bin] profile` >
 /// `[bin] debug` > release.
 fn resolve_profile(
     cfg: Option<&BinConfig>,
@@ -242,12 +242,21 @@ fn resolve_target<'a>(
     Ok(Some(target))
 }
 
-/// `brokkr run [NAME]`: resolve the runnable, build it with cargo's output
-/// captured, then exec `cargo run --quiet [--release] -p <pkg> --bin|--example
-/// <name> [-- <args>]`.
+/// `brokkr run [NAME]` and `brokkr run --commit REF [NAME]`: resolve the
+/// runnable in `build_root`, build it with cargo's output captured, then let
+/// cargo launch it through `brokkr-launch`, which runs it in `run_dir`
+/// (`crate::launch`).
+///
+/// `build_root` is the live tree for a plain run and the commit's worktree
+/// under `--commit`, so the commit's manifests, lockfile and `.cargo` config
+/// decide what is built and how cargo launches it; `run_dir` is where `brokkr
+/// run` was invoked, so relative paths in `args` resolve as they do for the
+/// live run it is compared against. Targets are discovered in `build_root`:
+/// the commit may predate a target, or carry one the live tree dropped.
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_run(
-    project_root: &Path,
+    build_root: &Path,
+    run_dir: &Path,
     cfg: Option<&BinConfig>,
     name: Option<&str>,
     choice: Option<crate::build::RustProfile>,
@@ -255,7 +264,7 @@ pub fn cmd_run(
     args: &[String],
     lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<(), DevError> {
-    let discovered = discover(project_root)?;
+    let discovered = discover(build_root)?;
     let Some(target) = resolve_target(&discovered, cfg, name)? else {
         return Ok(());
     };
@@ -269,8 +278,20 @@ pub fn cmd_run(
         unification: Vec::new(),
         targets: Vec::new(),
         env: Vec::new(),
-        build_root: Some(project_root),
+        build_root: Some(build_root),
     });
+    // One recipe for the build and the launch. A worktree builds into its own
+    // target dir, as `build::cargo_build` isolates it, and the launching
+    // `cargo run` must see the same dir or it would build elsewhere.
+    // The build dir is pinned beside it: an inherited absolute
+    // `build.build-dir` would otherwise share intermediates and fingerprints
+    // between the commit and the live tree.
+    let mut env = shape.env;
+    if let Some(dir) = crate::build::cargo_target_dir_override(build_root) {
+        env.retain(|(key, _)| key != "CARGO_TARGET_DIR" && key != "CARGO_BUILD_BUILD_DIR");
+        env.push(("CARGO_TARGET_DIR".into(), dir.clone()));
+        env.push(("CARGO_BUILD_BUILD_DIR".into(), dir));
+    }
     // Always name the target explicitly. `-p` alone leaves a multi-bin
     // package ambiguous, and cargo bails rather than guessing.
     let mut selection = shape.args;
@@ -278,12 +299,9 @@ pub fn cmd_run(
     selection.push(target.name.clone());
 
     // Build first with the output captured, then let a quiet `cargo run` of
-    // the same selection launch it. The run finds the units fresh, so it
-    // compiles nothing as a rule, and cargo still launches the program
-    // itself: its runner, loader paths and `[env]` apply, which a direct
-    // exec of the artifact would lose.
-    // `--color=never` keeps the captured stderr parseable whatever
-    // `CARGO_TERM_COLOR` says; colour is presentation, not a build input.
+    // the same recipe launch it. The run finds the units fresh, so it
+    // compiles nothing as a rule. `--color=never` keeps the captured stderr
+    // parseable whatever `CARGO_TERM_COLOR` says.
     let mut build_args: Vec<String> = vec!["build".into(), "--color=never".into()];
     build_args.extend(selection.iter().cloned());
     build_args.push("--message-format=json".into());
@@ -292,8 +310,8 @@ pub fn cmd_run(
     let _interrupts = crate::shutdown::SigtermGuard::install();
     crate::build::cargo_captured(
         &build_args,
-        &shape.env,
-        project_root,
+        &env,
+        build_root,
         "cargo build failed",
         crate::build::CompilerWarnings::LeaveToRun,
     )?;
@@ -301,7 +319,11 @@ pub fn cmd_run(
         return Err(DevError::Interrupted);
     }
 
+    let prepared = prepare_launch(build_root, run_dir, &env)?;
     let mut cargo_args: Vec<String> = vec!["run".into(), "--quiet".into()];
+    if let Some(prepared) = &prepared {
+        cargo_args.extend(prepared.config_args());
+    }
     cargo_args.extend(selection);
     if !args.is_empty() {
         cargo_args.push("--".into());
@@ -310,13 +332,85 @@ pub fn cmd_run(
     // The program's own exit code is the command's: cargo has nothing of its
     // own to add once the program ran, so echoing it as a brokkr error and
     // exiting 1 only lost the code.
-    let ended = run_cargo_with_env(&cargo_args, &shape.env, lock);
+    let ended = run_cargo_with_env(&cargo_args, &env, Some(build_root), lock);
     report_runtime(&target.name, &ended);
-    match ended?.0 {
+    let code = ended?.0;
+    if let Some(prepared) = &prepared {
+        check_receipt(prepared, &target.name, code)?;
+    }
+    match code {
         0 => Ok(()),
         code => Err(DevError::ExitCode(code)),
     }
 }
+
+/// The launch plan for [`cmd_run`]'s `cargo run`, or `None` for a plain run
+/// whose preflight blocked: plain cargo run still launches it correctly,
+/// cargo doing all of it in the live tree, where the program runs anyway.
+/// `--commit` refuses instead, since its program must run elsewhere.
+fn prepare_launch(
+    build_root: &Path,
+    run_dir: &Path,
+    env: &[(String, String)],
+) -> Result<Option<crate::launch::Prepared>, DevError> {
+    use crate::launch::runner::Preflight;
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    match crate::launch::runner::preflight(build_root, crate::rustflags::EffectiveEnv::new(&env_refs))? {
+        Preflight::Ready {
+            triple,
+            runner,
+            string,
+        } => {
+            // Only `--commit` changes directory: a plain run already runs
+            // where cargo does, and changing nothing keeps the executable
+            // path exactly as cargo hands it over.
+            let plan = crate::launch::Plan {
+                cwd: (build_root != run_dir).then(|| run_dir.to_path_buf()),
+                sets: Vec::new(),
+                runner,
+            };
+            crate::launch::Prepared::new(&plan, &triple, string).map(Some)
+        }
+        Preflight::Blocked(why) if build_root == run_dir => {
+            output::run_msg(&format!(
+                "{why}, so brokkr cannot place its launch helper; launching with plain cargo run"
+            ));
+            Ok(None)
+        }
+        Preflight::Blocked(why) => Err(DevError::Refused(format!(
+            "run --commit launches through cargo with brokkr's runner override, which this \
+             cargo configuration would defeat: {why}"
+        ))),
+    }
+}
+
+/// What the receipt says about a launch that ended with `code`.
+fn check_receipt(prepared: &crate::launch::Prepared, name: &str, code: i32) -> Result<(), DevError> {
+    match prepared.receipt() {
+        crate::launch::Receipt::Started => Ok(()),
+        // The helper said why on stderr; its 127 is not the program's.
+        crate::launch::Receipt::Failed => Err(DevError::Reported(format!(
+            "brokkr-launch could not start {name}"
+        ))),
+        // The helper writes its receipt before anything else, so no receipt
+        // means cargo never reached it. Cargo's own failure (a rebuild it
+        // failed, diagnostics printed) exits 101 and is passed through as on
+        // the plain path, which a bypassing program exiting 101 would also
+        // be: the code alone cannot tell them apart. Any other end means
+        // something else ran.
+        crate::launch::Receipt::Missing if code == CARGO_FAILED => Ok(()),
+        crate::launch::Receipt::Missing => Err(DevError::Internal(format!(
+            "cargo ended (exit {code}) without running {name} through brokkr-launch, so what \
+             ran and in which environment is unknown; did a cargo config change during the run?"
+        ))),
+        crate::launch::Receipt::Unreadable(e) => Err(DevError::Internal(format!(
+            "cannot read brokkr-launch's receipt for {name}: {e}"
+        ))),
+    }
+}
+
+/// The exit status cargo itself ends with on a failure of its own.
+const CARGO_FAILED: i32 = 101;
 
 /// `[run] NAME finished after X (exit CODE)` on stderr once a launched run
 /// ends with a code: the supervisor's time from the launch to the end, the
@@ -336,27 +430,16 @@ fn report_runtime(name: &str, ended: &Result<(i32, std::time::Duration), DevErro
     }
 }
 
-/// `brokkr run --commit REF [NAME]`: build the target in the commit's
-/// worktree, then run it from `run_dir` - the directory `brokkr run` was
-/// invoked from.
+/// `brokkr run --with TARGET [--commit REF] [NAME]`: build the program in
+/// `worktree` (the commit's, or the live tree), then execute the artifact
+/// directly from `run_dir`, the directory `brokkr run` was invoked from.
 ///
-/// Building and running are split here, unlike [`cmd_run`]'s single `cargo
-/// run`, because the two must happen in different trees. The build belongs in
-/// the worktree, so the commit's own manifests, lockfile and `.cargo` config
-/// decide what gets compiled, into the worktree's own `target/`
-/// ([`crate::build::cargo_build`] isolates it). The program belongs in the live
-/// tree, so relative paths in `args` and any cache or data the program reads
-/// relative to its working directory resolve exactly as they do for a plain
-/// `brokkr run`. An A/B pair - `run --commit A NAME -- ARGS` against `run NAME
-/// -- ARGS` - then varies the code and nothing else, with no hand-made target
-/// dirs or source copies.
+/// Executed directly rather than through cargo so that `env`, the `--with`
+/// path, reaches the program alone and never cargo or a build script. The
+/// program therefore gets none of cargo's launch environment.
 ///
-/// Targets are discovered in the worktree: the commit may predate a target, or
+/// Targets are discovered in `worktree`: the commit may predate a target, or
 /// carry one the live tree has since dropped.
-///
-/// `run --with` takes this shape for the live tree too (`worktree` is then
-/// the build root), so `env` - the `--with` path - reaches the program alone
-/// and never cargo or a build script, whichever tree the program came from.
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_run_built(
     worktree: &Path,
@@ -836,13 +919,15 @@ pub(crate) fn run_cargo(
     args: &[String],
     lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<i32, DevError> {
-    run_cargo_with_env(args, &[], lock).map(|(code, _)| code)
+    run_cargo_with_env(args, &[], None, lock).map(|(code, _)| code)
 }
 
-/// The exit code, and the elapsed time from cargo's launch to its end.
+/// The exit code, and the elapsed time from cargo's launch to its end. `cwd`
+/// is where cargo runs, which picks its config chain; `None` keeps brokkr's.
 fn run_cargo_with_env(
     args: &[String],
     env: &[(String, String)],
+    cwd: Option<&Path>,
     lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<(i32, std::time::Duration), DevError> {
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -850,7 +935,7 @@ fn run_cargo_with_env(
     let out = output::run_passthrough_in(
         "cargo",
         &arg_refs,
-        None,
+        cwd,
         &env_refs,
         output::SpawnProfile::Cargo { phase: None },
         lock,

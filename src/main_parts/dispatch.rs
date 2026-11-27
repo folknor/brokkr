@@ -197,7 +197,7 @@ pub(super) fn run(
             args,
         }) => run_program(
             name.as_deref(),
-            profile_choice(program.debug, program.release, program.profile.as_ref()),
+            profile_choice(program.debug, program.release, program.profile.as_ref()).as_ref(),
             &program_features(program),
             program.commit.as_deref(),
             with_target(program).as_ref(),

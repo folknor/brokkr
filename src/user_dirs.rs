@@ -39,6 +39,13 @@ pub(crate) fn cell_cursor_at(home: Option<&Path>) -> Option<PathBuf> {
     paths::brokkr_state_dir_at(home).map(|dir| dir.join("bench-cell.json"))
 }
 
+/// The launch helper's content-addressed copies and the per-launch plan and
+/// receipt files (`crate::launch`): kept out of every source and target tree,
+/// so no build script can watch them.
+pub(crate) fn launch_dir() -> Option<PathBuf> {
+    brokkr_state_dir().map(|dir| dir.join("launch"))
+}
+
 /// Liveness files used to identify orphaned test processes.
 pub(crate) fn test_runs_dir() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("test-runs"))

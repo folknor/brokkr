@@ -14,10 +14,10 @@ None of them requires configuration. Targets come from `cargo metadata
 by name as soon as it exists. The optional `[bin]` section only resolves
 what discovery leaves ambiguous (`brokkr man config bin`).
 
-This page covers `run` and its features, `--commit` and `--with` flags,
-target discovery, the bare form, argument forwarding, stopping a run,
-`build`, `install`, the profile, the lock and toolchain, unconfigured trees
-and exit statuses.
+This page covers `run` and its features, how a program is launched, the
+`--commit` and `--with` flags, target discovery, the bare form, argument
+forwarding, stopping a run, `build`, `install`, the profile, the lock and
+toolchain, unconfigured trees and exit statuses.
 
 ## run
 
@@ -35,9 +35,13 @@ brokkr run [NAME] [--debug|--release|--profile NAME] [--features LIST]
 From the build root, the working directory, brokkr runs:
 
 ```text
-cargo run --quiet [--release|--profile NAME] -p PKG --bin|--example NAME
+cargo run --quiet --config 'target.HOST.runner=[BROKKR-LAUNCH, "--plan", PLAN]'
+  [--release|--profile NAME] -p PKG --bin|--example NAME
   [feature flags] [-- ARGS...]
 ```
+
+The `--config` argument makes brokkr's launch helper the last hop (see How a
+program is launched).
 
 brokkr always names the target rather than leaving it to `-p`. Cargo bails
 on a package with several bins instead of guessing, so naming the target
@@ -55,21 +59,14 @@ from cargo's cache, so each prints once.
 
 The run then finds every unit fresh and compiles nothing, as a rule. Cargo
 revalidates its inputs, so a file saved during the build makes it rebuild,
-and that rebuild prints cargo's quiet output, uncaptured. Launching through
-`cargo run`, rather than executing the artifact, keeps what cargo sets up
-for the program:
-
-- a configured `target.TRIPLE.runner`
-- the dynamic library search path
-- cargo config `[env]`
-- the `CARGO_*` runtime variables
+and that rebuild prints cargo's quiet output, uncaptured.
 
 When the run ends with a code, `run` prints `[run] NAME finished after X
 (exit CODE)`, in quiet mode too. The time runs from the launch to the end,
-not counting the build or the launch's preparation. On the plain path it
-times the quiet `cargo run`, so it includes cargo's freshness check and any
-rebuild that check starts, and a non-zero code there can be cargo's own.
-Under `--commit` and `--with` it times the program alone. A stop accepted
+not counting the build or the launch's preparation. On the plain path and
+under `--commit` it times the quiet `cargo run`, so it includes cargo's
+freshness check and any rebuild that check starts, and a non-zero code there
+can be cargo's own. Under `--with` it times the program alone. A stop accepted
 once the run is launched prints `[run] NAME interrupted`. A stop accepted
 during the build prints no `[run]` line, and brokkr reports a signal death
 as an error instead.
@@ -97,11 +94,14 @@ A non-zero exit from the program becomes brokkr's own exit code, with no
 path:
 
 - A failed captured build exits 1 after its diagnostics.
-- A rebuild that the plain run's `cargo run` itself fails passes cargo's
-  code through, as the program's would be.
+- A rebuild that the launching `cargo run` itself fails passes cargo's code
+  through, as the program's would be.
+- A launch helper that can't change directory or execute the program says
+  why and exits 1.
 - brokkr reports a target killed by a signal that didn't come from brokkr's
-  stop, and exits 1. On Unix cargo execs the program, or a configured
-  runner, in its own place, so brokkr sees the signal death itself.
+  stop, and exits 1. On Unix cargo execs the launch helper in its own place
+  and the helper execs the program, or a configured runner, so brokkr sees
+  the signal death itself.
 - An accepted interrupt or graceful stop exits 130.
 
 A failing `cargo install` ends with cargo's diagnostics and a one-line
@@ -138,6 +138,73 @@ invocation that produced the number.
 
 The feature flags belong to `run` and `build`. `install` ships the project's
 binaries as configured and has no feature surface (see Locked by default).
+
+## How a program is launched
+
+Plain `run` and `run --commit` let cargo launch the program, so it gets
+exactly what cargo sets up for it under `cargo run`:
+
+- a configured `cfg()` runner
+- the dynamic library search path
+- cargo config `[env]`
+- the `CARGO_*` runtime variables and build-script `rustc-env` values
+- the variables the rustup proxy adds, and a jobserver cargo inherited
+
+brokkr reconstructs none of it. It passes cargo its own runner for the
+host, `brokkr-launch`, and cargo executes that in the program's place, with
+the program's launch environment. The helper changes to the directory the
+program runs in, executes your runner if one applies and then the program,
+under the same process ID. So signals, process groups and the PID that
+`brokkr lock` reports all reach the program, or your runner, as they would
+under `cargo run`.
+
+The helper is a small static executable with no ELF interpreter, so an
+`LD_PRELOAD` or library path in the program's launch environment can't run
+inside it. brokkr carries it built in and writes it to
+`~/.brokkr/launch/helper/DIGEST/brokkr-launch` on first use. Each launch
+writes a plan file and a receipt under `~/.brokkr/launch/plans/`, outside
+every source and target tree, and removes both when it ends. The helper
+writes its receipt before anything else. A cargo that ends without one and
+exits 101 is taken as cargo's own failure, a rebuild it couldn't finish,
+and passed through. Something cargo ran in place of the helper and that
+exited 101 would look the same. Any other ending without a receipt is an
+error, since what ran, and in which environment, is then unknown.
+
+brokkr's runner is a `--config` value, cargo's highest config layer, and
+cargo never merges runner values: a higher layer replaces a lower one. So
+it replaces your own runner for the host from a cargo config file, and
+cargo prefers it over every `cfg()` runner. brokkr then resolves your
+runner, exact-target or `cfg()`, as cargo would, and the helper runs it:
+
+- the highest config layer's value wins
+- a string splits on whitespace
+- a program path is relative to the project of the file that set it
+- a bare name is found on the `PATH` of the program's launch environment
+
+The `cfg()` selectors are matched against what the compiler cargo uses
+reports for the host. brokkr asks it as cargo does: with the build's
+rustflags, through any configured rustc wrappers, and with cargo config
+`[env]` applied. It asks only when a `cfg()` runner exists.
+
+Before cargo starts, brokkr checks that its runner override is the one cargo
+will use. These configurations would defeat it, or make cargo refuse:
+
+- `CARGO_TARGET_TRIPLE_RUNNER` set for the host
+- `target-applies-to-host` in a cargo config file
+- a configured build target (`build.target`, `CARGO_BUILD_TARGET`)
+- a runner whose config layers mix a string and a list, which cargo can't
+  merge
+- two `cfg()` runners that match the host, which cargo refuses itself
+- a `cfg()` selector brokkr can't evaluate, or a `cfg()` runner when the
+  build's rustflags can't be read or are themselves chosen by a `cfg()`
+  selector
+
+With one of them, plain `run` says so and launches with plain `cargo run`,
+which still gives the program cargo's full launch setup. `run --commit`
+refuses, naming the configuration.
+
+The receipt says only that cargo reached the helper. It doesn't prove the
+program ran. With a runner, the runner decides that.
 
 ## --commit
 
@@ -200,20 +267,21 @@ Without `--commit` you would hand-roll the A/B with a second
 `CARGO_TARGET_DIR` or a tarball of the old source, and those leftovers pile
 up in the tree, unknown to `clean`.
 
-Under `--commit` the build is a `cargo build` followed by running the
-executable it produced, not a `cargo run`, since the two halves happen in
-different trees. The flags mean the same: the profile, `--features`,
+Under `--commit`, both the captured build and the launching `cargo run` run
+in the worktree, so the commit's cargo config shapes the launch too. The
+launch helper then changes to the live tree before it executes the program.
+The flags mean the same as on the plain path: the profile, `--features`,
 `--all-features`, `--no-default-features` and the target name all apply.
 brokkr discovers targets in the worktree, since the commit may predate a
-target or have one the live tree dropped. It captures the cargo build's
-output and prints it only on failure.
+target or have one the live tree dropped.
 
-The executable is the one cargo reported for that package and target, bin
-or example, by name, and there must be exactly one. A build that compiles
-the target more than once fails rather than guess, as when cargo config
-lists several `build.target`s or an artifact dependency names it. This
-holds wherever brokkr runs what `cargo build` produced: `--commit`, `--with`,
-`build` and script benches.
+Where brokkr runs what `cargo build` produced itself (`--with`, `build` and
+script benches), the executable is the one cargo reported for that package
+and target, bin or example, by name, and there must be exactly one. A build
+that compiles the target more than once fails rather than guess, as when
+cargo config lists several `build.target`s or an artifact dependency names
+it. Plain `run` and `--commit` leave the choice to the launching `cargo
+run`, as `cargo run` itself does.
 
 ## --with
 
@@ -248,13 +316,12 @@ The profile is shared: one `--debug`, `--release` or `--profile`, or the
 finishes its worktree stage before the program's build begins. Its path is
 the snapshot, so nothing the program's build does can change what it runs.
 
-With `--with`, brokkr always builds and executes the program directly, the
-shape `--commit` uses, never through `cargo run`. `BROKKR_WITH_EXE` then
-reaches the program alone and is never a build input of the program. An
-`env!` or a build script reading it would otherwise see it on a live run
-and not on a `--commit` one. The program therefore gets none of cargo's
-launch environment, as under `--commit`, and runs from the directory you
-invoked `brokkr run` in. brokkr sets the variable only for execution; one
+With `--with`, brokkr builds the program with `cargo build` and executes it
+directly, never through `cargo run`. `BROKKR_WITH_EXE` then reaches the
+program alone and is never a build input of the program. An `env!` or a
+build script reading it would otherwise see it on a live run and not on a
+`--commit` one. The program therefore gets none of cargo's launch
+environment, and runs from the directory you invoked `brokkr run` in. brokkr sets the variable only for execution; one
 already exported in your shell is inherited by builds like any other
 variable.
 
@@ -315,12 +382,12 @@ another with `--project NAME` or `--all` (`brokkr man hygiene`).
 During `run`, brokkr forwards SIGTERM to its direct child and waits up to
 1.5 seconds for that child to exit before sending it SIGKILL:
 
-- With `--commit` or `--with`, the child is the program itself, so a
-  program that handles SIGTERM has that window to shut down and print its
-  summary.
-- Plain `run` launches `cargo run`, which on Unix execs the program, or a
-  configured runner, in its own place, so the signal reaches that process.
-  A runner must forward it for the program beneath to see it.
+- With `--with`, the child is the program itself, so a program that handles
+  SIGTERM has that window to shut down and print its summary.
+- Plain `run` and `run --commit` launch `cargo run`, which on Unix execs the
+  launch helper in its own place, and the helper execs the program, or your
+  runner, in turn. The signal reaches that process. A runner must forward it
+  for the program beneath to see it.
 
 A stop observed by the last check before the spawn launches nothing; one
 that arrives after it is delivered to the launched child. Run children

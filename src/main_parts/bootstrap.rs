@@ -329,7 +329,7 @@ pub(super) fn run_wc(
 /// comes from cargo metadata, so `run` still works with no brokkr.toml at all.
 pub(super) fn run_program(
     name: Option<&str>,
-    choice: Option<crate::build::RustProfile>,
+    choice: Option<&crate::build::RustProfile>,
     feat: &runnables::FeatureArgs<'_>,
     commit: Option<&str>,
     with: Option<&WithTarget<'_>>,
@@ -342,7 +342,7 @@ pub(super) fn run_program(
     let with_exe = match with {
         Some(w) => Some(build_snapshot(
             Some(w.name),
-            choice.clone(),
+            choice.cloned(),
             &w.feat,
             w.commit,
             detection,
@@ -354,36 +354,46 @@ pub(super) fn run_program(
         .map(|p| (WITH_EXE_VAR, p.display().to_string()))
         .collect();
     let env: Vec<(&str, &str)> = with_env.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let Some(commit) = commit else {
-        let (bin_cfg, project_root) = match detection {
-            Some(d) => (d.config.bin.as_ref(), d.build_root.as_path().to_path_buf()),
-            None => (None, std::env::current_dir()?),
-        };
+    // Build in `build_root`, run in `run_dir`. Without `--with`, cargo
+    // launches the program through brokkr-launch, so the commit's own cargo
+    // config shapes the launch under `--commit` too. With `--with` it is
+    // built and executed directly, so the path is in the program's
+    // environment only, never in cargo's or a build script's.
+    let launch = |build_root: &std::path::Path,
+                  run_dir: &std::path::Path,
+                  bin_cfg: Option<&crate::config::BinConfig>|
+     -> Result<(), DevError> {
         let lock = context::reenter_command_lock()?;
         if with.is_some() {
-            // Built and executed directly, so the path is in the program's
-            // environment only, never in cargo's or a build script's.
             return runnables::cmd_run_built(
-                &project_root,
-                &project_root,
+                build_root,
+                run_dir,
                 bin_cfg,
                 name,
-                choice,
+                choice.cloned(),
                 feat,
                 args,
                 &env,
                 &lock,
             );
         }
-        return runnables::cmd_run(
-            &project_root,
+        runnables::cmd_run(
+            build_root,
+            run_dir,
             bin_cfg,
             name,
-            choice,
+            choice.cloned(),
             feat,
             args,
             Some(&lock),
-        );
+        )
+    };
+    let Some(commit) = commit else {
+        let (bin_cfg, project_root) = match detection {
+            Some(d) => (d.config.bin.as_ref(), d.build_root.as_path().to_path_buf()),
+            None => (None, std::env::current_dir()?),
+        };
+        return launch(&project_root, &project_root, bin_cfg);
     };
     // `--commit`: `crit`'s shape. The worktree is cut from the build
     // root, its bookkeeping lives under the project root, and the lock is
@@ -419,21 +429,7 @@ pub(super) fn run_program(
         false,
         &tree,
         keep,
-        |wt| {
-            let worktree = wt.as_path();
-            let lock = context::reenter_command_lock()?;
-            runnables::cmd_run_built(
-                worktree,
-                build_root.as_path(),
-                bin_cfg,
-                name,
-                choice,
-                feat,
-                args,
-                &env,
-                &lock,
-            )
-        },
+        |wt| launch(wt.as_path(), build_root.as_path(), bin_cfg),
     )
 }
 

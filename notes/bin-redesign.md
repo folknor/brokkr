@@ -64,8 +64,13 @@ that. Once brokkr sees a program name, every later token is appended to
 the program's arguments, so brokkr's own flags go before the name. A flag
 that contradicts the declaration, such as `brokkr run --profile dev corpus`,
 is refused before the build. One name means one way to build and run it,
-which is #203 with the arguments included. Still open: whether a program
-name may shadow a bin of the same name that has no entry, or is refused.
+which is #203 with the arguments included. A program name may match the name
+of a different bin in the workspace, and the entry wins. `run` warns when a
+name resolves to an entry while a bin of that name exists, naming the bin. It
+warns at resolution, not at config load, so a project's every other command
+stays quiet. `--bin NAME` skips program lookup and runs the bin raw, which
+reaches a hidden bin and also runs a declared program without its fixed
+arguments.
 
 The build often depends on the program's own subcommand, so one flat entry per
 invocation is the wrong grain. piners runs `corpus -- run|bless` as `--profile
@@ -111,6 +116,12 @@ script consumers and for `--with` alike.
 Settled by spar with codex. The earlier direction below it, brokkr
 constructing the environment itself, is rejected; the reasons follow the
 design.
+
+Status: the cargo-launched class is built (`src/launch/`, documented in
+`docs/commands/run.md` "How a program is launched"). The probed class
+(benches, `serve`, `--with`) is not: `--with` still executes directly with
+no cargo launch environment. The helper already has its `--probe` and peer
+modes for it.
 
 ### The design
 

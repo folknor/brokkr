@@ -52,6 +52,10 @@ const DECIDED_FLAGS: [&str; 2] = ["unix", "windows"];
 pub(crate) struct TargetCfg {
     values: BTreeMap<String, BTreeSet<String>>,
     flags: BTreeSet<String>,
+    /// The report came with the build's own rustflags, so it decides every
+    /// key and flag, `target_feature` included, not only what the triple
+    /// alone decides ([`TargetFacts::host`]).
+    complete: bool,
 }
 
 impl TargetCfg {
@@ -78,16 +82,13 @@ impl TargetCfg {
     /// Whether `key = "value"` holds, or `None` when the triple does not
     /// decide `key`.
     pub(crate) fn key_matches(&self, key: &str, value: &str) -> Option<bool> {
-        DECIDED_KEYS
-            .contains(&key)
+        (self.complete || DECIDED_KEYS.contains(&key))
             .then(|| self.values.get(key).is_some_and(|v| v.contains(value)))
     }
 
     /// Whether bare `name` holds, or `None` when the triple does not decide it.
     pub(crate) fn flag(&self, name: &str) -> Option<bool> {
-        DECIDED_FLAGS
-            .contains(&name)
-            .then(|| self.flags.contains(name))
+        (self.complete || DECIDED_FLAGS.contains(&name)).then(|| self.flags.contains(name))
     }
 }
 
@@ -156,6 +157,73 @@ impl TargetSpec {
     /// Whether resolving this spelling asks the host.
     pub(crate) fn is_template(&self) -> bool {
         self.0.starts_with(HOST_ARCH)
+    }
+}
+
+/// How cargo itself queries its compiler: the selected rustc behind the
+/// configured rustc wrapper (outer) and workspace wrapper (inner), with cargo
+/// config `[env]` applied (a forced entry overrides, a plain one fills a
+/// hole), in the build root. A wrapper may supply the compiler or add flags,
+/// so a direct `rustc` can answer differently from the one cargo runs.
+pub(crate) struct CargoProbe {
+    root: PathBuf,
+    chain: Vec<String>,
+    env: Vec<(String, String)>,
+}
+
+impl CargoProbe {
+    pub(crate) fn new(
+        root: &Path,
+        env: EffectiveEnv<'_>,
+        files: &[(PathBuf, toml::Table)],
+        config_env: &[crate::rustflags::ConfigEnvEntry],
+    ) -> Self {
+        let mut chain: Vec<String> = [
+            wrapper(root, env, files, &["RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER"], "rustc-wrapper"),
+            wrapper(
+                root,
+                env,
+                files,
+                &["RUSTC_WORKSPACE_WRAPPER", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"],
+                "rustc-workspace-wrapper",
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        chain.push(compiler(root, env, files));
+        let mut pairs: Vec<(String, String)> =
+            env.pairs().iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+        for entry in config_env {
+            if entry.force || !env.contains(&entry.key) {
+                pairs.retain(|(k, _)| k != &entry.key);
+                pairs.push((entry.key.clone(), entry.value.clone()));
+            }
+        }
+        Self {
+            root: root.to_path_buf(),
+            chain,
+            env: pairs,
+        }
+    }
+
+    /// The chain's stdout for `args`, or an error naming the command.
+    fn run(&self, args: &[&str]) -> Result<String, DevError> {
+        let Some((program, prefix)) = self.chain.split_first() else {
+            return Err(DevError::Internal("empty compiler chain".into()));
+        };
+        let mut all: Vec<&str> = prefix.iter().map(String::as_str).collect();
+        all.extend_from_slice(args);
+        let refs: Vec<(&str, &str)> = self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        probe(&self.root, EffectiveEnv::new(&refs), program, &all)
+    }
+
+    /// The host triple the chain reports.
+    pub(crate) fn host_triple(&self) -> Result<String, DevError> {
+        let refs: Vec<(&str, &str)> = self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        Ok(crate::cargo::rustc::load_chain(&self.root, &self.chain, &refs)?
+            .host
+            .clone())
     }
 }
 
@@ -264,6 +332,35 @@ impl TargetFacts {
     pub(crate) fn cfg(&self) -> &TargetCfg {
         &self.cfg
     }
+
+    /// The host `triple` with the cfg set cargo matches a host build's
+    /// `[target.'cfg()']` tables against, probed as cargo probes it (see
+    /// [`CargoProbe`]): `- --crate-name ___ --print=cfg` with the build's
+    /// effective `rustflags`, since flags such as `-C target-cpu` change
+    /// `target_feature`. Cargo then drops `proc_macro`.
+    pub(crate) fn host(probe: &CargoProbe, triple: &str, rustflags: &[String]) -> Result<Self, DevError> {
+        let mut args = vec!["-", "--crate-name", "___", "--print=cfg"];
+        args.extend(rustflags.iter().map(String::as_str));
+        let mut cfg = TargetCfg::parse(&probe.run(&args)?);
+        cfg.flags.remove("proc_macro");
+        cfg.complete = true;
+        Ok(Self {
+            triple: triple.to_owned(),
+            cfg,
+        })
+    }
+
+    /// Complete host facts from a triple and `rustc --print cfg` text, for
+    /// tests.
+    #[cfg(test)]
+    pub(crate) fn from_parts(triple: &str, cfg: &str) -> Self {
+        let mut cfg = TargetCfg::parse(cfg);
+        cfg.complete = true;
+        Self {
+            triple: triple.to_owned(),
+            cfg,
+        }
+    }
 }
 
 /// A tested target lane's triple, through the preflight its lanes need: the
@@ -342,6 +439,36 @@ pub(crate) fn host_libdir(root: &Path, env: EffectiveEnv<'_>) -> Result<String, 
 /// config chain, then `rustc` from `PATH`. A config path holding a `/` is
 /// taken relative to the directory containing that config's `.cargo`, as
 /// cargo does; a bare name is looked up on `PATH`.
+/// A configured rustc wrapper: the first non-empty of the `env_keys`, else
+/// `build.KEY` from the config chain, resolved as [`compiler`] resolves
+/// `build.rustc`. An empty value means none, as cargo reads it.
+fn wrapper(
+    root: &Path,
+    env: EffectiveEnv<'_>,
+    files: &[(PathBuf, toml::Table)],
+    env_keys: &[&str],
+    key: &str,
+) -> Option<String> {
+    for name in env_keys {
+        if let Some(value) = env.get_os(name).and_then(|v| v.into_string().ok()) {
+            return (!value.is_empty()).then(|| absolute_if_path(root, &value));
+        }
+    }
+    let (path, value) = files.iter().find_map(|(path, doc)| {
+        let value = doc.get("build")?.as_table()?.get(key)?.as_str()?;
+        Some((path, value.to_owned()))
+    })?;
+    if value.is_empty() {
+        return None;
+    }
+    Some(if value.contains('/') {
+        let anchor = path.parent().and_then(Path::parent).unwrap_or(root);
+        anchor.join(value).display().to_string()
+    } else {
+        value
+    })
+}
+
 fn compiler(root: &Path, env: EffectiveEnv<'_>, files: &[(PathBuf, toml::Table)]) -> String {
     for key in ["RUSTC", "CARGO_BUILD_RUSTC"] {
         if let Some(value) = env

@@ -1362,7 +1362,14 @@ pub(crate) fn effective_rustflags(build_root: &Path, env: EffectiveEnv<'_>) -> E
                 .map(str::to_owned)
                 .collect()
         } else {
-            value.split_whitespace().map(str::to_owned).collect()
+            // Cargo's split: literal spaces, each piece trimmed, empties
+            // dropped. A tab or non-breaking space inside a piece stays.
+            value
+                .split(' ')
+                .map(str::trim)
+                .filter(|f| !f.is_empty())
+                .map(str::to_owned)
+                .collect()
         };
         let source = if key == "CARGO_ENCODED_RUSTFLAGS" {
             "env:CARGO_ENCODED_RUSTFLAGS"
@@ -1684,7 +1691,7 @@ pub(crate) fn host_triple() -> Option<String> {
         .and_then(|root| host_triple_for(&root))
 }
 
-fn host_triple_for(root: &Path) -> Option<String> {
+pub(crate) fn host_triple_for(root: &Path) -> Option<String> {
     crate::cargo::rustc::load(root)
         .ok()
         .map(|info| info.host.clone())
@@ -1779,7 +1786,11 @@ fn parse_expr<'a>(s: &'a str, host: Platform<'_>) -> Option<(bool, &'a str)> {
             // idiomatic "every target" selector this module also injects into.
             "all" => args.iter().all(|a| *a),
             "any" => args.iter().any(|a| *a),
-            "not" => !args.first()?,
+            // Exactly one operand, as cargo's grammar requires.
+            "not" => match args.as_slice() {
+                [one] => !one,
+                _ => return None,
+            },
             _ => return None,
         };
         return Some((value, after));
@@ -1793,6 +1804,12 @@ fn parse_expr<'a>(s: &'a str, host: Platform<'_>) -> Option<(bool, &'a str)> {
         return Some((host.key_matches(ident, value)?, &after[1..]));
     }
 
+    // The boolean literals of cargo's cfg grammar, never flag names.
+    match ident {
+        "true" => return Some((true, rest)),
+        "false" => return Some((false, rest)),
+        _ => {}
+    }
     // Bare flag: `unix`, `windows`.
     Some((host.flag(ident)?, rest))
 }
@@ -1810,8 +1827,12 @@ fn parse_args<'a>(mut s: &'a str, host: Platform<'_>) -> Option<(Vec<bool>, &'a 
         let (value, rest) = parse_expr(s, host)?;
         args.push(value);
         s = rest.trim_start();
+        // Operands are comma-separated; two side by side are malformed, as
+        // cargo parses them, never read as a list.
         if let Some(next) = s.strip_prefix(',') {
             s = next;
+        } else if !s.starts_with(')') {
+            return None;
         }
     }
 }

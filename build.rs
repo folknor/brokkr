@@ -75,7 +75,60 @@ fn rerun_if_exists(path: &Path) {
     }
 }
 
+/// Compile `brokkr-launch` (`src/launch/helper_main.rs`) and hand its path to
+/// the crate as `BROKKR_LAUNCH_HELPER`, with the `launch_helper` cfg set.
+///
+/// It is not a cargo target. A `no_std` executable cannot link under an
+/// unwinding panic strategy, and cargo sets that per package, never per bin,
+/// while brokkr itself must keep unwinding so its `Drop` cleanups run. So it
+/// is compiled here, alone, with `-C panic=abort` and a static link with no
+/// start files and no libc. `relocation-model=static` makes rustc link a
+/// non-PIE executable, which needs none of the startup relocation that
+/// `-nostartfiles` leaves out. brokkr embeds the bytes
+/// (`crate::launch::helper`).
+///
+/// Only on the Linux targets whose syscalls the helper implements; elsewhere
+/// the cfg stays unset and brokkr refuses the launches that need it.
+fn launch_helper() {
+    println!("cargo::rustc-check-cfg=cfg(launch_helper)");
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    if os != "linux" || !matches!(arch.as_str(), "x86_64" | "aarch64") {
+        return;
+    }
+    let source = Path::new("src/launch/helper_main.rs");
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap_or_default()).join("brokkr-launch");
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let status = Command::new(rustc)
+        .args(["--edition", "2024", "--crate-type", "bin", "--crate-name", "brokkr_launch"])
+        .args(["--target", &target])
+        .args(["-C", "panic=abort", "-C", "opt-level=s", "-C", "debuginfo=0"])
+        .args(["-C", "relocation-model=static", "-C", "strip=symbols"])
+        .args(["-C", "link-arg=-nostartfiles", "-C", "link-arg=-nostdlib"])
+        .args(["-C", "link-arg=-static"])
+        .args(["-D", "warnings"])
+        .arg("-o")
+        .arg(&out)
+        .arg(source)
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            println!("cargo::error=compiling brokkr-launch ({}) failed: {s}", source.display());
+            return;
+        }
+        Err(e) => {
+            println!("cargo::error=cannot run rustc for brokkr-launch: {e}");
+            return;
+        }
+    }
+    println!("cargo::rustc-cfg=launch_helper");
+    println!("cargo::rustc-env=BROKKR_LAUNCH_HELPER={}", out.display());
+}
+
 fn main() {
+    launch_helper();
     let hash =
         capture("git", &["rev-parse", "--short=9", "HEAD"]).unwrap_or_else(|| "unknown".to_owned());
 
