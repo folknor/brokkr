@@ -772,19 +772,27 @@ fn prepare_generation(
     // Both outlive the hold the probes ran under.
     req.program.env.detach();
     let mut additions = vec![(SERVE_ENV.into(), token.as_str().into())];
-    let with = if let Some(mut peer) = req.with.take() {
+    let peer = if let Some(mut peer) = req.with.take() {
         peer.path = place(&peer.path, &generation.join(WITH_SLOT))?;
         peer.env.detach();
         peer.env.set(SERVE_ENV, token.as_str());
-        let launcher = probed::place_peer(&peer, &probed::peer_directory(&peer.path)?)?;
-        additions.extend(probed::peer_additions(&launcher, &peer.path));
-        Some(peer.path)
+        let dir = probed::peer_directory(&peer.path)?;
+        additions.extend(probed::peer_additions(
+            &probed::peer_launcher_path(&dir),
+            &peer.path,
+        ));
+        Some((peer, dir))
     } else {
         None
     };
     let env = req.program.env.with_additions(additions);
+    // The saved environment, which every start of this generation's server
+    // uses, is the peer plan's base.
+    if let Some((peer, dir)) = &peer {
+        probed::place_peer(peer, dir, &env)?;
+    }
     probed::save_env(&generation.join(LAUNCH_ENV_FILE), &env)?;
-    Ok((program, with))
+    Ok((program, peer.map(|(peer, _)| peer.path)))
 }
 
 /// Link `exe` into `slot` (a copy where a hard link is refused), so the

@@ -165,10 +165,16 @@ cargo parity for inputs cargo never saw.
 Under `--with` the order is: build the peer, build the outer program, probe
 the peer, probe the outer program, launch. No cargo runs after the last probe,
 so nothing brokkr schedules can rewrite either side's runtime paths.
-`BROKKR_WITH_EXE` names `brokkr-launch` hard-linked into the peer's snapshot
-directory. It execs the peer with exactly the frozen environment. The outer
-program's own changes don't reach the peer; arguments are its channel.
-`BROKKR_WITH_ARTIFACT` names the raw executable.
+`BROKKR_WITH_EXE` names a copy of `brokkr-launch` placed beside the peer's
+snapshot. Its plan carries the peer's frozen environment and, as `base`,
+the exact environment brokkr started the outer program with. It execs the
+peer with the frozen environment plus what the caller changed relative to
+`base`, jobserver keys taken live and ownership keys (hold-bound, harness,
+serve token) pinned to the record. The first design replaced the
+environment outright so a peer could not depend on its caller; consumers
+(ratatoskr's harness, pbfhogg-verify) set the peer's environment on
+purpose, so brokkr#226 turned it into this merge. `BROKKR_WITH_ARTIFACT`
+names the raw executable.
 
 **Shared rules:**
 

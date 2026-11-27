@@ -480,6 +480,8 @@ pub(crate) fn cmd_run_built(
     let env = outer
         .env
         .with_additions(peer_additions(&launcher.path, &peer.path));
+    // The same map the outer program starts with is the peer plan's base.
+    launcher.install(&peer, &env)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let ended =
         output::child::run_passthrough_full_env(&outer.path, &arg_refs, run_dir, &env, lock).map(

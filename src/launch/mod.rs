@@ -33,14 +33,29 @@ pub(crate) struct Plan {
     /// The directory the program runs in; `None` keeps cargo's.
     pub(crate) cwd: Option<PathBuf>,
     /// Keys added over cargo's environment, or all the peer's frozen keys
-    /// when the plan replaces the environment.
+    /// for a peer plan.
     pub(crate) sets: Vec<(OsString, OsString)>,
     /// The user's runner argv, program first; empty when none applies.
     pub(crate) runner: Vec<OsString>,
-    /// A peer's absolute snapshot. Peer plans replace the environment and
-    /// preserve only the live jobserver variables.
-    pub(crate) peer: Option<PathBuf>,
+    /// A `--with` peer launcher's plan.
+    pub(crate) peer: Option<PeerPlan>,
 }
+
+/// A peer launch merges: the peer's record (`sets`), overlaid with what its
+/// caller changed relative to `base`, the exact environment brokkr started
+/// the outer program with. The live jobserver keys are kept as the caller
+/// has them and [`probed::pinned_keys`] as the record has them.
+#[derive(Debug)]
+pub(crate) struct PeerPlan {
+    /// The peer's absolute snapshot.
+    pub(crate) exe: PathBuf,
+    pub(crate) base: Vec<(OsString, OsString)>,
+}
+
+/// The largest plan the helper reads (`PLAN_MAX` in `helper_main.rs`):
+/// room for two environments each at Linux's 6 MiB exec ceiling, plus
+/// the plan's own paths and tags.
+const PLAN_MAX: usize = 12 * 1024 * 1024 + 64 * 1024;
 
 /// One prepared launch: the plan on disk, where its receipt will appear, and
 /// the `--config` argument that makes cargo run the helper. Both files are
@@ -141,8 +156,9 @@ fn unique() -> String {
 /// non-UTF-8 path or value survives; a NUL inside one cannot be expressed and
 /// refuses.
 fn encode(plan: &Plan) -> Result<Vec<u8>, DevError> {
-    for (i, (key, _)) in plan.sets.iter().enumerate() {
-        if plan.sets[..i].iter().any(|(prev, _)| prev == key) {
+    let mut seen = std::collections::HashSet::new();
+    for (key, _) in &plan.sets {
+        if !seen.insert(key) {
             return Err(DevError::Internal(format!("launch variable {key:?} is set twice")));
         }
     }
@@ -163,29 +179,48 @@ fn encode(plan: &Plan) -> Result<Vec<u8>, DevError> {
     if let Some(cwd) = &plan.cwd {
         push("cwd", cwd.as_os_str())?;
     }
-    if let Some(exe) = &plan.peer {
-        if !exe.is_absolute() || plan.cwd.is_some() || !plan.runner.is_empty() {
-            return Err(DevError::Internal("invalid peer launch plan".into()));
-        }
-        push("exe", exe.as_os_str())?;
-        push("env", OsStr::new("replace"))?;
-        for key in probed::JOBSERVER_KEYS {
-            push("keep", OsStr::new(key))?;
-        }
-    }
-    for (key, value) in &plan.sets {
+    let entry = |key: &OsStr, value: &OsStr| -> Result<OsString, DevError> {
         if key.is_empty() || key.as_bytes().contains(&b'=') {
             return Err(DevError::Internal(format!(
                 "launch variable name {key:?} is empty or contains `=`"
             )));
         }
-        let mut entry = key.clone();
+        let mut entry = key.to_owned();
         entry.push("=");
         entry.push(value);
-        push("set", &entry)?;
+        Ok(entry)
+    };
+    if let Some(peer) = &plan.peer {
+        if !peer.exe.is_absolute() || plan.cwd.is_some() || !plan.runner.is_empty() {
+            return Err(DevError::Internal("invalid peer launch plan".into()));
+        }
+        let mut seen = std::collections::HashSet::new();
+        if !peer.base.iter().all(|(key, _)| seen.insert(key)) {
+            return Err(DevError::Internal("a peer plan's base repeats a key".into()));
+        }
+        push("exe", peer.exe.as_os_str())?;
+        push("env", OsStr::new("merge"))?;
+        for key in probed::JOBSERVER_KEYS {
+            push("keep", OsStr::new(key))?;
+        }
+        for key in probed::pinned_keys() {
+            push("pin", OsStr::new(key))?;
+        }
+        for (key, value) in &peer.base {
+            push("base", &entry(key, value)?)?;
+        }
+    }
+    for (key, value) in &plan.sets {
+        push("set", &entry(key, value)?)?;
     }
     for arg in &plan.runner {
         push("runner", arg)?;
+    }
+    if out.len() > PLAN_MAX {
+        return Err(DevError::Refused(format!(
+            "the launch plan is {} bytes, more than the launch helper reads ({PLAN_MAX})",
+            out.len()
+        )));
     }
     Ok(out)
 }

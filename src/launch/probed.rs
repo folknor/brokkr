@@ -13,6 +13,19 @@ use crate::process::spawn::FullEnv;
 use super::runner::Preflight;
 
 pub(super) const JOBSERVER_KEYS: [&str; 3] = ["MAKEFLAGS", "MFLAGS", "CARGO_MAKEFLAGS"];
+/// Attaches a process to a brokkr harness; only children brokkr attaches
+/// explicitly carry it (`main_parts/bootstrap.rs`).
+pub(crate) const HARNESS_ARTEFACT_DIR_ENV: &str = "BROKKR_HARNESS_ARTEFACT_DIR";
+
+/// Keys whose value, or absence, a peer launch takes from the peer's record
+/// whatever its caller passes: they say which hold, run, harness or serve
+/// generation owns the process, which no caller may reassign.
+pub(super) fn pinned_keys() -> impl Iterator<Item = &'static str> {
+    crate::process::spawn::HOLD_BOUND_ENV
+        .iter()
+        .copied()
+        .chain([crate::serve::SERVE_ENV, HARNESS_ARTEFACT_DIR_ENV])
+}
 const PROBE_MAGIC: &[u8] = b"brokkr-launch-probe-v1\0";
 const ENV_MAGIC: &[u8] = b"brokkr-launch-env-v1\0";
 
@@ -29,12 +42,15 @@ impl FrozenEnv {
     }
 
     /// For a process that outlives the hold (a `brokkr serve` server and its
-    /// peer): drop every variable that ties a process to a hold, a run or a
-    /// sidecar. The probe ran under the hold and recorded its capability, and
+    /// peer): drop every variable that ties a process to a hold, a run, a
+    /// sidecar or a harness. The probe ran under the hold and recorded its capability, and
     /// a detached server that kept it could compile under a hold that is not
     /// its own; the same rule `spawn_detached` applies to the supervisor.
     pub(crate) fn detach(&mut self) {
-        for key in crate::process::spawn::HOLD_BOUND_ENV {
+        for key in crate::process::spawn::HOLD_BOUND_ENV
+            .iter()
+            .chain(&[HARNESS_ARTEFACT_DIR_ENV])
+        {
             self.0.remove(OsStr::new(key));
         }
     }
@@ -333,27 +349,41 @@ pub(crate) fn peer_additions(launcher: &Path, artifact: &Path) -> [(OsString, Os
     ]
 }
 
-fn peer_plan(snapshot: &Path, env: &FrozenEnv) -> Result<Vec<u8>, DevError> {
-    super::encode(&super::Plan {
-        peer: Some(std::path::absolute(snapshot)?),
-        sets: env
-            .0
-            .iter()
+/// `base` is the exact environment the outer program starts with: the peer
+/// launcher applies what its caller changed relative to it over the peer's
+/// own record.
+fn peer_plan(snapshot: &Path, env: &FrozenEnv, base: &FullEnv) -> Result<Vec<u8>, DevError> {
+    let pairs = |env: &FullEnv| {
+        env.iter()
             .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
+            .collect()
+    };
+    super::encode(&super::Plan {
+        peer: Some(super::PeerPlan {
+            exe: std::path::absolute(snapshot)?,
+            base: pairs(base),
+        }),
+        sets: pairs(&env.0),
         ..super::Plan::default()
     })
 }
 
-/// Install a peer in a private directory belonging to this launch.
-pub(crate) fn place_peer(program: &Program, dir: &Path) -> Result<PathBuf, DevError> {
+/// Where the peer launcher in `dir` lives, known before it is installed so
+/// the outer program's environment, which names it, can be its plan's base.
+pub(crate) fn peer_launcher_path(dir: &Path) -> PathBuf {
+    dir.join("peer")
+}
+
+/// Install a peer launcher in `dir`, a private directory belonging to this
+/// launch, at [`peer_launcher_path`]. `base` is the outer program's starting
+/// environment.
+pub(crate) fn place_peer(program: &Program, dir: &Path, base: &FullEnv) -> Result<(), DevError> {
     let helper = super::helper::path()?;
-    let plan = peer_plan(&program.path, &program.env)?;
+    let plan = peer_plan(&program.path, &program.env, base)?;
     std::fs::create_dir_all(dir)?;
-    let path = dir.join("peer");
     write_private(&dir.join("peer.brokkr-plan"), &plan)?;
-    std::fs::copy(helper, &path)?;
-    Ok(path)
+    std::fs::copy(helper, peer_launcher_path(dir))?;
+    Ok(())
 }
 
 pub(crate) fn peer_directory(snapshot: &Path) -> Result<PathBuf, DevError> {
@@ -376,17 +406,20 @@ pub(crate) struct PeerLauncher {
 }
 
 impl PeerLauncher {
+    /// Reserve the launcher's private directory; [`Self::install`] writes it.
     pub(crate) fn new(program: &Program) -> Result<Self, DevError> {
         let base = peer_directory(&program.path)?;
         std::fs::create_dir_all(&base)?;
         let dir = base.join(format!("{}-{}", std::process::id(), super::unique()));
         std::fs::create_dir(&dir)?;
-        let mut launcher = Self {
-            dir,
-            path: PathBuf::new(),
-        };
-        launcher.path = place_peer(program, &launcher.dir)?;
-        Ok(launcher)
+        let path = peer_launcher_path(&dir);
+        Ok(Self { dir, path })
+    }
+
+    /// Write the plan and the launcher, `base` being the outer program's
+    /// exact starting environment.
+    pub(crate) fn install(&self, program: &Program, base: &FullEnv) -> Result<(), DevError> {
+        place_peer(program, &self.dir, base)
     }
 }
 
@@ -535,14 +568,90 @@ mod tests {
     }
 
     #[test]
-    fn peer_plan_replaces_environment_and_keeps_cwd_and_live_jobserver() {
+    fn peer_plan_merges_over_the_outer_base_keeping_jobserver_and_pinning_ownership() {
         let frozen = FrozenEnv(FullEnv::from([(
             "NATIVE".into(),
             OsString::from_vec(vec![0xff]),
         )]));
+        let base = FullEnv::from([("OUTER".into(), "o".into())]);
+        let mut expected = b"brokkr-launch-plan-v1\0exe\0/snapshot/peer\0env\0merge\0\
+            keep\0MAKEFLAGS\0keep\0MFLAGS\0keep\0CARGO_MAKEFLAGS\0"
+            .to_vec();
+        for key in pinned_keys() {
+            expected.extend_from_slice(b"pin\0");
+            expected.extend_from_slice(key.as_bytes());
+            expected.push(0);
+        }
+        expected.extend_from_slice(b"base\0OUTER=o\0set\0NATIVE=\xff\0");
         assert_eq!(
-            peer_plan(Path::new("/snapshot/peer"), &frozen).unwrap(),
-            b"brokkr-launch-plan-v1\0exe\0/snapshot/peer\0env\0replace\0keep\0MAKEFLAGS\0keep\0MFLAGS\0keep\0CARGO_MAKEFLAGS\0set\0NATIVE=\xff\0"
+            peer_plan(Path::new("/snapshot/peer"), &frozen, &base).unwrap(),
+            expected
+        );
+    }
+
+    /// The real helper in peer mode, launching `env` to print what it got:
+    /// the caller's changes over the outer base win, untouched keys fall to
+    /// the peer's record, jobserver keys come from the caller and ownership
+    /// keys from the record.
+    #[cfg(launch_helper)]
+    #[test]
+    fn the_peer_launcher_applies_the_callers_changes_over_the_record() {
+        let dir = crate::test_scratch::scratch("launch", "peer-merge");
+        let pairs = |list: &[(&str, &str)]| -> FullEnv {
+            list.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect()
+        };
+        let program = Program {
+            path: "/usr/bin/env".into(),
+            env: FrozenEnv(pairs(&[
+                ("UNTOUCHED", "record"),
+                ("CHANGED", "record"),
+                ("DROPPED", "record"),
+                ("PEER_ONLY", "record"),
+                ("BROKKR_SERVE", "peer token"),
+            ])),
+        };
+        let base = pairs(&[
+            ("UNTOUCHED", "outer"),
+            ("CHANGED", "outer"),
+            ("DROPPED", "outer"),
+            ("OUTER_ONLY", "outer"),
+            ("BROKKR_SERVE", "outer token"),
+            ("MAKEFLAGS", "outer jobs"),
+            ("BROKKR_WITH_EXE", "/launcher"),
+        ]);
+        place_peer(&program, &dir, &base).unwrap();
+        let live = pairs(&[
+            ("UNTOUCHED", "outer"),
+            ("CHANGED", "caller"),
+            ("OUTER_ONLY", "outer"),
+            ("NEW", "caller"),
+            ("BROKKR_SERVE", "forged"),
+            ("BROKKR_EXEC", "forged"),
+            ("MAKEFLAGS", "live jobs"),
+            ("BROKKR_WITH_EXE", "/launcher"),
+        ]);
+        let out = std::process::Command::new(peer_launcher_path(&dir))
+            .env_clear()
+            .envs(&live)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let mut got: Vec<String> = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                "BROKKR_SERVE=peer token",
+                "CHANGED=caller",
+                "MAKEFLAGS=live jobs",
+                "NEW=caller",
+                "PEER_ONLY=record",
+                "UNTOUCHED=record",
+            ]
         );
     }
 

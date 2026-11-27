@@ -48,8 +48,9 @@ loads a library from there after a later build changed it, or after a
 
 The detached supervisor starts the server directly with the saved
 environment. It carries none of the probe's ties to the lock: no compile
-capability and no launch cohort, since the server outlives the hold it was
-started under. brokkr adds the generation's `BROKKR_SERVE` token to both the
+capability, no launch cohort and no harness artefact directory, since the
+server outlives the hold it was started under. The peer launcher's merge
+works against this saved environment (see `--with` in `brokkr man run`). brokkr adds the generation's `BROKKR_SERVE` token to both the
 server and the peer, plus the peer paths to the server when given.
 Everything after `--` goes to the server. It runs from the live build root
 with stdin closed and both output streams on the generation's log. brokkr

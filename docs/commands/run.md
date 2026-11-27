@@ -328,9 +328,30 @@ program receives two absolute paths:
   bytes or launching it with an environment you supply yourself.
 
 The peer launcher forwards its arguments and keeps the caller's working
-directory. It takes the live jobserver variables from its caller and uses
-the peer's recorded values for the rest. The launcher is available for
-the lifetime of the run.
+directory. It starts from the peer's recorded environment and applies what
+its caller changed relative to the environment brokkr started the outer
+program with:
+
+- A variable the caller added, or set to a value other than its starting
+  one, reaches the peer with the caller's value.
+- A starting variable the caller removed is absent for the peer.
+- A variable the caller left as it started has the peer's recorded value,
+  or is absent if the peer's record lacks it. So the outer program's own
+  values for its cargo variables, library search path and the two peer
+  paths reach the peer only where the caller changed them.
+
+A variable the caller set to exactly its starting value reads as
+untouched. Removing a variable only the peer's record holds is not
+expressible: launch `BROKKR_WITH_ARTIFACT` with an environment of your own
+for that. Where the caller's environment names a variable twice, the first
+entry counts, as a lookup in the caller would see it.
+
+Two kinds of variable are exempt from the merge. `MAKEFLAGS`, `MFLAGS` and
+`CARGO_MAKEFLAGS` are the caller's live values, or absent. The variables
+that tie a process to a hold, a run, a sidecar, a harness artefact
+directory or a serve generation (`BROKKR_SERVE`) always have the peer's
+recorded value, or are absent, whatever the caller passes. The launcher is
+available for the lifetime of the run.
 
 The program's own flags keep applying to the program: `--commit`,
 `--features`, `--all-features` and `--no-default-features` choose what the
