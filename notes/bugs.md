@@ -512,7 +512,7 @@ Reported by: results-server-and-stores.
 ## BUG-081 - Marker producers disagree on the tag channel
 
 Sites: `../ratatoskr/crates/app/src/harness/mod.rs`, `src/sidecar.rs`.
-Ratatoskr reserves `@` but allows `%` at the start of a marker name, which brokkr reads as the tag channel. Cross-repo.
+Ratatoskr reserves `@` but allows `%` at the start of a marker name, which brokkr reads as the tag channel. Cross-repo, filed as ratatoskr#5.
 Reported by: results-server-and-stores.
 
 ## Worktree, deps and crit
@@ -582,13 +582,13 @@ Reported by: visual-projects.
 ## BUG-092 - Litehtml layout score reports perfect matches without evidence
 
 Sites: `src/litehtml/compare.rs`, `../litehtml-rs/src/lib.rs`.
-Missing coordinates are allowed, and when both relative coordinates vanish their delta is zero. Duplicate paths collapse to the last entry. A zero denominator returns 100%, pipeline-only boxes never enter it, and missing non-inline boxes lower the score without reaching `offenders.txt`. Equal-severity offenders take hash-map order. The sibling interpolates `id` and `classes` into JSON by hand, so a quote turns a valid fixture into a parse error.
+Missing coordinates are allowed, and when both relative coordinates vanish their delta is zero. Duplicate paths collapse to the last entry. A zero denominator returns 100%, pipeline-only boxes never enter it, and missing non-inline boxes lower the score without reaching `offenders.txt`. Equal-severity offenders take hash-map order. The sibling interpolates `id` and `classes` into JSON by hand, so a quote turns a valid fixture into a parse error (filed as litehtml-rs#2).
 Reported by: visual-projects.
 
 ## BUG-093 - Sluggrs renderer metadata is parsed from log text
 
 Sites: `src/sluggrs/cmd.rs`, `../sluggrs/examples/snapshot.rs`.
-The reader takes the first line starting with `{`, parses only `adapter`, accepts an empty name and drops `backend`. The sibling interpolates JSON, so an adapter name with a quote turns a good render into `ERROR`. Only the first adapter is recorded. With no suitable GPU the sibling panics.
+The reader takes the first line starting with `{`, parses only `adapter`, accepts an empty name and drops `backend`. The sibling interpolates JSON, so an adapter name with a quote turns a good render into `ERROR`. Only the first adapter is recorded. With no suitable GPU the sibling panics. The sibling side is filed as sluggrs#4.
 Reported by: visual-projects.
 
 ## BUG-094 - Prepare and extract alter the documents they process

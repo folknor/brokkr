@@ -40,14 +40,14 @@ Reported by: host-fs-output.
 
 Sites: `src/config_parts/parser.rs`, `src/env.rs`, `src/bench/view.rs`, `../elivagar/crates/devkit/src/config.rs`, `../pbfhogg/crates/devkit/src/datasets.rs`.
 `gethostname` is cached for the whole process, failure included, with a fixed 256-byte buffer, no errno, and UTF-8 required. Host features silently become empty on failure, context bootstrap propagates the failure, and an unmatched host falls back silently in ordinary commands but warns in `env`. Elivagar reads `/proc/sys/kernel/hostname` instead, and pbfhogg requires a known host where brokkr defaults to an empty registry. `HostConfig.features` says "all builds", but the manual limits which build paths inherit features.
-Enforcement: a host adapter that reports the selected table and the reason for any fallback. Conformance fixtures for standalone consumers.
+Enforcement: a host adapter that reports the selected table and the reason for any fallback. Conformance fixtures for standalone consumers. Sibling sides filed as elivagar#15 and pbfhogg#86.
 Reported by: config-cli-startup, host-fs-output, visual-projects.
 
 ## HOST-005 - Host data paths are resolved by three readers
 
 Sites: `src/config_parts/parser.rs`, `src/bench/view.rs`, `src/bench/runner/mod.rs`, `../elivagar/crates/devkit/src/config.rs`.
 The typed resolver and the bench Lua view each pick the host section and spell `data` and `data/scratch`. The view and elivagar each default `data/tilegen`. The runner lexically folds the scratch path before opening it while the Lua view keeps the original components, so a symlink followed by `..` can reach different directories. The view also prefers the explicit namespace on a raw table, which matters when a stored view is reconstructed outside current validation. A host `target` changes the path `env` displays while Cargo and clean use Cargo's target.
-Enforcement: resolve the host and its named path roles once, with provenance, and build the Lua projection from that. A symlink fixture.
+Enforcement: resolve the host and its named path roles once, with provenance, and build the Lua projection from that. A symlink fixture. The elivagar side is filed as elivagar#15.
 Reported by: bench, config-cli-startup, visual-projects.
 
 ## HOST-006 - Startup OS inputs are captured in several places

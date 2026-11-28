@@ -223,14 +223,14 @@ Reported by: results-server-and-stores.
 
 Sites: `src/main_parts/bootstrap.rs`, `../pbfhogg/crates/cli/src/host.rs`, `../pbfhogg/crates/bench/src/host.rs`, `../pbfhogg/crates/harness/src/runner.rs`, `../nidhogg/crates/server/src/host.rs`, `../elivagar/crates/lib/src/telemetry/fifo.rs`, `../ratatoskr/crates/app/src/harness/mod.rs`.
 Brokkr exports one constant and strips inherited values at bootstrap. Pbfhogg's CLI and bench read it with `var_os` and warn on open failure, while its harness requires it. Nidhogg caches the first result, failure included, silently. Elivagar re-reads it per emission, keys its cache by path, resets its clock on open and discards write errors. Ratatoskr uses UTF-8 `var`, treats empty as absent and propagates a blocking error. Empty values, an unavailable reader or a late path change give different outcomes.
-Enforcement: one producer API with explicit required or optional policy, shared where the dependency graph allows, and a cross-project contract suite.
+Enforcement: one producer API with explicit required or optional policy, shared where the dependency graph allows, and a cross-project contract suite. Producer sides filed as pbfhogg#85, nidhogg#10, elivagar#14 and ratatoskr#5.
 Reported by: results-server-and-stores.
 
 ## STORE-030 - The FIFO grammar and clock origin are ported by hand
 
 Sites: `src/sidecar.rs`, `../pbfhogg/crates/library/src/sidecar.rs`, `../pbfhogg/crates/lib/src/debug.rs`, `../elivagar/crates/lib/src/telemetry/fifo.rs`, `../ratatoskr/crates/app/src/harness/mod.rs`, `docs/commands/measure.md`, `src/db/sidecar.rs`.
 Pbfhogg's reader and brokkr each implement the 64-byte call id, 400-byte sealing name, terminal strings, drop count and record grammar. Pbfhogg's writer has its own copy of the limits, including the 512-byte atomic write. Elivagar uses `write_all` with per-OS `O_NONBLOCK` numbers. Ratatoskr uses `writeln!` with no line budget. Brokkr samples against boot time from before spawn, while elivagar stamps `Instant` since its first successful open and ratatoskr since harness start, so startup delay and suspend shift markers, and an early shift can sit wholly inside the legal range. The 10^15 us historical heuristic is an implicit migration assumption. The tag-channel defect is in `bugs.md`.
-Enforcement: a small shared codec owning framing, names and single-write emission, shared byte fixtures, and a producer-reported clock identity.
+Enforcement: a small shared codec owning framing, names and single-write emission, shared byte fixtures, and a producer-reported clock identity. Producer sides filed as pbfhogg#85, elivagar#14 and ratatoskr#5.
 Reported by: results-server-and-stores.
 
 ## STORE-031 - The measurement-wide capture cap is per child
@@ -295,7 +295,7 @@ Reported by: visual-projects.
 
 Sites: `src/litehtml/compare.rs`, `src/litehtml/capture.js`, `../litehtml-rs/src/style.rs`, `../litehtml-rs/src/lib.rs`, `src/litehtml/db.rs`, `src/config_parts/project_config/litehtml.rs`, `src/visual/compare.rs`.
 The scorer and litehtml-rs have matching inline-tag sets today, and prepare adds `br` and `img`. The test checks the local superset by scraping JS and never runs the sibling. The DOM path delimiter, sibling indexing, JSON fields and precision are cross-process contracts. JS `Math.round` and Rust `round` disagree at negative halves, and the `0.05px` cutoff depends on Chrome's `0.1px` quantum. Width goes consistently to Chrome and the pipeline, but neither the producer's viewport nor sluggrs' output dimensions are checked, and the pixel comparator pads mismatched images into a plausible score. Viewport height, scale, fonts, media and browser build are inputs too. The `800px` historical fallback is a data-format fact.
-Enforcement: a generated schema and vocabulary, producer-to-consumer golden cases, a producer receipt with dimension validation, and migration fixtures for the fallback.
+Enforcement: a generated schema and vocabulary, producer-to-consumer golden cases, a producer receipt with dimension validation, and migration fixtures for the fallback. Producer side filed as litehtml-rs#2.
 Reported by: visual-projects.
 
 ## STORE-040 - PNG comparison amplifies resources
@@ -309,7 +309,7 @@ Reported by: visual-projects.
 
 Sites: `src/litehtml/cmd.rs`, `../litehtml-rs/src/text.rs`, `src/sluggrs/cmd.rs`, `../sluggrs/examples/snapshot.rs`.
 `prepare` reads `fixtures/Ahem.ttf` under the config root. Litehtml-rs reads it under compile-time `CARGO_MANIFEST_DIR`, skips a missing font silently and initialises fonts from the host, and the two roots diverge in the parent-config layout. The renderer is a default release build for litehtml and a hardcoded `snapshot` example for sluggrs. Optional font failures go to stderr, which is discarded on success.
-Enforcement: pass a resolved renderer and font bundle with identities, and a parent-config integration fixture.
+Enforcement: pass a resolved renderer and font bundle with identities, and a parent-config integration fixture. Sibling sides filed as litehtml-rs#2 and sluggrs#4.
 Reported by: visual-projects.
 
 ## STORE-042 - The Node runtime has spread install and launch policy
@@ -339,14 +339,14 @@ Reported by: visual-projects.
 
 Sites: `src/datasets/status.rs`, `src/bench/view.rs`, `src/clean/layout.rs`, `src/config_parts/parser.rs`, `src/config_parts/schema.rs`, `src/bench/params.rs`, `../pbfhogg/crates/devkit/src/registry.rs`, `../pbfhogg/crates/devkit/src/selection.rs`, `docs/brokkr.toml.datasets.md`.
 Inventory enumerates file kinds, the bench view walks raw TOML, and cleanup reconstructs PBF and OSC paths itself, including the `base` sentinel and an old OSC fallback. Brokkr accepts a whitespace-only file name and arbitrary OSC keys, while pbfhogg trims and needs canonical sequences. The `Bbox` invariant is split between a public parser and `FromStr`, and pbfhogg has its own with a different range policy. `path` and `xxh128` are independently optional, so a pin with no path loads and does nothing. "Under data" is only documentation. Inventory rehashes aliases, has no work budget, conflates unreadable with absent, and keeps only the first line of errors. Validation defects are in `bugs.md`.
-Enforcement: one typed registry (file, tree, sequence, bounds and pin types) used by inventory, binding, cleanup and standalone consumers, with shared config fixtures.
+Enforcement: one typed registry (file, tree, sequence, bounds and pin types) used by inventory, binding, cleanup and standalone consumers, with shared config fixtures. The devkit parser divergence is filed as pbfhogg#86.
 Reported by: visual-projects.
 
 ## STORE-046 - Dataset registration now has a different writer
 
 Sites: `docs/brokkr.toml.md`, `docs/projects/pbfhogg.md`, `../pbfhogg/crates/devkit/src/registry.rs`.
 The in-tree commands are gone, and the writer is `pbfhogg-devkit`. It reads an editable document and later atomically replaces it, without comparing the current bytes or holding a transaction, so manual edits can be lost, and a directory-sync failure after rename can report failure after the edit took effect.
-Enforcement: version-checked updates with a published or unconfirmed outcome. Cross-repo.
+Enforcement: version-checked updates with a published or unconfirmed outcome. Cross-repo, filed as pbfhogg#86. The brokkr side is the stale writer claim in `docs/brokkr.toml.md`.
 Reported by: visual-projects.
 
 ## STORE-047 - Retired project and dataset config paths
